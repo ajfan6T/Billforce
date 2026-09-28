@@ -37,12 +37,23 @@ export class Db {
   constructor(path: string) {
     this.path = path;
     this.raw = new DatabaseSync(path);
-    this.raw.exec('PRAGMA foreign_keys = ON');
-    this.raw.exec('PRAGMA busy_timeout = 5000');
-    if (path !== ':memory:') {
-      this.raw.exec('PRAGMA journal_mode = WAL');
-      // FULL survives power cuts (common for small shops) at a small cost in write speed.
-      this.raw.exec('PRAGMA synchronous = FULL');
+    try {
+      this.raw.exec('PRAGMA foreign_keys = ON');
+      this.raw.exec('PRAGMA busy_timeout = 5000');
+      if (path !== ':memory:') {
+        this.raw.exec('PRAGMA journal_mode = WAL');
+        // FULL survives power cuts (common for small shops) at a small cost in write speed.
+        this.raw.exec('PRAGMA synchronous = FULL');
+      }
+    } catch (e) {
+      // A damaged file fails here. Close the handle: on Windows an open handle keeps the file
+      // locked, and start-up recovery must be able to move the damaged file aside.
+      try {
+        this.raw.close();
+      } catch {
+        /* ignore */
+      }
+      throw e;
     }
   }
 

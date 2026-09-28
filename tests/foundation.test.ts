@@ -494,7 +494,8 @@ describe('start-up recovery when the database cannot be opened', () => {
     expect(r.businessName).toBe('Sharma General Store');
     expect(r.damagedCopy).toBe(path.join(dir, 'billforce-damaged-20260928-111500.db'));
     expect(fs.readFileSync(r.damagedCopy!)[0]).toBe(7);
-    expect(fs.existsSync(`${r.damagedCopy}-wal`)).toBe(true);
+    // SQLite may already have removed an unreadable WAL when the failed open closed its handle; any WAL
+    // that is still there moves aside with the damaged file. It must never be replayed onto the backup.
     expect(fs.existsSync(`${dbPath}-wal`)).toBe(false);
 
     const reopened = new BillforceApp({ dataDir: dir, platform: new TestPlatform(dir), version: 'test' });
@@ -554,5 +555,31 @@ describe('UI guards (lock screen, unsaved changes)', () => {
     expect(isScreenLocked()).toBe(true);
     setScreenLocked(false);
     expect(isScreenLocked()).toBe(false);
+  });
+});
+
+describe('opening a damaged database', () => {
+  it('does not leave the file open (Windows would keep it locked for recovery)', async () => {
+    const fs = await import('node:fs');
+    const os = await import('node:os');
+    const path = await import('node:path');
+    const { Db } = await import('../src/core/db/database');
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'bf-damaged-'));
+    const file = path.join(dir, 'billforce.db');
+    fs.writeFileSync(file, Buffer.alloc(8192, 7));
+    expect(() => new Db(file)).toThrow();
+    if (process.platform === 'linux') {
+      const open = fs.readdirSync('/proc/self/fd').filter((fd) => {
+        try {
+          return fs.readlinkSync(`/proc/self/fd/${fd}`).startsWith(file);
+        } catch {
+          return false;
+        }
+      });
+      expect(open).toEqual([]);
+    }
+    // Moving the damaged file aside must work straight away (it failed with EBUSY on Windows).
+    fs.renameSync(file, path.join(dir, 'moved.db'));
+    fs.rmSync(dir, { recursive: true, force: true });
   });
 });
