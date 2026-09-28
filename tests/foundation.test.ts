@@ -583,3 +583,46 @@ describe('opening a damaged database', () => {
     fs.rmSync(dir, { recursive: true, force: true });
   });
 });
+
+describe('upgrading older data files', () => {
+  it('keeps permissions the owner removed when the file has no permission tracking yet', async () => {
+    const { seedReferenceData } = await import('../src/core/seed');
+    const t = await createTestApp();
+    t.app.db.run("DELETE FROM role_permissions WHERE role = 'cashier' AND permission IN ('billing.discount', 'returns.create', 'billing.rate')");
+    t.app.db.run("DELETE FROM settings WHERE key = 'meta.known_permissions'");
+    seedReferenceData(t.app.db, '2026-09-28 10:00:00');
+    const perms = t.app.db.all<{ permission: string }>("SELECT permission FROM role_permissions WHERE role = 'cashier'").map((r) => r.permission);
+    expect(perms).not.toContain('billing.discount');
+    expect(perms).not.toContain('returns.create');
+    // Introduced together with the tracking: granted by default once.
+    expect(perms).toContain('billing.rate');
+    // Later starts keep whatever the owner decides.
+    t.app.db.run("DELETE FROM role_permissions WHERE role = 'cashier' AND permission = 'billing.rate'");
+    seedReferenceData(t.app.db, '2026-09-29 10:00:00');
+    expect(t.app.db.value<number>("SELECT COUNT(*) FROM role_permissions WHERE role = 'cashier' AND permission = 'billing.rate'")).toBe(0);
+  });
+
+  it('adds columns and indexes that early builds did not have (migration 2)', async () => {
+    const { Db } = await import('../src/core/db/database');
+    const { migrate } = await import('../src/core/db/migrate');
+    const db = new Db(':memory:');
+    migrate(db);
+    // Simulate an early build's file: drop a late column and an index, and go back to version 1.
+    db.exec('DROP INDEX idx_salaries_month');
+    db.exec('ALTER TABLE salaries DROP COLUMN print_count');
+    db.exec('DROP INDEX idx_jl_party');
+    db.exec('CREATE INDEX idx_jl_party ON journal_lines (party_type, party_id)');
+    db.exec('PRAGMA user_version = 1');
+    migrate(db);
+    expect(db.all<{ name: string }>('PRAGMA table_info(salaries)').some((c) => c.name === 'print_count')).toBe(true);
+    expect(db.value<number>("SELECT COUNT(*) FROM sqlite_master WHERE name = 'idx_salaries_month'")).toBe(1);
+    expect(db.value<string>("SELECT sql FROM sqlite_master WHERE name = 'idx_jl_party'")).toMatch(/debit/);
+    expect(db.value<number>('PRAGMA user_version')).toBe(2);
+    // Running it on a fresh file changes nothing.
+    const fresh = new Db(':memory:');
+    migrate(fresh);
+    expect(fresh.value<number>('PRAGMA user_version')).toBe(2);
+    db.close();
+    fresh.close();
+  });
+});

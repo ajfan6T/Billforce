@@ -11,7 +11,39 @@ export interface Migration {
  * Ordered list of schema migrations. Never edit a released migration; add a
  * new one instead. Each runs in its own transaction and bumps user_version.
  */
-export const MIGRATIONS: Migration[] = [{ version: 1, name: 'initial schema', up: (db) => db.exec(SCHEMA_V1) }];
+export const MIGRATIONS: Migration[] = [
+  { version: 1, name: 'initial schema', up: (db) => db.exec(SCHEMA_V1) },
+  { version: 2, name: 'bring pre-release v1 data files up to date', up: (db) => repairPreReleaseV1(db) },
+];
+
+/**
+ * Columns added to the version 1 schema while Billforce was being built (before release).
+ * Data files created by those early builds lack them; fresh files already have them.
+ */
+const LATE_V1_COLUMNS: Array<[table: string, column: string, definition: string]> = [
+  ['bills', 'bill_discount_pct', 'REAL'],
+  ['bills', 'printed_revision', 'INTEGER'],
+  ['customer_receipts', 'print_count', 'INTEGER NOT NULL DEFAULT 0'],
+  ['supplier_payments', 'print_count', 'INTEGER NOT NULL DEFAULT 0'],
+  ['employees', 'opening_entry_id', 'INTEGER REFERENCES journal_entries (id)'],
+  ['salaries', 'details', 'TEXT'],
+  ['salaries', 'print_count', 'INTEGER NOT NULL DEFAULT 0'],
+  ['salary_payments', 'cancel_reason', 'TEXT'],
+];
+
+function repairPreReleaseV1(db: Db): void {
+  for (const [table, column, definition] of LATE_V1_COLUMNS) {
+    const has = db.all<{ name: string }>(`PRAGMA table_info(${table})`).some((c) => c.name === column);
+    if (!has) db.exec(`ALTER TABLE ${table} ADD COLUMN ${column} ${definition}`);
+  }
+  // Indexes whose definition changed keep their name, so rebuild those; then create any that are missing.
+  db.exec('DROP INDEX IF EXISTS idx_jl_account');
+  const party = db.value<string | null>("SELECT sql FROM sqlite_master WHERE type = 'index' AND name = 'idx_jl_party'", undefined, null);
+  if (party && !/debit/i.test(party)) db.exec('DROP INDEX idx_jl_party');
+  for (const m of SCHEMA_V1.matchAll(/CREATE\s+(UNIQUE\s+)?INDEX\s+(\w+)\s+ON\s+([^;]+);/g)) {
+    db.exec(`CREATE ${m[1] ?? ''}INDEX IF NOT EXISTS ${m[2]} ON ${m[3]}`);
+  }
+}
 
 export const LATEST_SCHEMA_VERSION = MIGRATIONS[MIGRATIONS.length - 1].version;
 

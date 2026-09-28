@@ -1,6 +1,9 @@
 import type { Db } from './db/database';
 import { ACCOUNT_GROUPS, DEFAULT_ACCOUNTS, SYSTEM_ACCOUNTS } from './accounting/chart';
-import { ALL_PERMISSIONS, DEFAULT_ROLE_PERMISSIONS } from '../shared/permissions';
+import { ALL_PERMISSIONS, DEFAULT_ROLE_PERMISSIONS, type Permission } from '../shared/permissions';
+
+/** Permissions added in the same version that started tracking known permissions (meta.known_permissions). */
+const PERMISSIONS_ADDED_WITH_TRACKING: Permission[] = ['billing.rate', 'returns.adjust', 'customers.credit'];
 
 /**
  * Idempotent reference data, run on every start: account groups, system
@@ -43,8 +46,12 @@ export function seedReferenceData(db: Db, timestamp: string): void {
     } catch {
       known = [];
     }
+    const hasRoles = db.value<number>('SELECT COUNT(*) FROM role_permissions', undefined, 0) > 0;
+    // A data file from before permissions were tracked (or a restored older backup): it already knew
+    // every permission except the ones introduced together with the tracking, so only those get defaults.
+    if (!known.length && hasRoles) known = ALL_PERMISSIONS.filter((p) => !PERMISSIONS_ADDED_WITH_TRACKING.includes(p));
     const knownSet = new Set(known);
-    const firstRun = !db.value<number>('SELECT COUNT(*) FROM role_permissions', undefined, 0) && !known.length;
+    const firstRun = !hasRoles && !known.length;
     for (const role of Object.keys(DEFAULT_ROLE_PERMISSIONS) as Array<keyof typeof DEFAULT_ROLE_PERMISSIONS>) {
       for (const p of DEFAULT_ROLE_PERMISSIONS[role]) {
         if (firstRun || !knownSet.has(p)) db.run('INSERT OR IGNORE INTO role_permissions (role, permission) VALUES (?, ?)', [role, p]);

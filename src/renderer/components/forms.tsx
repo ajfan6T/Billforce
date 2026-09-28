@@ -363,6 +363,11 @@ export const Combobox = forwardRef(function Combobox<T>(props: ComboboxProps<T>,
   const loaderRef = useRef(loadOptions);
   loaderRef.current = loadOptions;
   const wrapRef = useRef<HTMLDivElement>(null);
+  // The text the shown suggestions were loaded for. Enter must never pick a suggestion for older text
+  // (fast typing + Enter used to pick the first "recent" entry instead of what was typed).
+  const loadedFor = useRef<string | null>(null);
+  // The user moved through the list with the arrow keys, so the highlighted option is a deliberate choice.
+  const navigated = useRef(false);
 
   useEffect(() => {
     if (!open) return;
@@ -373,6 +378,7 @@ export const Combobox = forwardRef(function Combobox<T>(props: ComboboxProps<T>,
         if (my === seq.current) {
           setOptions(res);
           setActive(res.length ? 0 : -1);
+          loadedFor.current = value;
         }
       } catch {
         if (my === seq.current) setOptions([]);
@@ -393,6 +399,27 @@ export const Combobox = forwardRef(function Combobox<T>(props: ComboboxProps<T>,
     onSelect(t);
     setOpen(false);
     setActive(-1);
+    navigated.current = false;
+  };
+
+  /** Enter with suggestions that are out of date: load them for the current text now, then act. */
+  const enterWithFreshOptions = async (text: string) => {
+    const my = ++seq.current;
+    let res: T[] = [];
+    try {
+      res = await loaderRef.current(text);
+    } catch {
+      res = [];
+    }
+    if (my !== seq.current) return;
+    loadedFor.current = text;
+    setOptions(res);
+    setActive(res.length ? 0 : -1);
+    if (res.length) choose(res[0]);
+    else if (onEnterNoMatch) {
+      setOpen(false);
+      onEnterNoMatch(text);
+    } else setOpen(true);
   };
 
   return (
@@ -412,18 +439,27 @@ export const Combobox = forwardRef(function Combobox<T>(props: ComboboxProps<T>,
         onFocus={() => openOnFocus && setOpen(true)}
         onChange={(e) => {
           onInputChange(e.target.value);
+          navigated.current = false;
           setOpen(true);
         }}
         onKeyDown={(e) => {
           if (e.key === 'ArrowDown') {
             e.preventDefault();
             if (!open) setOpen(true);
-            else setActive((a) => Math.min(a + 1, options.length - 1));
+            else {
+              navigated.current = true;
+              setActive((a) => Math.min(a + 1, options.length - 1));
+            }
           } else if (e.key === 'ArrowUp') {
             e.preventDefault();
+            navigated.current = true;
             setActive((a) => Math.max(a - 1, 0));
           } else if (e.key === 'Enter') {
-            if (open && active >= 0 && options[active]) {
+            const stale = loadedFor.current !== value && !navigated.current;
+            if (stale && (open || value.trim())) {
+              e.preventDefault();
+              void enterWithFreshOptions(value);
+            } else if (open && active >= 0 && options[active]) {
               e.preventDefault();
               choose(options[active]);
             } else if (onEnterNoMatch) {

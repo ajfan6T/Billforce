@@ -351,9 +351,15 @@ export function negativeBalanceWarning(ctx: Ctx, accountId: number, outflow: num
   if (outflow <= 0) return null;
   const acct = getAccount(ctx, accountId);
   if (acct.group_code !== 'cash' && acct.group_code !== 'bank') return null;
-  const onDate = accountBalance(ctx, accountId, { to: date }) - outflow;
-  const latest = accountBalance(ctx, accountId) - outflow;
-  const worst = Math.min(onDate, latest);
+  // One pass over the account's lines (answered from the covering index on journal_lines).
+  const row = ctx.db.get<{ upto: number; total: number }>(
+    `SELECT COALESCE(SUM(CASE WHEN e.date <= ? THEN l.debit - l.credit ELSE 0 END), 0) AS upto,
+            COALESCE(SUM(l.debit - l.credit), 0) AS total
+       FROM journal_lines l JOIN journal_entries e ON e.id = l.entry_id
+      WHERE l.account_id = ? AND e.is_void = 0`,
+    [date, accountId],
+  ) ?? { upto: 0, total: 0 };
+  const worst = Math.min(row.upto, row.total) - outflow;
   if (worst >= 0) return null;
   const rupees = (Math.abs(worst) / 100).toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
   return `${acct.name} will be short by ₹${rupees} after this payment. Check that all money received has been entered.`;
