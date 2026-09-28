@@ -8,6 +8,7 @@ import ExcelJS from 'exceljs';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { createTestApp, ledgerProblems, OWNER, systemBalance, type TestApp } from './helpers';
 import { BillforceApp } from '../src/core/app';
+import { LATEST_SCHEMA_VERSION } from '../src/core/db/migrate';
 import { TestPlatform } from '../src/core/platform';
 import { partyBalance } from '../src/core/accounting/ledger';
 import { updateSection } from '../src/core/settings';
@@ -457,7 +458,7 @@ describe('restore', () => {
     f.platform.nextPickFile = backupFile;
     expect(await f.call('backup.pickFile')).toEqual({ path: backupFile, fileName: path.basename(backupFile) });
     const info = await f.call('backup.inspect', { path: backupFile });
-    expect(info).toMatchObject({ businessName: 'Sharma General Store', backupAt: '2026-09-28 10:00:00', schemaVersion: 1, healthy: true, lastBillDate: null });
+    expect(info).toMatchObject({ businessName: 'Sharma General Store', backupAt: '2026-09-28 10:00:00', schemaVersion: LATEST_SCHEMA_VERSION, healthy: true, lastBillDate: null });
     expect(info.counts).toMatchObject({ customers: 1, items: 1, bills: 0, users: 1 });
 
     const res = await f.call('backup.restore', { path: backupFile });
