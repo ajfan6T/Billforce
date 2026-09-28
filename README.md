@@ -43,6 +43,18 @@ Windows may show a "Windows protected your PC" screen for new, unsigned apps. Cl
 - Automatic backups: `Documents\Billforce Backups` (one per day, the newest 30 are kept). You can change the folder,
   back up to a pen drive, or restore from *Settings & data → Backup & restore*.
 
+### Roles
+
+| Role | Can do by default |
+| --- | --- |
+| **Owner** | Everything, including users & permissions, settings, restore and year-end closing. Fixed; cannot be reduced. |
+| **Manager** | All daily work: billing, edits and cancellations, returns and credit notes, customers (incl. credit limits and opening balances), suppliers and purchases, expenses and books, reports and exports, employees and salary, backups and import. |
+| **Cashier** | Billing (with discounts and rate changes), reprints, sales returns (not credit notes without goods), customers and payments received. Sees only today's bills. |
+
+The owner can tick or untick any permission for Manager and Cashier in *Settings & data → Users & permissions*.
+Every change anyone makes is recorded in the *Activity log*, and every edited or cancelled bill keeps its full
+history (who, when, why, and what changed).
+
 ### Receipt printer
 
 Install your thermal printer's Windows driver (most 80 mm printers show up as "POS-80" or similar). Then go to

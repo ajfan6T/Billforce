@@ -139,3 +139,25 @@ Balance sheet as on D: balance-sheet accounts use all entries ≤ D except closi
 
 Core helpers other modules may call: `touchItemUsage`, `searchCustomers`, `quickCreateCustomer`, `searchSuppliers`,
 `setPartyOpeningBalance`, `createBackup` / `createBackupAsync` (outside transactions; the async one does not block the app, the sync one is for work that must finish first), `listAccounts`, `paymentAccounts`, `searchEmployees`.
+
+## Money controls (enforced in core, mirrored in the UI)
+
+| Rule | Where |
+| --- | --- |
+| Discounts need `billing.discount`; a catalogue item billed at other than its list rate, or any one-time (free-text) line, needs `billing.rate` | `sales.create` / `sales.update` |
+| Backdated bills and payments need `billing.backdate`; future dates are refused; the POS always saves today's date unless the user picked one | sales, receipts |
+| A return refunds at most what the customer paid for each unit (line + bill discount + round-off shares); all returns on a bill never exceed the bill total, and the return that settles the bill refunds exactly what is left | `returns.create` (`src/shared/billing.ts` helpers) |
+| Money back (cash / UPI / bank) is limited to what was received on the bill, plus the part of its credit the customer has paid since; the rest must be adjusted in the customer's account | `returns.billReturnable` |
+| Credit notes without goods need `returns.adjust` | returns |
+| Customer credit limits / opening balances need `customers.credit`; supplier opening balances need `accounts.manage`; employee opening advances need `employees.salary` | customers, suppliers, employees |
+| With "Stop bills over the credit limit" on, a credit bill over the limit is refused, and customers without a limit can buy on credit only when a user with `customers.credit` bills them | `sales.create` |
+| Receipt discounts need `billing.discount`; reprints need `billing.reprint` and are marked DUPLICATE | receipts, bills, salary slips |
+| Payments that would take a cash / bank account below zero are allowed but warned (`negativeBalanceWarning`) | all outflows |
+| Inactive accounts never gain a balance (cancels / opening edits that would do so are refused) | accounting `common.ts` guards |
+
+## Schema changes
+
+Migration 1 is the release schema. Migration 2 brings data files from pre-release builds up to it (adds late
+columns and rebuilds changed indexes; a no-op on fresh files). Every future change is a new migration — never
+edit a released one. `seedReferenceData` runs on every start and grants default permissions only for permissions
+a data file has not seen before (`meta.known_permissions`), so the owner's choices survive upgrades and restores.
