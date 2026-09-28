@@ -1,11 +1,11 @@
 import type { Db } from './db/database';
 import { ACCOUNT_GROUPS, DEFAULT_ACCOUNTS, SYSTEM_ACCOUNTS } from './accounting/chart';
-import { DEFAULT_ROLE_PERMISSIONS } from '../shared/permissions';
+import { ALL_PERMISSIONS, DEFAULT_ROLE_PERMISSIONS } from '../shared/permissions';
 
 /**
  * Idempotent reference data, run on every start: account groups, system
- * accounts (re-created if missing) and default role permissions (only when a
- * role has none yet, so the owner's changes are kept).
+ * accounts (re-created if missing) and default role permissions (granted only
+ * for permissions the database has not seen before, so the owner's changes are kept).
  */
 export function seedReferenceData(db: Db, timestamp: string): void {
   db.tx(() => {
@@ -34,13 +34,27 @@ export function seedReferenceData(db: Db, timestamp: string): void {
         created_at: timestamp,
       });
     }
+    // Grant defaults for permissions this database has never seen (new install, or a
+    // permission added in a newer version). Permissions the owner already reviewed are
+    // left exactly as the owner set them.
+    let known: string[] = [];
+    try {
+      known = JSON.parse(db.value<string>("SELECT value FROM settings WHERE key = 'meta.known_permissions'", undefined, '[]'));
+    } catch {
+      known = [];
+    }
+    const knownSet = new Set(known);
+    const firstRun = !db.value<number>('SELECT COUNT(*) FROM role_permissions', undefined, 0) && !known.length;
     for (const role of Object.keys(DEFAULT_ROLE_PERMISSIONS) as Array<keyof typeof DEFAULT_ROLE_PERMISSIONS>) {
-      const count = db.value<number>('SELECT COUNT(*) FROM role_permissions WHERE role = ?', [role], 0);
-      if (count) continue;
       for (const p of DEFAULT_ROLE_PERMISSIONS[role]) {
-        db.run('INSERT OR IGNORE INTO role_permissions (role, permission) VALUES (?, ?)', [role, p]);
+        if (firstRun || !knownSet.has(p)) db.run('INSERT OR IGNORE INTO role_permissions (role, permission) VALUES (?, ?)', [role, p]);
       }
     }
+    db.run(
+      `INSERT INTO settings (key, value, updated_at) VALUES ('meta.known_permissions', ?, ?)
+       ON CONFLICT (key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at`,
+      [JSON.stringify(ALL_PERMISSIONS), timestamp],
+    );
   });
 }
 
