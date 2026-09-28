@@ -240,3 +240,15 @@ describe('backups', () => {
     fs.rmSync(dir, { recursive: true, force: true });
   });
 });
+
+describe('negative balance warning', () => {
+  it('warns when a payment takes cash below zero', async () => {
+    const { negativeBalanceWarning, systemAccountId } = await import('../src/core/accounting/ledger');
+    const t = await createTestApp({ openingCash: 50000 });
+    const ctx = t.app.ctx();
+    const cash = systemAccountId(ctx, 'CASH');
+    expect(negativeBalanceWarning(ctx, cash, 40000, '2026-09-28')).toBeNull();
+    expect(negativeBalanceWarning(ctx, cash, 60000, '2026-09-28')).toMatch(/short by ₹100\.00/);
+    expect(negativeBalanceWarning(ctx, systemAccountId(ctx, 'SALES'), 60000, '2026-09-28')).toBeNull();
+  });
+});

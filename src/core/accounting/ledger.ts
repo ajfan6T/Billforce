@@ -358,3 +358,21 @@ export function entryForSource(ctx: Ctx, sourceType: string, sourceId: number): 
     [sourceType, sourceId],
   );
 }
+
+/**
+ * Warning text when paying `outflow` paise out of a cash / bank account would
+ * take its balance (as on `date`, and as of today) below zero; null otherwise.
+ * Payments are still allowed (the shop may have forgotten to record a receipt),
+ * but the user should be told.
+ */
+export function negativeBalanceWarning(ctx: Ctx, accountId: number, outflow: number, date: string): string | null {
+  if (outflow <= 0) return null;
+  const acct = getAccount(ctx, accountId);
+  if (acct.group_code !== 'cash' && acct.group_code !== 'bank') return null;
+  const onDate = accountBalance(ctx, accountId, { to: date }) - outflow;
+  const latest = accountBalance(ctx, accountId) - outflow;
+  const worst = Math.min(onDate, latest);
+  if (worst >= 0) return null;
+  const rupees = (Math.abs(worst) / 100).toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+  return `${acct.name} will be short by ₹${rupees} after this payment. Check that all money received has been entered.`;
+}
