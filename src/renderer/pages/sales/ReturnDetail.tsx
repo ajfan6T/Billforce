@@ -118,7 +118,7 @@ export function ReturnDetail() {
                 d.billDate ? ['Bill date', formatDate(d.billDate)] : null,
                 ['Customer', d.customerId && can('customers.view') ? <Link to={`/customers/${d.customerId}`}>{d.customerName}</Link> : (d.customerName ?? 'Walk-in')],
                 ['Refund', d.refundMode === 'credit' ? "Adjusted in customer's account" : `${PAYMENT_MODE_LABELS[d.refundMode]}${d.refundAccountName ? ` · ${d.refundAccountName}` : ''}`],
-                d.customer ? ['Customer balance now', <Money key="b" value={d.customer.balance} />] : null,
+                d.customer && !d.customer.balanceHidden ? ['Customer balance now', <Money key="b" value={d.customer.balance} />] : null,
                 ['Reason', d.reason],
               ]}
             />

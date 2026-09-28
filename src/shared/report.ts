@@ -36,6 +36,8 @@ export interface ReportSummaryItem {
   label: string;
   value: ReportCell;
   type?: ReportColumnType;
+  /** 'bad' shows the figure in red (e.g. a loss shown as a positive amount next to the words "Net loss"). */
+  tone?: 'bad';
 }
 
 export interface ReportData {

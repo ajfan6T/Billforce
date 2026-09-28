@@ -9,4 +9,6 @@ contextBridge.exposeInMainWorld('billforce', {
     ipcRenderer.on('bf:event', handler);
     return () => ipcRenderer.removeListener('bf:event', handler);
   },
+  /** What closing the window would do to the page (renderer guards.ts): the main process words its question by it. */
+  setCloseWarning: (warning: unknown) => ipcRenderer.send('bf:close-warning', warning),
 });

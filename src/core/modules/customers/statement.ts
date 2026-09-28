@@ -146,11 +146,20 @@ export interface StatementOptions {
   to: string;
 }
 
+/**
+ * Opening-balance vouchers dated on (or before) the first day of the period are part of the
+ * balance brought forward, as on the Ledgers page (books.ledger) and in the trial balance; only
+ * opening vouchers dated inside the period stay as lines.
+ */
+export function isBroughtForwardOpening(e: { voucher_type: string; date: string }, from: string): boolean {
+  return e.voucher_type === 'opening' && e.date <= from;
+}
+
 export function partyStatement(ctx: Ctx, opts: StatementOptions): ReportData {
   const { partyType, partyId, from, to } = opts;
   const account = partyType === 'customer' ? 'AR' : 'AP';
-  const opening = partyBalance(ctx, partyType, partyId, { account, to: addDays(from, -1) });
-  const entries = ctx.db.all<StatementEntry>(
+  let opening = partyBalance(ctx, partyType, partyId, { account, to: addDays(from, -1) });
+  const all = ctx.db.all<StatementEntry>(
     `SELECT e.id, e.date, e.voucher_type, e.voucher_no, e.source_type, e.source_id, e.narration,
             SUM(l.debit) AS debit, SUM(l.credit) AS credit
        FROM journal_lines l JOIN journal_entries e ON e.id = l.entry_id
@@ -159,9 +168,23 @@ export function partyStatement(ctx: Ctx, opts: StatementOptions): ReportData {
       ORDER BY e.date, e.id`,
     [partyType, partyId, systemAccountId(ctx, account), from, to],
   );
+  const openingEntries = all.filter((e) => isBroughtForwardOpening(e, from));
+  const entries = all.filter((e) => !isBroughtForwardOpening(e, from));
+  for (const e of openingEntries) opening += e.debit - e.credit;
 
   const rows: ReportRow[] = [
-    { cells: { date: from, type: '', number: '', particulars: 'Balance brought forward', debit: null, credit: null, balance: opening }, style: 'subtotal' },
+    {
+      cells: {
+        date: from,
+        type: '',
+        number: '',
+        particulars: openingEntries.length ? 'Balance brought forward (incl. opening balance)' : 'Balance brought forward',
+        debit: null,
+        credit: null,
+        balance: opening,
+      },
+      style: 'subtotal',
+    },
   ];
   let running = opening;
   let totalDr = 0;

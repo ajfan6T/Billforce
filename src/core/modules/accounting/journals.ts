@@ -33,6 +33,7 @@ import {
   closedYearReason,
   outflowWarnings,
   resolveVoucherDate,
+  savedAccount,
   SOURCE_LABELS,
   userName,
   voucherLabel,
@@ -54,15 +55,19 @@ export interface JournalInput {
   lines: JournalLineInput[];
 }
 
-/** Validate hand-entered lines and turn them into ledger lines (zero lines are dropped). */
-export function toLedgerLines(ctx: Ctx, lines: JournalLineInput[]): EntryLineInput[] {
+/**
+ * Validate hand-entered lines and turn them into ledger lines (zero lines are dropped).
+ * `savedAccountIds`: when editing, the accounts already on the entry. They stay allowed after
+ * being deactivated; a new line on an inactive account is refused.
+ */
+export function toLedgerLines(ctx: Ctx, lines: JournalLineInput[], savedAccountIds?: ReadonlySet<number>): EntryLineInput[] {
   const out: EntryLineInput[] = [];
   lines.forEach((l, i) => {
     const debit = l.debit ?? 0;
     const credit = l.credit ?? 0;
     if (debit > 0 && credit > 0) throw fail.validation(`Line ${i + 1}: enter either a debit or a credit, not both`, { [`lines.${i}`]: 'Debit or credit, not both' });
     if (!debit && !credit) return;
-    const acct = activeAccount(ctx, l.accountId);
+    const acct = savedAccountIds?.has(l.accountId) ? savedAccount(ctx, l.accountId) : activeAccount(ctx, l.accountId);
     out.push({
       account: acct.id,
       debit,
@@ -151,7 +156,8 @@ export function updateJournal(ctx: Ctx, entryId: number, input: JournalInput & {
   assertSameYear(e.date, date, `Voucher ${e.voucher_no ?? '#' + e.id}`);
   const narration = input.narration.trim();
   if (!narration && e.voucher_type === 'journal') throw fail.validation('Write a narration: what is this entry for?', { narration: 'Enter a narration' });
-  const lines = toLedgerLines(ctx, input.lines);
+  const saved = new Set(ctx.db.all<{ account_id: number }>('SELECT DISTINCT account_id FROM journal_lines WHERE entry_id = ?', [entryId]).map((r) => r.account_id));
+  const lines = toLedgerLines(ctx, input.lines, saved);
   if (e.source_type === 'loan' && e.source_id) {
     const loan = ctx.db.get<{ account_id: number; name: string }>('SELECT account_id, name FROM loans WHERE id = ?', [e.source_id]);
     const hadLoanLine = !!loan && ctx.db.value<number>('SELECT COUNT(*) FROM journal_lines WHERE entry_id = ? AND account_id = ?', [entryId, loan.account_id], 0) > 0;

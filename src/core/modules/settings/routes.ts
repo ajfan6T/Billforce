@@ -36,4 +36,7 @@ export const settingsRoutes = {
   }),
 
   'settings.about': route({ access: 'settings.manage', handler: (ctx) => settings.aboutInfo(ctx) }),
+
+  /** The next number of every document series this financial year: { fyShort: '26-27', next: { bill: 7, ... } }. */
+  'settings.nextNumbers': route({ access: 'settings.manage', handler: (ctx) => settings.nextNumbers(ctx) }),
 };

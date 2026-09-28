@@ -1141,7 +1141,7 @@ describe('closed loans and inactive accounts', () => {
     const spent = await t.call('expenses.create', { accountId: acctId(t, 'Tea & Refreshments'), amount: 50000, mode: 'cash', payAccountId: petty.id });
     await t.call('accounts.setActive', { id: petty.id, active: false });
     const e1 = await t.fails('journals.cancel', { entryId: out.entry.id, reason: 'Wrong' });
-    expect(e1.message).toBe('"Petty Cash" is inactive, and cancelling this entry would give it a balance. Re-activate it in the chart of accounts first.');
+    expect(e1.message).toBe('"Petty Cash" is inactive — activate it first in Accounts > Chart of accounts. Cancelling this entry would give it a balance of ₹500.00 Cr.');
     expect((await t.fails('expenses.cancel', { id: spent.id, reason: 'Wrong' })).message).toMatch(/"Petty Cash" is inactive/);
     expect(bal(t, petty.id)).toBe(0);
     // Inactive income / expense heads may keep a balance, so their entries can still be cancelled.
@@ -1168,5 +1168,206 @@ describe('closed loans and inactive accounts', () => {
     expect(rentRow).toMatchObject({ isActive: false, balance: 900000 });
     expect(chart.totalDebit).toBe(chart.totalCredit);
     expect((await t.fails('accounts.setActive', { id: hdfc.id, active: false })).message).toMatch(/balance of ₹100.00 Dr/);
+  });
+});
+
+describe('an inactive account never gains a balance', () => {
+  it('refuses to cancel a bill, payment, purchase, advance, return or salary paid through an inactive cash or bank account', async () => {
+    const t = await createTestApp({ openingCash: 1000000 });
+    const cash = sysId(t, 'CASH');
+    const hdfc = await t.call('accounts.create', { name: 'HDFC Current', groupCode: 'bank' });
+    const petty = await t.call('accounts.create', { name: 'Petty Cash', groupCode: 'cash' });
+    // Money into and out of HDFC: +500 bill, +300 payment received, -200 purchase, -100 supplier payment.
+    const bill = await t.call('sales.create', { items: [{ itemName: 'Rice', qty: 1, rate: 50000 }], payments: [{ mode: 'bank', amount: 50000, accountId: hdfc.id }] });
+    const cust = await t.call('customers.create', { name: 'Ravi', openingBalance: { amount: 30000, direction: 'receivable' } } as any);
+    const receipt = await t.call('receipts.create', { customerId: cust.id, amount: 30000, mode: 'bank', accountId: hdfc.id } as any);
+    const sup = await t.call('suppliers.create', { name: 'Gupta Traders' } as any);
+    const purchase = await t.call('purchases.create', { supplierId: sup.id, items: [{ description: 'Stock', qty: 1, rate: 20000 }], payments: [{ mode: 'bank', amount: 20000, accountId: hdfc.id }] } as any);
+    const supPay = await t.call('supplierPayments.create', { supplierId: sup.id, amount: 10000, mode: 'bank', accountId: hdfc.id } as any);
+    await t.call('accounts.transfer', { fromAccountId: hdfc.id, toAccountId: cash, amount: 50000 });
+    // Petty cash: +1,000 in, -300 advance, -200 salary, -100 refund.
+    await t.call('accounts.transfer', { fromAccountId: cash, toAccountId: petty.id, amount: 100000 });
+    const emp = await t.call('employees.create', { name: 'Raju', salaryType: 'monthly', salaryAmount: 1500000, joinDate: '2026-04-01' } as any);
+    const advance = await t.call('advances.create', { employeeId: emp.id, amount: 30000, mode: 'cash', accountId: petty.id } as any);
+    const slip = await t.call('salary.process', { employeeId: emp.id, month: '2026-08', advanceRecovery: 0 });
+    const paid = await t.call('salary.pay', { salaryId: slip.id, amount: 20000, mode: 'cash', accountId: petty.id });
+    const sold = await t.call('sales.create', { items: [{ itemName: 'Soap', qty: 1, rate: 10000 }], payments: [{ mode: 'cash', amount: 10000 }] });
+    const ret = await t.call('returns.create', { kind: 'return', billId: sold.id, items: [{ billItemId: sold.items[0].id, qty: 1 }], refundMode: 'cash', refundAccountId: petty.id });
+    await t.call('accounts.transfer', { fromAccountId: petty.id, toAccountId: cash, amount: 40000 });
+    expect([bal(t, hdfc.id), bal(t, petty.id)]).toEqual([0, 0]);
+    await t.call('accounts.setActive', { id: hdfc.id, active: false });
+    await t.call('accounts.setActive', { id: petty.id, active: false });
+
+    const refused = async (route: string, input: unknown) => (await t.fails(route, input)).message;
+    expect(await refused('sales.cancel', { id: bill.id, reason: 'Wrong' })).toBe(
+      '"HDFC Current" is inactive — activate it first in Accounts > Chart of accounts. Cancelling this bill would give it a balance of ₹500.00 Cr.',
+    );
+    expect(await refused('receipts.cancel', { id: receipt.id, reason: 'Bounced' })).toMatch(/^"HDFC Current" is inactive — activate it first.*Cancelling this payment would give it a balance of ₹300.00 Cr/);
+    expect(await refused('purchases.cancel', { id: purchase.id, reason: 'Wrong' })).toMatch(/^"HDFC Current" is inactive.*Cancelling this purchase would give it a balance of ₹200.00 Dr/);
+    expect(await refused('supplierPayments.cancel', { id: supPay.id, reason: 'Wrong' })).toMatch(/^"HDFC Current" is inactive.*Cancelling this payment/);
+    expect(await refused('advances.cancel', { id: advance.id, reason: 'Wrong' })).toBe(
+      '"Petty Cash" is inactive — activate it first in Accounts > Chart of accounts. Cancelling this advance would give it a balance of ₹300.00 Dr.',
+    );
+    expect(await refused('salary.cancelPayment', { paymentId: paid.payments[0].id, reason: 'Wrong' })).toMatch(/^"Petty Cash" is inactive.*Cancelling this payment/);
+    expect(await refused('salary.cancel', { salaryId: slip.id, reason: 'Wrong' })).toMatch(/^"Petty Cash" is inactive.*Cancelling this salary slip/);
+    expect(await refused('returns.cancel', { id: ret.id, reason: 'Wrong' })).toMatch(/^"Petty Cash" is inactive.*Cancelling this return would give it a balance of ₹100.00 Dr/);
+    // Nothing changed.
+    expect([bal(t, hdfc.id), bal(t, petty.id)]).toEqual([0, 0]);
+    expect((await t.call('sales.get', { id: bill.id })).status).toBe('active');
+
+    // Once re-activated, the documents can be cancelled (the account then shows the balance in its book).
+    await t.call('accounts.setActive', { id: petty.id, active: true });
+    await t.call('advances.cancel', { id: advance.id, reason: 'Wrong' });
+    expect(bal(t, petty.id)).toBe(30000);
+    // A document that does not touch the inactive account is not affected.
+    const cashBill = await t.call('sales.create', { items: [{ itemName: 'Tea', qty: 1, rate: 1000 }], payments: [{ mode: 'cash', amount: 1000 }] });
+    await t.call('sales.cancel', { id: cashBill.id, reason: 'Test' });
+    expect(ledgerProblems(t.app)).toEqual([]);
+  });
+
+  it('refuses to change the opening balance of an inactive account', async () => {
+    const t = await createTestApp({ openingCash: 1000000 });
+    const old = await t.call('accounts.create', { name: 'Old Current A/c', groupCode: 'bank' });
+    await t.call('accounts.setActive', { id: old.id, active: false });
+    const err = await t.fails('accounts.update', { id: old.id, name: 'Old Current A/c', openingBalance: { amount: 500000, side: 'debit' } });
+    expect(err.message).toBe('"Old Current A/c" is inactive — activate it first to change its opening balance.');
+    expect(err.fields).toMatchObject({ openingBalance: expect.stringMatching(/inactive/) });
+    expect(bal(t, old.id)).toBe(0);
+    // Renaming (the opening balance unchanged) is still fine.
+    expect(await t.call('accounts.update', { id: old.id, name: 'Old SBI A/c' })).toMatchObject({ name: 'Old SBI A/c', isActive: false, balance: 0, openingBalance: 0 });
+    // Re-activated, the opening balance can be entered.
+    await t.call('accounts.setActive', { id: old.id, active: true });
+    expect(await t.call('accounts.update', { id: old.id, name: 'Old SBI A/c', openingBalance: { amount: 500000, side: 'debit' } })).toMatchObject({ openingBalance: 500000, balance: 500000 });
+    expect(ledgerProblems(t.app)).toEqual([]);
+  });
+
+  it('lets an old expense or journal on a head deactivated since be edited, but not a new line on an inactive account', async () => {
+    const t = await createTestApp({ openingCash: 1000000 });
+    const diesel = await t.call('accounts.create', { name: 'Generator diesel', groupCode: 'indirect_expenses' });
+    const x = await t.call('expenses.create', { date: '2026-08-10', accountId: diesel.id, amount: 500000, mode: 'cash' });
+    const jv = await t.call('journals.create', {
+      date: '2026-08-12',
+      narration: 'Diesel bought by owner',
+      lines: [
+        { accountId: diesel.id, debit: 100000 },
+        { accountId: sysId(t, 'CAPITAL'), credit: 100000 },
+      ],
+    });
+    await t.call('accounts.setActive', { id: diesel.id, active: false });
+    // Same head: the amount can be corrected.
+    expect(await t.call('expenses.update', { id: x.id, date: '2026-08-10', accountId: diesel.id, amount: 450000, mode: 'cash' })).toMatchObject({ amount: 450000, accountId: diesel.id });
+    const edited = await t.call('journals.update', {
+      entryId: jv.id,
+      narration: 'Diesel bought by owner',
+      lines: [
+        { accountId: diesel.id, debit: 90000 },
+        { accountId: sysId(t, 'CAPITAL'), credit: 90000 },
+      ],
+    });
+    expect(edited.totalDebit).toBe(90000);
+    // A new expense, or moving another expense or a new journal line onto the inactive head, is refused.
+    expect((await t.fails('expenses.create', { accountId: diesel.id, amount: 100, mode: 'cash' })).message).toMatch(/"Generator diesel" is inactive/);
+    const rentX = await t.call('expenses.create', { accountId: acctId(t, 'Rent'), amount: 1000, mode: 'cash' });
+    expect((await t.fails('expenses.update', { id: rentX.id, accountId: diesel.id, amount: 1000, mode: 'cash' })).message).toMatch(/"Generator diesel" is inactive/);
+    const rentJv = await t.call('journals.create', { narration: 'Rent by owner', lines: [{ accountId: acctId(t, 'Rent'), debit: 1000 }, { accountId: sysId(t, 'CAPITAL'), credit: 1000 }] });
+    const moved = await t.fails('journals.update', { entryId: rentJv.id, narration: 'Rent by owner', lines: [{ accountId: diesel.id, debit: 1000 }, { accountId: sysId(t, 'CAPITAL'), credit: 1000 }] });
+    expect(moved.message).toMatch(/"Generator diesel" is inactive/);
+    expect(bal(t, diesel.id)).toBe(450000 + 90000);
+    expect(ledgerProblems(t.app)).toEqual([]);
+  });
+
+  it('lets an expense paid from a cash account deactivated since be edited while that account stays at zero', async () => {
+    const t = await createTestApp({ openingCash: 1000000 });
+    const petty = await t.call('accounts.create', { name: 'Petty Cash', groupCode: 'cash' });
+    await t.call('accounts.transfer', { fromAccountId: sysId(t, 'CASH'), toAccountId: petty.id, amount: 50000 });
+    const x = await t.call('expenses.create', { accountId: acctId(t, 'Tea & Refreshments'), amount: 50000, mode: 'cash', payAccountId: petty.id });
+    await t.call('accounts.setActive', { id: petty.id, active: false });
+    const same = { id: x.id, accountId: acctId(t, 'Tea & Refreshments'), amount: 50000, mode: 'cash' as const, payAccountId: petty.id };
+    expect(await t.call('expenses.update', { ...same, remarks: 'Tea for the week' })).toMatchObject({ remarks: 'Tea for the week', payAccountId: petty.id });
+    expect((await t.fails('expenses.update', { ...same, amount: 40000 })).message).toMatch(/^"Petty Cash" is inactive — activate it first.*Changing this entry would give it a balance of ₹100.00 Dr/);
+    expect(bal(t, petty.id)).toBe(0);
+    expect(ledgerProblems(t.app)).toEqual([]);
+  });
+});
+
+describe('chart of accounts balances by financial year', () => {
+  it('shows income and expense accounts for this financial year, like the trial balance and their ledger', async () => {
+    const t = await createTestApp({ booksStart: '2025-04-01', openingCash: 1000000 });
+    const ctx = t.app.ctx();
+    postEntry(ctx, { date: '2026-03-10', voucherType: 'sale', narration: 'Last year', lines: [{ account: 'CASH', debit: 500000 }, { account: 'SALES', credit: 500000 }] });
+    postEntry(ctx, { date: '2026-03-15', voucherType: 'journal', narration: 'Last year rent', lines: [{ account: acctId(t, 'Rent'), debit: 100000 }, { account: 'CASH', credit: 100000 }] });
+    postEntry(ctx, { date: '2026-09-10', voucherType: 'sale', narration: 'This year', lines: [{ account: 'CASH', debit: 200000 }, { account: 'SALES', credit: 200000 }] });
+    const salesId = sysId(t, 'SALES');
+    const chart = await t.call('accounts.chart', {});
+    const row = (id: number) => chart.types.flatMap((x) => x.groups).flatMap((g) => g.accounts).find((a) => a.id === id);
+    expect(row(salesId)?.balance).toBe(-200000);
+    expect(row(acctId(t, 'Rent'))?.balance ?? 0).toBe(0);
+    expect(chart.financialYear).toEqual({ start: '2026-04-01', name: '2026-27' });
+    // Last year's profit (not closed yet) is one line under capital, so the totals still agree.
+    expect(chart.previousYears).toBe(-400000);
+    expect(chart.types.find((x) => x.type === 'equity')!.balance).toBe(-1000000 - 400000);
+    expect(chart.totalDebit).toBe(chart.totalCredit);
+    expect(chart.totalDebit).toBe(1000000 + 500000 - 100000 + 200000);
+    // The ledger the row opens and the account page agree with it.
+    const ledger = await t.call('books.ledger', { accountId: salesId, from: '2026-04-01', to: '2026-09-28' });
+    expect(ledger.closing).toBe(row(salesId)!.balance);
+    expect(await t.call('accounts.get', { id: salesId })).toMatchObject({ balance: -200000, balanceFrom: '2026-04-01' });
+    expect(await t.call('accounts.get', { id: sysId(t, 'CASH') })).toMatchObject({ balance: 1000000 + 500000 - 100000 + 200000, balanceFrom: null });
+    const tb = await t.call('reports.trialBalance', { to: '2026-09-28' });
+    expect(tb.rows.find((r) => r.cells.account === 'Sales' && r.link)?.cells.closingCr).toBe(200000);
+    // accounts.list with balances follows the same rule.
+    const list = await t.call('accounts.list', { types: ['income'], withBalances: true });
+    expect(list.find((a) => a.id === salesId)?.balance).toBe(-200000);
+
+    // Once last year is closed, its result is in capital and the previous-years line goes away.
+    await t.call('yearEnd.close', { fyStart: '2025-04-01', transferDrawings: true });
+    const after = await t.call('accounts.chart', {});
+    expect(after.previousYears).toBe(0);
+    expect(after.totalDebit).toBe(after.totalCredit);
+    expect(after.types.find((x) => x.type === 'equity')!.balance).toBe(-1000000 - 400000);
+    // As on the last day of the closed year: that year's figures, without its closing entry counted twice.
+    const march = await t.call('accounts.chart', { asOf: '2026-03-31' });
+    const mRow = (id: number) => march.types.flatMap((x) => x.groups).flatMap((g) => g.accounts).find((a) => a.id === id);
+    expect(mRow(salesId)?.balance).toBe(-500000);
+    expect(march.previousYears).toBe(0);
+    expect(march.totalDebit).toBe(march.totalCredit);
+    expect(ledgerProblems(t.app)).toEqual([]);
+  });
+});
+
+describe('checking a payment before it is saved', () => {
+  it('gives the balance on the date and the warning the payment would get, leaving out the version being edited', async () => {
+    const t = await createTestApp({ openingCash: 800000 });
+    const check = await t.call('accounts.paymentCheck', { mode: 'cash', amount: 1230645, date: '2026-09-28' });
+    expect(check).toMatchObject({ accountId: sysId(t, 'CASH'), accountName: 'Cash in Hand', date: '2026-09-28', balance: 800000 });
+    expect(check.warning).toBe('Cash in Hand will be short by ₹4,306.45 after this payment. Check that all money received has been entered.');
+    expect((await t.call('accounts.paymentCheck', { mode: 'cash', amount: 500000 })).warning).toBeNull();
+    // Editing an expense of ₹5,000: its own ₹5,000 is not counted twice.
+    const x = await t.call('expenses.create', { accountId: acctId(t, 'Rent'), amount: 500000, mode: 'cash' });
+    expect((await t.call('accounts.paymentCheck', { mode: 'cash', amount: 700000 })).warning).toMatch(/short by ₹4,000.00/);
+    const edit = await t.call('accounts.paymentCheck', { mode: 'cash', amount: 700000, entryId: x.journalEntryId });
+    expect(edit).toMatchObject({ balance: 800000, warning: null });
+    // Without "View books" the balance is hidden but the warning (the same text shown after saving) is given.
+    t.app.db.run("DELETE FROM role_permissions WHERE role = 'manager' AND permission = 'accounts.view'");
+    await t.loginAs('manager');
+    const m = await t.call('accounts.paymentCheck', { mode: 'cash', amount: 400000 });
+    expect(m).toMatchObject({ balance: null, warning: expect.stringMatching(/short by ₹1,000.00/) });
+    await t.loginAs('cashier');
+    expect((await t.fails('accounts.paymentCheck', { mode: 'cash', amount: 100 })).code).toBe('FORBIDDEN');
+  });
+
+  it('warns when a backdated payment takes a day in between below zero', async () => {
+    const t = await createTestApp({ openingCash: 10000 }); // ₹100 on 01-04
+    const rent = acctId(t, 'Rent');
+    await t.call('expenses.create', { date: '2026-09-10', accountId: rent, amount: 9000, mode: 'cash' }); // ₹10 left from 10-09
+    postEntry(t.app.ctx(), { date: '2026-09-20', voucherType: 'sale', narration: 'Sale', lines: [{ account: 'CASH', debit: 100000 }, { account: 'SALES', credit: 100000 }] });
+    // ₹50 on 05-09: enough on 05-09 (₹100) and today (₹960), but 10-09 to 19-09 would be -₹40.
+    const x = await t.call('expenses.create', { date: '2026-09-05', accountId: rent, amount: 5000, mode: 'cash' });
+    expect(x.warnings).toEqual(['Cash in Hand will be short by ₹40.00 on 10-09-2026 after this payment. Check that all money received has been entered.']);
+    // Short on its own date: the usual message.
+    const y = await t.call('expenses.create', { date: '2026-09-06', accountId: rent, amount: 10000, mode: 'cash' });
+    expect(y.warnings).toEqual(['Cash in Hand will be short by ₹50.00 after this payment. Check that all money received has been entered.']);
+    const ok = await t.call('expenses.create', { date: '2026-09-25', accountId: rent, amount: 1000, mode: 'cash' });
+    expect(ok.warnings).toEqual([]);
   });
 });

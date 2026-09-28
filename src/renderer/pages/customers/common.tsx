@@ -96,6 +96,9 @@ export interface DiffField {
   format?: (v: any, snap: any) => string;
 }
 
+/** "1 payment", "2 payments": a count with the right singular / plural word. */
+export const countText = (n: number, one: string, many = `${one}s`) => `${n} ${n === 1 ? one : many}`;
+
 export const fmtMoney = (v: any) => formatINR(Number(v ?? 0));
 export const fmtDate = (v: any) => (v ? formatDate(String(v)) : '—');
 export const fmtText = (v: any) => (v === null || v === undefined || v === '' ? '—' : String(v));

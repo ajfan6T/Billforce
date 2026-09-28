@@ -96,6 +96,9 @@ function UserMenu() {
   const [open, setOpen] = useState(false);
   const [changePw, setChangePw] = useState(false);
   const ref = useRef<HTMLDivElement>(null);
+  // Where the user was before reaching for this menu: "Lock screen" returns there after unlocking
+  // (the menu item itself is gone by then).
+  const cameFrom = useRef<HTMLElement | null>(null);
   useEffect(() => {
     const h = (e: MouseEvent) => {
       if (ref.current && !ref.current.contains(e.target as Node)) setOpen(false);
@@ -106,7 +109,17 @@ function UserMenu() {
   if (!session) return null;
   return (
     <div className="user-menu" ref={ref}>
-      <button type="button" className="user-btn" onClick={() => setOpen(!open)} aria-haspopup="menu" aria-expanded={open}>
+      <button
+        type="button"
+        className="user-btn"
+        onFocus={(e) => {
+          const from = e.relatedTarget;
+          if (from instanceof HTMLElement && !ref.current?.contains(from)) cameFrom.current = from;
+        }}
+        onClick={() => setOpen(!open)}
+        aria-haspopup="menu"
+        aria-expanded={open}
+      >
         <UserCircle2 size={20} />
         <span className="user-name">{session.fullName}</span>
         <span className="user-role">{ROLE_LABELS[session.role]}</span>
@@ -117,7 +130,7 @@ function UserMenu() {
           <button role="menuitem" onClick={() => (setOpen(false), setChangePw(true))}>
             <KeyRound size={15} /> Change password
           </button>
-          <button role="menuitem" onClick={() => (setOpen(false), lock())}>
+          <button role="menuitem" onClick={() => (setOpen(false), lock(cameFrom.current))}>
             <Lock size={15} /> Lock screen
           </button>
           <button role="menuitem" onClick={() => (setOpen(false), void confirmLeave().then((ok) => (ok ? logout() : undefined)))}>

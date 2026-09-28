@@ -9,6 +9,7 @@ import { useAuth } from '../../auth';
 import { useToast } from '../../feedback';
 import { todayISO } from '../../../shared/dates';
 import { FieldGroup } from './common';
+import { PaymentBalanceHint, type PaymentToCheck } from './PaymentBalance';
 import './accounts.css';
 
 export interface ExpenseDraft {
@@ -48,6 +49,12 @@ export function expensePayload(d: ExpenseDraft) {
   };
 }
 
+/** The money an expense takes out of cash / bank (null when on credit), for the balance check before saving. */
+export function expensePayment(d: ExpenseDraft, entryId?: number | null): PaymentToCheck | null {
+  if (d.pay.mode === 'credit') return null;
+  return { mode: d.pay.mode, accountId: d.pay.accountId, amount: d.amount, date: d.date, entryId };
+}
+
 /** The fields of an expense, used by the quick-entry card and the edit dialog. */
 export function ExpenseFields({
   value,
@@ -56,6 +63,8 @@ export function ExpenseFields({
   autoFocus,
   layout = 'quick',
   actions,
+  entryId,
+  savedHeadId,
 }: {
   value: ExpenseDraft;
   onChange: (d: ExpenseDraft) => void;
@@ -64,6 +73,10 @@ export function ExpenseFields({
   layout?: 'quick' | 'modal';
   /** Buttons shown at the end of the last row (quick layout). */
   actions?: ReactNode;
+  /** Ledger entry of the expense being edited (its old amount is left out of the balance shown). */
+  entryId?: number | null;
+  /** Head of the expense being edited: still listed if it has been deactivated since. */
+  savedHeadId?: number | null;
 }) {
   const { can } = useAuth();
   const [adding, setAdding] = useState(false);
@@ -74,7 +87,14 @@ export function ExpenseFields({
   const head = (
     <FieldGroup label="Expense head" required error={fields.accountId}>
       <div className="ac-head-field">
-        <AccountSelect key={headsVersion} value={value.accountId} onChange={(id) => set({ accountId: id })} types={['expense']} placeholder="Rent, electricity, tea…" />
+        <AccountSelect
+          key={headsVersion}
+          value={value.accountId}
+          onChange={(id) => set({ accountId: id })}
+          types={['expense']}
+          alsoShow={savedHeadId ? [savedHeadId] : undefined}
+          placeholder="Rent, electricity, tea…"
+        />
         {canAddHead && (
           <button type="button" className="ac-inline-link" onClick={() => setAdding(true)}>
             <Plus size={13} style={{ verticalAlign: -2 }} /> New head
@@ -96,6 +116,7 @@ export function ExpenseFields({
   const payBy = (
     <FieldGroup label="Paid by" error={fields.mode}>
       <PaymentModePicker value={value.pay} onChange={(pay) => set({ pay })} creditLabel="On credit" />
+      <PaymentBalanceHint payment={expensePayment(value, entryId)} />
     </FieldGroup>
   );
   const who =

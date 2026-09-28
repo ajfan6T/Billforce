@@ -8,12 +8,13 @@
  *   Cr refund cash / bank account, or AR(customer) when adjusted in the customer's account
  *
  * Refund rules (goods returned against a bill):
- *   - a unit is refunded at most at what the customer paid for it: the line amount after its
- *     discount, less its share of the bill discount and round off (netLineAmounts);
+ *   - a unit is refunded at most at the rate the customer paid for it (paidRate): the line amount
+ *     after its discount, less its share of the bill discount and of a rounding down
+ *     (netLineAmounts), in whole paise, so rate x qty is always the refund line's amount;
  *   - rounding works on the running total of the bill's returns, so refunds never add up to
  *     more than the bill total and the return that takes back the rest settles it exactly;
- *   - money (cash / UPI / bank) goes back only up to what was received on the bill; anything
- *     more is adjusted in the customer's account.
+ *   - money (cash / UPI / bank) goes back only up to what was paid for the bill (at the counter,
+ *     or later by payments that cleared its credit); anything more is adjusted in the customer's account.
  * Credit notes without goods need "returns.adjust".
  */
 import type { Ctx } from '../../context';
@@ -22,13 +23,14 @@ import { AppError, fail } from '../../errors';
 import { listRevisions, logActivity, recordRevision } from '../../audit';
 import { nextDocNumber } from '../../numbering';
 import { getSection } from '../../settings';
-import { negativeBalanceWarning, paymentAccountId, postEntry, voidEntry, type EntryLineInput } from '../../accounting/ledger';
+import { negativeBalanceWarning, partyBalance, paymentAccountId, postEntry, voidEntry, type EntryLineInput } from '../../accounting/ledger';
 import { assertDateOpen } from '../../accounting/periods';
 import { renderReceiptHtml, type ReceiptDoc, type ReceiptTotal } from '../../print/receipt';
 import { amountInWords, formatAmount, formatINR, formatQty } from '../../../shared/money';
 import { formatDate, formatTime, isValidISODate } from '../../../shared/dates';
 import { PAYMENT_MODE_LABELS, type PaymentMode, type SettlementMode } from '../../../shared/constants';
-import { netLineAmounts, returnLineAmount, returnNoteTotal, roundQty, type BillPaymentMode } from '../../../shared/billing';
+import { assertCancelKeepsClosedAccounts } from '../accounting/common';
+import { netLineAmounts, paidRate, returnLineAmount, returnNoteTotal, returnSettlesBill, roundQty, type BillPaymentMode } from '../../../shared/billing';
 import { customerBalanceLine, customerSummary, getBillRow, itemCountLine, sendToReceiptPrinter, type BillCustomer, type RevisionSummary } from '../sales/service';
 
 /* ------------------------------------------------------------------ */
@@ -116,13 +118,20 @@ export interface BillReturnable {
   /** Already paid back in cash / UPI / bank on active returns. */
   moneyRefunded: number;
   /**
-   * Most that can be paid back in cash / UPI / bank: what was received on the bill less money
-   * already refunded. Anything more must be adjusted in the customer's account.
+   * Part of the bill's credit the customer has paid since (payments received), counting the
+   * customer's dues against this bill first; returns adjusted in the account are not payments.
+   */
+  paidLater: number;
+  /**
+   * Most that can be paid back in cash / UPI / bank: what was paid for the bill (at the counter
+   * plus paidLater) less money already refunded. Anything more must be adjusted in the customer's account.
    */
   moneyRefundable: number;
+  /** Every return so far on the bill was at the rate paid (a return of all that is left then settles the bill exactly). */
+  allAtPaidRate: boolean;
   /** Returns are rounded to the nearest rupee (settings.billing.roundOff). */
   roundOff: boolean;
-  /** Suggested refund: adjust in the account for credit bills with a customer, else the bill's payment mode. */
+  /** Suggested refund: adjust in the account while the customer still owes part of the bill, else money (the bill's payment mode). */
   suggestedRefundMode: PaymentMode;
 }
 
@@ -269,8 +278,8 @@ export function billReturnable(ctx: Ctx, billId: number): BillReturnable {
   );
   const returned = new Map(
     ctx.db
-      .all<{ bill_item_id: number; qty: number; amount: number }>(
-        `SELECT i.bill_item_id, SUM(i.qty) AS qty, SUM(i.amount) AS amount
+      .all<{ bill_item_id: number; qty: number; amount: number; min_rate: number }>(
+        `SELECT i.bill_item_id, SUM(i.qty) AS qty, SUM(i.amount) AS amount, MIN(i.rate) AS min_rate
            FROM credit_note_items i JOIN credit_notes n ON n.id = i.credit_note_id
           WHERE n.bill_id = ? AND n.status = 'active' AND i.bill_item_id IS NOT NULL
           GROUP BY i.bill_item_id`,
@@ -278,7 +287,7 @@ export function billReturnable(ctx: Ctx, billId: number): BillReturnable {
       )
       .map((r) => [r.bill_item_id, r]),
   );
-  // What was really paid for each line: bill discount and round off shared out exactly.
+  // What was really paid for each line: bill discount and a rounding down shared out exactly.
   const net = netLineAmounts(
     items.map((i) => i.amount),
     bill.total,
@@ -296,27 +305,42 @@ export function billReturnable(ctx: Ctx, billId: number): BillReturnable {
       qtyReturned,
       returnable: Math.max(0, roundQty(it.qty - qtyReturned)),
       rate: it.rate,
-      netRate: it.qty > 0 ? Math.round(net[idx] / it.qty) : 0,
+      netRate: paidRate(net[idx], it.qty),
       netAmount: net[idx],
       returnedAmount,
       refundable: Math.max(0, net[idx] - returnedAmount),
     };
   });
-  const sums = ctx.db.get<{ total: number; value: number; money: number }>(
+  const sums = ctx.db.get<{ total: number; value: number; money: number; adjusted: number }>(
     `SELECT COALESCE(SUM(total), 0) AS total, COALESCE(SUM(subtotal), 0) AS value,
-            COALESCE(SUM(CASE WHEN refund_mode <> 'credit' THEN total END), 0) AS money
+            COALESCE(SUM(CASE WHEN refund_mode <> 'credit' THEN total END), 0) AS money,
+            COALESCE(SUM(CASE WHEN refund_mode = 'credit' THEN total END), 0) AS adjusted
        FROM credit_notes WHERE bill_id = ? AND status = 'active'`,
     [billId],
   )!;
-  const moneyRefundable = Math.max(0, bill.paid - sums.money);
+  // Credit bills settled later (payments received): the part of this bill's credit that the customer
+  // has paid since may go back in money too. The customer's dues count against this bill first, and
+  // returns already adjusted in the account took their part of the credit off without any payment.
+  const creditLeft = Math.max(0, bill.credit - sums.adjusted);
+  const owed = bill.customer_id && creditLeft > 0 ? Math.max(0, partyBalance(ctx, 'customer', bill.customer_id, { account: 'AR' })) : 0;
+  const paidLater = Math.max(0, Math.min(creditLeft, creditLeft - owed));
+  const moneyRefundable = Math.max(0, bill.paid + paidLater - sums.money);
+  const stillOwed = creditLeft - paidLater;
   const suggestedRefundMode: PaymentMode =
-    bill.customer_id && (bill.credit > 0 || moneyRefundable <= 0)
+    bill.customer_id && (stillOwed > 0 || moneyRefundable <= 0)
       ? 'credit'
-      : bill.payment_mode === 'split' || bill.payment_mode === 'credit'
-        ? bill.customer_id
-          ? 'credit'
-          : 'cash'
-        : bill.payment_mode;
+      : bill.payment_mode === 'credit'
+        ? 'cash'
+        : bill.payment_mode === 'split'
+          ? bill.customer_id
+            ? 'credit'
+            : 'cash'
+          : bill.payment_mode;
+  // Earlier returns at a lower refund rate mean the bill is not settled by returning the rest.
+  const allAtPaidRate = lines.every((l) => {
+    const done = returned.get(l.billItemId);
+    return !done || done.min_rate >= l.netRate;
+  });
   return {
     bill: {
       id: bill.id,
@@ -338,7 +362,9 @@ export function billReturnable(ctx: Ctx, billId: number): BillReturnable {
     returnedValue: sums.value,
     refundable: Math.max(0, bill.total - sums.total),
     moneyRefunded: sums.money,
+    paidLater,
     moneyRefundable,
+    allAtPaidRate,
     roundOff: getSection(ctx, 'billing').roundOff,
     suggestedRefundMode,
   };
@@ -458,8 +484,16 @@ export function createCreditNote(ctx: Ctx, input: CreateCreditNoteInput): Credit
         { total: 'Nothing to refund' },
       );
     }
-    // Rounded on the running total of the bill's returns, and never more than is left of the bill.
-    total = returnNoteTotal({ billTotal: bill.total, returnedTotal: r.returnedTotal, returnedValue: r.returnedValue, value: subtotal, roundOff: r.roundOff });
+    // Rounded on the running total of the bill's returns, and never more than is left of the bill;
+    // taking back everything left at the rate paid settles the bill exactly.
+    total = returnNoteTotal({
+      billTotal: bill.total,
+      returnedTotal: r.returnedTotal,
+      returnedValue: r.returnedValue,
+      value: subtotal,
+      roundOff: r.roundOff,
+      settles: returnSettlesBill(r, items),
+    });
     if (total <= 0) {
       throw fail.validation(
         r.refundable <= 0
@@ -477,14 +511,15 @@ export function createCreditNote(ctx: Ctx, input: CreateCreditNoteInput): Credit
         refundMode: 'No customer on the bill',
       });
     }
-    // Money goes back only up to what was received on the bill; anything more is adjusted in the customer's account.
+    // Money goes back only up to what was paid for the bill; anything more is adjusted in the customer's account.
     if (input.refundMode !== 'credit' && total > r.moneyRefundable) {
+      const received = bill.paid + r.paidLater;
       const why =
-        bill.paid <= 0
+        received <= 0
           ? `Nothing was paid on bill ${bill.bill_no} (it was sold on credit), so the return cannot be paid back in money.`
           : r.moneyRefundable <= 0
-            ? `The ${formatINR(bill.paid)} received on bill ${bill.bill_no} has already been paid back, so nothing more can be refunded in money.`
-            : `Only ${formatINR(bill.paid)} was received on bill ${bill.bill_no}${r.moneyRefunded ? ` and ${formatINR(r.moneyRefunded)} has already been paid back` : ''}, so at most ${formatINR(r.moneyRefundable)} can be refunded in money.`;
+            ? `The ${formatINR(received)} received on bill ${bill.bill_no} has already been paid back, so nothing more can be refunded in money.`
+            : `Only ${formatINR(received)} was received on bill ${bill.bill_no}${r.moneyRefunded ? ` and ${formatINR(r.moneyRefunded)} has already been paid back` : ''}, so at most ${formatINR(r.moneyRefundable)} can be refunded in money.`;
       throw fail.validation(customerId ? `${why} Choose "Adjust" to take ${formatINR(total)} off ${customerName}'s balance, or return fewer items now.` : why, {
         refundMode: r.moneyRefundable > 0 ? `At most ${formatINR(r.moneyRefundable)} in money` : 'Adjust in the account',
       });
@@ -582,6 +617,7 @@ export function cancelCreditNote(ctx: Ctx, id: number, reason: string): CreditNo
   if (r.status === 'cancelled') throw fail.validation(`${r.cn_no} is already cancelled.`);
   const why = reason.trim();
   if (!why) throw fail.validation('Enter the reason for cancelling.', { reason: 'Reason is required' });
+  assertCancelKeepsClosedAccounts(ctx, r.journal_entry_id, r.kind === 'return' ? 'this return' : 'this credit note');
   ctx.db.update('credit_notes', id, { status: 'cancelled', cancelled_by: currentUserId(ctx), cancelled_at: now(ctx), cancel_reason: why });
   if (r.journal_entry_id) voidEntry(ctx, r.journal_entry_id, `${r.cn_no} cancelled: ${why}`);
   const detail = getCreditNote(ctx, id);
@@ -731,8 +767,9 @@ export function creditNoteReceiptDoc(ctx: Ctx, d: CreditNoteDetail, opts: { dupl
   const lines: string[] = [];
   if (d.items.length) lines.push(itemCountLine(d.items));
   if (receipt.showAmountInWords) lines.push(amountInWords(d.total));
-  if (d.refundMode === 'credit' && d.customer && d.status === 'active') {
-    lines.push(customerBalanceLine(d.customer.balance, today(ctx)));
+  // For the customer: the real balance from the books, even when the user printing may not see balances.
+  if (d.refundMode === 'credit' && d.customerId && d.customer && d.status === 'active') {
+    lines.push(customerBalanceLine(partyBalance(ctx, 'customer', d.customerId, { account: 'AR' }), today(ctx)));
   }
   if (d.reason) lines.push(`Reason: ${d.reason}`);
   if (d.status === 'cancelled') lines.push(`Cancelled${d.cancelledAt ? ` on ${formatDate(d.cancelledAt)}` : ''}: ${d.cancelReason ?? ''}`);

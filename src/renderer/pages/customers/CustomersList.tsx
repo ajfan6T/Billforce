@@ -10,7 +10,7 @@ import { useAuth } from '../../auth';
 import type { ApiOutput } from '../../api';
 import { formatINR } from '../../../shared/money';
 import { formatDate, todayISO } from '../../../shared/dates';
-import { BalanceText, InactiveBadge, listReport } from './common';
+import { BalanceText, countText, InactiveBadge, listReport } from './common';
 import { CustomerFormModal } from './CustomerFormModal';
 import { ReceiptModal } from './ReceiptModal';
 
@@ -99,7 +99,7 @@ export function CustomersListPage() {
     <Page>
       <PageHeader
         title="Customers"
-        subtitle={rows ? `${rows.length} customer${rows.length === 1 ? '' : 's'}` : undefined}
+        subtitle={rows ? countText(rows.length, 'customer') : undefined}
         actions={
           <>
             {can('customers.receive') && (
@@ -158,7 +158,7 @@ export function CustomersListPage() {
             footer={
               rows && rows.length > 1
                 ? {
-                    name: `${rows.length} customers`,
+                    name: countText(rows.length, 'customer'),
                     balance: <span className="money">{formatINR(totals.due - totals.advance)}</span>,
                     billedThisFy: <span className="money">{formatINR(totals.billed)}</span>,
                   }

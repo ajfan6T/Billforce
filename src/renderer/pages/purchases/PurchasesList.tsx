@@ -10,7 +10,7 @@ import { useAuth } from '../../auth';
 import type { ApiOutput } from '../../api';
 import { formatINR } from '../../../shared/money';
 import { describeRange } from '../../../shared/dates';
-import { CancelledBadge, fmtMode, listReport, ModeBadge, useRange } from '../customers/common';
+import { CancelledBadge, countText, fmtMode, listReport, ModeBadge, useRange } from '../customers/common';
 
 type Row = ApiOutput<'purchases.list'>['rows'][number];
 
@@ -75,7 +75,7 @@ export function PurchasesListPage() {
         ],
         list.data.rows,
         {
-          totals: { date: null, no: 'Total', supplier: `${list.data.totals.count} bills`, billNo: null, items: null, account: null, mode: null, total: list.data.totals.total, paid: list.data.totals.paid, credit: list.data.totals.credit },
+          totals: { date: null, no: 'Total', supplier: countText(list.data.totals.count, 'bill'), billNo: null, items: null, account: null, mode: null, total: list.data.totals.total, paid: list.data.totals.paid, credit: list.data.totals.credit },
           summary: [
             { label: 'Total purchases', value: list.data.totals.total, type: 'money' },
             { label: 'Paid', value: list.data.totals.paid, type: 'money' },
@@ -104,7 +104,7 @@ export function PurchasesListPage() {
         }
       />
       <StatGrid>
-        <Stat label="Total purchases" value={formatINR(t?.total ?? 0)} hint={`${t?.count ?? 0} bills · ${describeRange(range)}`} />
+        <Stat label="Total purchases" value={formatINR(t?.total ?? 0)} hint={`${countText(t?.count ?? 0, 'bill')} · ${describeRange(range)}`} />
         <Stat label="Paid" value={formatINR(t?.paid ?? 0)} tone="green" />
         <Stat label="On credit" value={formatINR(t?.credit ?? 0)} tone={t?.credit ? 'red' : undefined} hint={t?.cancelled ? `${t.cancelled} cancelled not counted` : 'Added to supplier balances'} />
       </StatGrid>
@@ -159,7 +159,7 @@ export function PurchasesListPage() {
             footer={
               t && list.data!.rows.length
                 ? {
-                    date: `${t.count} bills`,
+                    date: countText(t.count, 'bill'),
                     total: <span className="money">{formatINR(t.total)}</span>,
                     credit: <span className="money">{formatINR(t.credit)}</span>,
                   }

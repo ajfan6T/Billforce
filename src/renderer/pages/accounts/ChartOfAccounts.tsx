@@ -10,7 +10,7 @@ import { useAuth } from '../../auth';
 import { useDialogs, useToast } from '../../feedback';
 import { call, type ApiOutput } from '../../api';
 import { formatDrCr } from '../../../shared/money';
-import { formatDate, todayISO } from '../../../shared/dates';
+import { formatDate } from '../../../shared/dates';
 import { ACCOUNT_TYPE_LABELS, DEBIT_NATURE, type AccountType } from '../../../shared/constants';
 import type { ReportData, ReportRow } from '../../../shared/report';
 import './accounts.css';
@@ -20,6 +20,18 @@ type ChartAccount = Chart['types'][number]['groups'][number]['accounts'][number]
 type Group = ApiOutput<'accounts.groups'>[number];
 
 const MODE_NAMES: Record<string, string> = { cash: 'Cash', upi: 'UPI', bank: 'Bank' };
+
+const PREVIOUS_YEARS = 'Profit & loss (previous years)';
+
+/** Why income and expense balances are for one year, and where earlier years went. */
+function yearNote(c: Chart): string {
+  return (
+    `Income and expense accounts start every financial year at zero, so they show ${c.financialYear.name} from ${formatDate(c.financialYear.start)}, ` +
+    `as in the trial balance and their ledgers. ${
+      c.previousYears ? `Earlier years that are not closed yet are in "${PREVIOUS_YEARS}" under Capital.` : 'Earlier years are in capital once the year is closed.'
+    }`
+  );
+}
 
 export function ChartOfAccountsPage() {
   const navigate = useNavigate();
@@ -84,12 +96,15 @@ export function ChartOfAccountsPage() {
           rows.push({ cells: { code: a.code, name: a.name, group: g.name, balance: a.balance }, indent: 1, link: { kind: 'account', id: a.id } });
         }
       }
+      if (t.type === 'equity' && chart.data.previousYears) {
+        rows.push({ cells: { code: null, name: PREVIOUS_YEARS, group: 'Profit & Loss Account', balance: chart.data.previousYears }, indent: 1 });
+      }
     }
     rows.push({ cells: { code: null, name: 'Total debit balances', group: null, balance: chart.data.totalDebit }, style: 'total' });
     rows.push({ cells: { code: null, name: 'Total credit balances', group: null, balance: -chart.data.totalCredit }, style: 'total' });
     return {
       title: 'Chart of accounts',
-      subtitle: `Balances as on ${formatDate(todayISO())}`,
+      subtitle: `Balances as on ${formatDate(chart.data.asOf)} · income and expenses for financial year ${chart.data.financialYear.name}`,
       columns: [
         { key: 'code', label: 'Code', width: 9 },
         { key: 'name', label: 'Account', width: 34 },
@@ -97,6 +112,7 @@ export function ChartOfAccountsPage() {
         { key: 'balance', label: 'Balance', type: 'drcr', width: 18 },
       ],
       rows,
+      notes: [yearNote(chart.data)],
     };
   }, [chart.data]);
 
@@ -141,6 +157,25 @@ export function ChartOfAccountsPage() {
                         onDelete={remove}
                       />
                     ))}
+                    {t.type === 'equity' && chart.data!.previousYears !== 0 && (
+                      <>
+                        <tr className="ac-group">
+                          <td className="ac-code" />
+                          <td className="ac-name">
+                            Profit & Loss Account
+                            <span className="ac-sub">Income less expenses of earlier years that are not closed yet</span>
+                          </td>
+                          <td className="ac-bal money">{formatDrCr(chart.data!.previousYears)}</td>
+                          <td className="ac-actions" />
+                        </tr>
+                        <tr className="ac-acct ac-pl-prev" title="Close earlier years from Accounts > Year-end closing">
+                          <td className="ac-code" />
+                          <td className="ac-name">{PREVIOUS_YEARS}</td>
+                          <td className="ac-bal money">{formatDrCr(chart.data!.previousYears)}</td>
+                          <td className="ac-actions" />
+                        </tr>
+                      </>
+                    )}
                   </tbody>
                 </table>
               </Card>
@@ -166,6 +201,7 @@ export function ChartOfAccountsPage() {
                 <p className="small muted mt-0">
                   <b>Dr</b> (debit) balances are what the business owns or spent; <b>Cr</b> (credit) balances are what it owes, earned or the owner put in.
                 </p>
+                <p className="small muted mt-0 ac-year-note">{yearNote(chart.data)}</p>
               </div>
             </Card>
           </div>
@@ -321,7 +357,12 @@ function AccountFormModal({
     if (!accountId && group && !touchedSide) setSide(DEBIT_NATURE[group.type] ? 'debit' : 'credit');
   }, [accountId, group, touchedSide]);
   const canHaveOpening = accountId ? d?.openingBalance !== null && d?.openingBalance !== undefined : type === 'asset' || type === 'liability' || type === 'equity';
-  const locked = canHaveOpening ? (accountId ? (d?.openingLockedReason ?? null) : openingLockedReason) : null;
+  // An inactive account keeps a zero balance: its opening balance can be changed only after it is re-activated.
+  const locked = canHaveOpening
+    ? accountId
+      ? (d?.openingLockedReason ?? (d && !d.isActive ? 'This account is inactive — activate it first to change its opening balance.' : null))
+      : openingLockedReason
+    : null;
   const openingAllowed = canHaveOpening && !locked;
   const busy = create.loading || update.loading;
   const error = create.error || update.error;

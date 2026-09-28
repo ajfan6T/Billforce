@@ -11,6 +11,7 @@ import { formatINR } from '../../../shared/money';
 import { todayISO } from '../../../shared/dates';
 import type { SettlementMode } from '../../../shared/constants';
 import { FieldGroup, useRange } from './common';
+import { PaymentBalanceHint, useShortfallConfirm } from './PaymentBalance';
 
 type Settle = { mode: SettlementMode; accountId: number | null };
 
@@ -131,12 +132,17 @@ function DrawingsCard({ onSaved }: { onSaved: () => void }) {
   const [kind, setKind] = useState<'money' | 'goods'>('money');
   const [pay, setPay] = useState<Settle>({ mode: 'cash', accountId: null });
   const [narration, setNarration] = useState('');
+  const confirmShortfall = useShortfallConfirm();
+  const payment = kind === 'money' ? { mode: pay.mode, accountId: pay.accountId, amount, date } : null;
   const save = async () => {
-    if (!amount) return;
+    if (!amount || m.loading) return;
+    // Ask before cash / bank goes below zero, not only after saving.
+    const accepted = await confirmShortfall(payment);
+    if (!accepted) return;
     try {
       const e = await m.run({ date, amount, goods: kind === 'goods', mode: kind === 'money' ? pay.mode : null, accountId: kind === 'money' ? pay.accountId : null, narration: narration.trim() || null });
       toast.success(`Recorded drawings of ${formatINR(amount)} (${e.voucherNo})`);
-      for (const w of e.warnings) toast.warning(w);
+      for (const w of e.warnings) if (!accepted.includes(w)) toast.warning(w);
       setAmount(null);
       setNarration('');
       onSaved();
@@ -181,6 +187,7 @@ function DrawingsCard({ onSaved }: { onSaved: () => void }) {
         {kind === 'money' ? (
           <FieldGroup label="Taken from">
             <SettlementPicker value={pay} onChange={setPay} />
+            <PaymentBalanceHint payment={payment} />
           </FieldGroup>
         ) : (
           <div className="small muted">Enter the cost price of the goods. It is taken out of Purchases so your profit is not overstated.</div>

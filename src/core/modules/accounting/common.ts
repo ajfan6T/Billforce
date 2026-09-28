@@ -3,16 +3,17 @@
  * "particulars" text for books and ledgers, and user names.
  */
 import type { Ctx } from '../../context';
-import { today } from '../../context';
+import { can, today } from '../../context';
 import { AppError, fail } from '../../errors';
 import { formatDate, fyOf, isValidISODate } from '../../../shared/dates';
-import { VOUCHER_TYPE_LABELS, type PartyType, type VoucherType } from '../../../shared/constants';
+import { VOUCHER_TYPE_LABELS, type PartyType, type SettlementMode, type VoucherType } from '../../../shared/constants';
 import {
   accountBalance,
   getEntry,
   getEntryLines,
   getAccount,
   negativeBalanceWarning,
+  paymentAccountId,
   systemAccountId,
   voidEntry,
   type AccountRow,
@@ -21,6 +22,7 @@ import {
 } from '../../accounting/ledger';
 import { isDateInClosedYear } from '../../accounting/periods';
 import { getSection } from '../../settings';
+import { formatDrCr } from '../../../shared/money';
 
 /** Source types whose entries can be edited / cancelled from the Accounts pages. */
 export const EDITABLE_SOURCES = ['manual', 'loan'] as const;
@@ -98,6 +100,18 @@ export function activeAccount(ctx: Ctx, id: number, what = 'account'): AccountRo
   }
   if (!acct.is_active) throw fail.validation(`"${acct.name}" is inactive. Re-activate it in the chart of accounts or choose another ${what}.`);
   return acct;
+}
+
+/**
+ * An account a document being edited already uses: it may have been deactivated since
+ * (e.g. an expense head no longer used), which is fine as long as it stays the same account.
+ */
+export function savedAccount(ctx: Ctx, id: number, what = 'account'): AccountRow {
+  try {
+    return getAccount(ctx, id);
+  } catch {
+    throw fail.validation(`The ${what} was not found. Please choose it again.`);
+  }
 }
 
 export interface EntryLineView {
@@ -228,6 +242,49 @@ export function outflowWarnings(ctx: Ctx, lines: EntryLineInput[], date: string,
   return outflows.map(([id, net]) => negativeBalanceWarning(ctx, id, -net, date)).filter((w): w is string => !!w);
 }
 
+export interface PaymentCheckInput {
+  mode: SettlementMode;
+  /** Cash / bank account paid from; default = the account for the mode. */
+  accountId?: number | null;
+  /** Money going out, in paise. */
+  amount: number;
+  date?: string | null;
+  /** When editing a saved document: its ledger entry, which is left out (it is replaced on saving). */
+  entryId?: number | null;
+}
+
+export interface PaymentCheck {
+  accountId: number;
+  accountName: string;
+  date: string;
+  /** Balance at the end of `date` before this payment; null when the user may not see balances. */
+  balance: number | null;
+  /** The warning the payment would get after saving ("Cash in Hand will be short by ..."); null = enough money. */
+  warning: string | null;
+}
+
+/**
+ * Check a payment before it is saved (salary, advance, expense, drawings ...), so the
+ * form can show the balance next to "Paid from" and ask before money goes below zero.
+ */
+export function paymentCheck(ctx: Ctx, input: PaymentCheckInput): PaymentCheck {
+  const date = input.date && isValidISODate(input.date) ? input.date : today(ctx);
+  const accountId = paymentAccountId(ctx, input.mode, input.accountId);
+  const acct = getAccount(ctx, accountId);
+  const seesBalances = can(ctx, 'accounts.view');
+  let balance: number | null = null;
+  if (seesBalances) {
+    const skip = input.entryId ? ' AND e.id <> ?' : '';
+    balance = ctx.db.value<number>(
+      `SELECT COALESCE(SUM(l.debit - l.credit), 0) FROM journal_lines l JOIN journal_entries e ON e.id = l.entry_id
+        WHERE l.account_id = ? AND e.is_void = 0 AND e.date <= ?${skip}`,
+      input.entryId ? [accountId, date, input.entryId] : [accountId, date],
+      0,
+    );
+  }
+  return { accountId, accountName: acct.name, date, balance, warning: negativeBalanceWarning(ctx, accountId, input.amount, date, input.entryId) };
+}
+
 /** A closed loan's transactions cannot be cancelled or changed until the loan is re-opened. */
 export function assertLoanOpen(ctx: Ctx, e: Pick<JournalEntryRow, 'source_type' | 'source_id'>, action: 'cancel' | 'change'): void {
   if (e.source_type !== 'loan' || !e.source_id) return;
@@ -243,7 +300,13 @@ export function assertLoanOpen(ctx: Ctx, e: Pick<JournalEntryRow, 'source_type' 
  * account: a loan is only closed, and an account only deactivated, at a zero
  * balance. Income and expense accounts may be inactive with a balance.
  */
-export function assertClosedAccountsUntouched(ctx: Ctx, entryId: number, newLines: EntryLineInput[] | null, action: 'cancel' | 'change'): void {
+export function assertClosedAccountsUntouched(
+  ctx: Ctx,
+  entryId: number,
+  newLines: EntryLineInput[] | null,
+  action: 'cancel' | 'change',
+  what = 'this entry',
+): void {
   const e = getEntry(ctx, entryId);
   const verb = action === 'cancel' ? 'cancelling' : 'changing';
   assertLoanOpen(ctx, e, action);
@@ -258,14 +321,27 @@ export function assertClosedAccountsUntouched(ctx: Ctx, entryId: number, newLine
     if (!change) continue;
     const acct = getAccount(ctx, id);
     if (acct.is_active || acct.type === 'income' || acct.type === 'expense') continue;
-    if (accountBalance(ctx, id) + change === 0) continue;
+    const newBalance = accountBalance(ctx, id) + change;
+    if (newBalance === 0) continue;
     const loan = ctx.db.get<{ name: string }>('SELECT name FROM loans WHERE account_id = ?', [id]);
     throw fail.validation(
       loan
-        ? `The loan "${loan.name}" is closed, and ${verb} this entry would change what is outstanding on it. Re-open the loan from Accounts > Loans first.`
-        : `"${acct.name}" is inactive, and ${verb} this entry would give it a balance. Re-activate it in the chart of accounts first.`,
+        ? `The loan "${loan.name}" is closed, and ${verb} ${what} would change what is outstanding on it. Re-open the loan from Accounts > Loans first.`
+        : `"${acct.name}" is inactive — activate it first in Accounts > Chart of accounts. ${verb[0].toUpperCase()}${verb.slice(1)} ${what} would give it a balance of ${formatDrCr(newBalance)}.`,
     );
   }
+}
+
+/**
+ * Guard for cancelling a document (bill, payment, purchase, advance ...): refuse
+ * when voiding its ledger entry would leave an inactive cash / bank (or other
+ * balance-sheet) account, or a closed loan, with a balance. An account is only
+ * deactivated at zero, and must stay there. Call before voidEntry.
+ * `what` names the document in the message, e.g. "this bill".
+ */
+export function assertCancelKeepsClosedAccounts(ctx: Ctx, entryId: number | null | undefined, what: string): void {
+  if (!entryId) return;
+  assertClosedAccountsUntouched(ctx, entryId, null, 'cancel', what);
 }
 
 /** Why opening balances can no longer be entered (the first financial year is closed); null when they can. */

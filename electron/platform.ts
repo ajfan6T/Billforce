@@ -3,7 +3,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { randomBytes } from 'node:crypto';
-import type { FileFilter, Platform, PrinterInfo, PrintOptions, PrintResult } from '../src/core/platform';
+import { writeFileSafely, type FileFilter, type Platform, type PrinterInfo, type PrintOptions, type PrintResult } from '../src/core/platform';
 
 /** File types Windows would run rather than open. */
 const EXECUTABLE = /\.(exe|com|bat|cmd|msi|msp|scr|pif|lnk|url|ps1|psm1|vbs|vbe|js|jse|wsf|wsh|hta|cpl|jar|reg|appref-ms)$/i;
@@ -93,7 +93,8 @@ export class ElectronPlatform implements Platform {
     const dialogOpts = { defaultPath: path.join(dir, opts.defaultName), filters: opts.filters };
     const res = win ? await dialog.showSaveDialog(win, dialogOpts) : await dialog.showSaveDialog(dialogOpts);
     if (res.canceled || !res.filePath) return null;
-    fs.writeFileSync(res.filePath, typeof opts.data === 'string' ? opts.data : Buffer.from(opts.data));
+    // Via "<name>.partial" + rename: a full or pulled-out pen drive never keeps a cut-short file under the real name.
+    await writeFileSafely(res.filePath, opts.data);
     this.lastSaveDir = path.dirname(res.filePath);
     return res.filePath;
   }

@@ -9,6 +9,7 @@ import * as expenses from './expenses';
 import * as loans from './loans';
 import * as books from './books';
 import * as yearEnd from './yearend';
+import { paymentCheck } from './common';
 
 const zAccountId = z.number({ error: 'Choose an account' }).int().positive('Choose an account');
 const zOptAccountId = z.number().int().positive().nullish();
@@ -89,6 +90,18 @@ export const accountingRoutes = {
   'accounts.paymentAccounts': route({ access: 'user', handler: (ctx) => accounts.paymentAccounts(ctx) }),
 
   /* ------------------------------ Chart of accounts ------------------------------ */
+  /** Balance of the account a payment is made from, checked before saving (salary, advance, expense, drawings). */
+  'accounts.paymentCheck': route({
+    access: ['expenses.manage', 'accounts.manage', 'employees.salary', 'accounts.view'],
+    input: z.object({
+      mode: zSettlementMode,
+      accountId: zOptAccountId,
+      amount: zPaise,
+      date: zOptDate,
+      entryId: z.number().int().positive().nullish(),
+    }),
+    handler: (ctx, input) => paymentCheck(ctx, input),
+  }),
   'accounts.groups': route({ access: [...CHART_VIEW, 'expenses.manage'], handler: (ctx) => chart.listGroups(ctx) }),
   'accounts.chart': route({
     access: [...CHART_VIEW],

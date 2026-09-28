@@ -192,7 +192,8 @@ function BillView({ bill, reload, tab, setTab }: { bill: Bill; reload: () => Pro
                     ),
                   ],
                   ['Phone', bill.customerPhone],
-                  bill.customer ? ['Balance now', <Money key="b" value={bill.customer.balance} colored={false} />] : ['Bill date', formatDate(bill.date)],
+                  // No balance at all (not ₹0) for users who may not see customer balances.
+                  bill.customer && !bill.customer.balanceHidden ? ['Balance now', <Money key="b" value={bill.customer.balance} colored={false} />] : ['Bill date', formatDate(bill.date)],
                   ['Payment', <ModeBadge key="m" mode={bill.paymentMode} credit={bill.credit} />],
                   ['Paid now', <Money key="p" value={bill.paid} />],
                   ['On credit', bill.credit ? <Money key="c" value={bill.credit} /> : '—'],
@@ -308,7 +309,8 @@ function BillView({ bill, reload, tab, setTab }: { bill: Bill; reload: () => Pro
           </div>
         </div>
       ) : (
-        <BillHistory billId={bill.id} count={bill.revisions.length} />
+        // Keyed by the version count, so cancelling or editing the bill with this tab open loads the new version.
+        <BillHistory key={bill.revisions.length} billId={bill.id} count={bill.revisions.length} />
       )}
     </Page>
   );

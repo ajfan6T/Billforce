@@ -241,14 +241,17 @@ describe('supplier statement and payables', () => {
     await t.call('purchases.cancel', { id: void1.id, reason: 'Wrong supplier' });
 
     const st = await t.call('suppliers.statement', { supplierId: s.id, from: '2026-04-01', to: '2026-09-28' });
+    // The opening balance (dated the books start) is brought forward, as on the Ledgers page.
+    expect(st.rows[0].cells).toMatchObject({ particulars: 'Balance brought forward (incl. opening balance)', balance: -20000 });
     const body = st.rows.slice(1, -1);
-    expect(body.map((r) => r.cells.type)).toEqual(['Opening balance', 'Purchase bill', 'Payment made', 'Purchase bill']);
-    expect(body.map((r) => r.cells.balance)).toEqual([-20000, -220000, -118000, -138000]);
-    expect(body[1].cells).toMatchObject({ number: p1.purchaseNo, particulars: 'Bill GT/101: Sugar 50 kg', credit: 200000, debit: null });
-    expect(body[1].link).toEqual({ kind: 'purchase', id: p1.id });
-    expect(body[2].cells).toMatchObject({ particulars: 'Bank · Ref NEFT 1 · incl. discount ₹20.00', debit: 102000 });
-    expect(body[2].link).toEqual({ kind: 'supplier_payment', id: pay.id });
-    expect(body[3].cells.particulars).toBe('Oil 2 ltr (bill ₹300.00, paid ₹100.00)');
+    expect(body.map((r) => r.cells.type)).toEqual(['Purchase bill', 'Payment made', 'Purchase bill']);
+    expect(body.map((r) => r.cells.balance)).toEqual([-220000, -118000, -138000]);
+    expect(body[0].cells).toMatchObject({ number: p1.purchaseNo, particulars: 'Bill GT/101: Sugar 50 kg', credit: 200000, debit: null });
+    expect(body[0].link).toEqual({ kind: 'purchase', id: p1.id });
+    expect(body[1].cells).toMatchObject({ particulars: 'Bank · Ref NEFT 1 · incl. discount ₹20.00', debit: 102000 });
+    expect(body[1].link).toEqual({ kind: 'supplier_payment', id: pay.id });
+    expect(body[2].cells.particulars).toBe('Oil 2 ltr (bill ₹300.00, paid ₹100.00)');
+    expect(st.summary?.slice(0, 3).map((x) => x.value)).toEqual([-20000, 102000, 200000 + 20000]);
     const closing = st.rows[st.rows.length - 1];
     expect(closing.cells.balance).toBe(-payable(t, s.id));
     expect(st.summary?.find((x) => x.label === 'Status')?.value).toBe('You owe ₹1,380.00');
@@ -320,5 +323,67 @@ describe('review fixes: supplier payments', () => {
     expect(t.platform.printed[1].html).toContain('DUPLICATE');
     expect(t.platform.printed[1].opts.copies).toBe(1);
     expect((await t.call('supplierPayments.get', { id: p.id })).printCount).toBe(2);
+  });
+});
+
+describe('review round 2: supplier opening balances and statements', () => {
+  it('setting or changing an opening balance needs "Journals, capital, drawings, loans, transfers" (accounts.manage)', async () => {
+    const t = await createTestApp();
+    const s = await t.call('suppliers.create', { name: 'Balaji', phone: '98000 00001', openingBalance: { amount: 500000, direction: 'payable' } });
+    await t.call('roles.update', { role: 'cashier', permissions: ['billing.create', 'suppliers.view', 'suppliers.manage'] });
+    await t.loginAs('cashier');
+
+    // Wiping out, changing or flipping the opening payable.
+    for (const openingBalance of [null, { amount: 100, direction: 'payable' as const }, { amount: 500000, direction: 'advance' as const }]) {
+      const err = await t.fails('suppliers.update', { id: s.id, name: 'Balaji', phone: '98000 00001', openingBalance });
+      expect(err.code).toBe('FORBIDDEN');
+      expect(err.message).toContain('not allowed to set or change opening balances');
+    }
+    expect(payable(t, s.id)).toBe(500000);
+    expect(systemBalance(t.app, 'AP')).toBe(-500000);
+    expect(systemBalance(t.app, 'OPENING_EQUITY')).toBe(500000);
+    // Inventing one for a new supplier.
+    expect((await t.fails('suppliers.create', { name: 'Friend Traders', openingBalance: { amount: 2000000, direction: 'payable' } })).code).toBe('FORBIDDEN');
+    expect(t.app.db.value("SELECT COUNT(*) FROM suppliers WHERE name = 'Friend Traders'")).toBe(0);
+    expect(systemBalance(t.app, 'AP')).toBe(-500000);
+
+    // Ordinary edits still work: leaving the opening out, or sending the saved one back unchanged.
+    let u = await t.call('suppliers.update', { id: s.id, name: 'Balaji Traders', phone: '98000 00001' });
+    expect(u).toMatchObject({ name: 'Balaji Traders', openingBalance: { amount: 500000, direction: 'payable' }, payable: 500000 });
+    u = await t.call('suppliers.update', { id: s.id, name: 'Balaji Traders', openingBalance: { amount: 500000, direction: 'payable' } });
+    expect(u.payable).toBe(500000);
+    expect(await t.call('suppliers.create', { name: 'Plain', openingBalance: null })).toMatchObject({ openingBalance: null, payable: 0 });
+    expect(await t.call('suppliers.create', { name: 'Zero', openingBalance: { amount: 0, direction: 'payable' } })).toMatchObject({ openingBalance: null });
+
+    // The manager has accounts.manage by default.
+    await t.loginAs('manager');
+    u = await t.call('suppliers.update', { id: s.id, name: 'Balaji Traders', openingBalance: null });
+    expect(u).toMatchObject({ openingBalance: null, payable: 0 });
+    expect((await t.call('suppliers.create', { name: 'Friend Traders', openingBalance: { amount: 2000000, direction: 'payable' } })).payable).toBe(2000000);
+    expect(ledgerProblems(t.app)).toEqual([]);
+  });
+
+  it('the statement brings the opening balance forward like books.ledger; payables say "1 supplier"', async () => {
+    const t = await createTestApp();
+    const s = await t.call('suppliers.create', { name: 'Balaji', openingBalance: { amount: 70000, direction: 'payable' } });
+    await creditPurchase(t, s.id, 30000, '2026-05-05');
+    for (const [from, to] of [
+      ['2026-04-01', '2026-09-28'],
+      ['2026-06-01', '2026-09-28'],
+    ] as const) {
+      const st = await t.call('suppliers.statement', { supplierId: s.id, from, to });
+      const bl = await t.call('books.ledger', { from, to, partyType: 'supplier', partyId: s.id });
+      expect(st.summary?.slice(0, 4).map((x) => x.value)).toEqual([bl.opening, bl.totalIn, bl.totalOut, bl.closing]);
+    }
+    const st = await t.call('suppliers.statement', { supplierId: s.id, from: '2026-04-01', to: '2026-09-28' });
+    expect(st.rows.map((r) => r.cells.particulars)).toEqual([
+      'Balance brought forward (incl. opening balance)',
+      'Stock 1',
+      'Closing balance',
+    ]);
+    expect(st.rows[0].cells.balance).toBe(-70000);
+
+    const rep = await t.call('suppliers.payables', { asOf: '2026-09-28' });
+    expect(rep.rows.map((r) => r.cells.name)).toEqual(['Balaji', 'Total (1 supplier)']);
   });
 });

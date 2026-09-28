@@ -22,6 +22,7 @@ import {
   entryLines,
   outflowWarnings,
   resolveVoucherDate,
+  savedAccount,
   userName,
   type EntryLineView,
 } from './common';
@@ -174,9 +175,14 @@ interface Resolved {
   remarks: string | null;
 }
 
-function resolve(ctx: Ctx, input: ExpenseInput, keepDate?: string): Resolved {
-  const date = resolveVoucherDate(ctx, input.date || keepDate, 'An expense');
-  const acct = activeAccount(ctx, input.accountId, 'expense head');
+/**
+ * Check an expense entered by the user. When editing, pass the saved expense: its date is the default, and
+ * the head and cash / bank account it already uses stay allowed after they were deactivated (the balance
+ * rules for inactive accounts are checked separately, before posting).
+ */
+function resolve(ctx: Ctx, input: ExpenseInput, saved?: Pick<Expense, 'date' | 'accountId' | 'payAccountId'>): Resolved {
+  const date = resolveVoucherDate(ctx, input.date || saved?.date, 'An expense');
+  const acct = saved && input.accountId === saved.accountId ? savedAccount(ctx, input.accountId, 'expense head') : activeAccount(ctx, input.accountId, 'expense head');
   if (acct.type !== 'expense') {
     throw fail.validation(`"${acct.name}" is not an expense head. Choose one like Rent, Electricity or Transport.`, { accountId: 'Choose an expense head' });
   }
@@ -191,7 +197,8 @@ function resolve(ctx: Ctx, input: ExpenseInput, keepDate?: string): Resolved {
     if (!supplier) throw fail.validation('Choose the supplier you owe for this expense (on credit)', { supplierId: 'Choose a supplier' });
   } else {
     const payId = paymentAccountId(ctx, input.mode, input.payAccountId);
-    payAccount = activeAccount(ctx, payId, `${PAYMENT_MODE_LABELS[input.mode]} account`);
+    const what = `${PAYMENT_MODE_LABELS[input.mode]} account`;
+    payAccount = saved && payId === saved.payAccountId ? savedAccount(ctx, payId, what) : activeAccount(ctx, payId, what);
   }
   return {
     date,
@@ -276,7 +283,7 @@ export function createExpense(ctx: Ctx, input: ExpenseInput): SavedExpense {
 export function updateExpense(ctx: Ctx, id: number, input: ExpenseInput & { reason?: string | null }): SavedExpense {
   const before = getExpenseSimple(ctx, id);
   if (before.status === 'cancelled') throw fail.validation('This expense is cancelled and cannot be edited.');
-  const r = resolve(ctx, input, before.date);
+  const r = resolve(ctx, input, before);
   assertSameYear(before.date, r.date, `Expense ${before.expenseNo}`);
   assertClosedAccountsUntouched(ctx, before.journalEntryId!, linesOf(r), 'change');
   const warnings = outflowWarnings(ctx, linesOf(r), r.date, before.journalEntryId!);

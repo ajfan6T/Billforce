@@ -11,7 +11,7 @@ import { useLinkedPeriod, useOpenLink } from '../../links';
 import { call, type ApiOutput } from '../../api';
 import { formatINR } from '../../../shared/money';
 import { describeRange, formatDate } from '../../../shared/dates';
-import { CancelledBadge, InactiveBadge, InfoRow, ModeBadge } from './common';
+import { CancelledBadge, countText, InactiveBadge, InfoRow, ModeBadge } from './common';
 import { CustomerFormModal } from './CustomerFormModal';
 import { ReceiptModal } from './ReceiptModal';
 
@@ -184,7 +184,7 @@ export function CustomerDetailPage() {
           tone={c.overLimit ? 'red' : undefined}
           hint={c.creditLimit !== null ? (c.overLimit ? `Over by ${formatINR(c.balance - c.creditLimit)}` : `${formatINR(Math.max(c.creditLimit - Math.max(c.balance, 0), 0))} available`) : undefined}
         />
-        <Stat label="Total billed" value={formatINR(c.totals.billed)} hint={`${c.totals.bills} bill${c.totals.bills === 1 ? '' : 's'}${c.lastBillDate ? ` · last ${formatDate(c.lastBillDate)}` : ''}`} />
+        <Stat label="Total billed" value={formatINR(c.totals.billed)} hint={`${countText(c.totals.bills, 'bill')}${c.lastBillDate ? ` · last ${formatDate(c.lastBillDate)}` : ''}`} />
         <Stat
           label="Payments received"
           value={formatINR(c.totals.received + c.totals.paidAtBilling)}
@@ -265,7 +265,7 @@ export function CustomerDetailPage() {
               footer={
                 bills.data && bills.data.rows.length
                   ? {
-                      date: `${bills.data.totals.count} bills`,
+                      date: countText(bills.data.totals.count, 'bill'),
                       total: <span className="money">{formatINR(bills.data.totals.total)}</span>,
                       paid: <span className="money">{formatINR(bills.data.totals.paid)}</span>,
                       credit: <span className="money">{formatINR(bills.data.totals.credit)}</span>,
@@ -291,7 +291,7 @@ export function CustomerDetailPage() {
               footer={
                 payments.data && payments.data.rows.length
                   ? {
-                      date: `${payments.data.totals.count} payments`,
+                      date: countText(payments.data.totals.count, 'payment'),
                       discount: <span className="money">{formatINR(payments.data.totals.discount)}</span>,
                       amount: <span className="money">{formatINR(payments.data.totals.amount)}</span>,
                     }

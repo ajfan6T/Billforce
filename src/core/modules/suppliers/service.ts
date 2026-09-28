@@ -1,5 +1,5 @@
 import type { Ctx } from '../../context';
-import { now, today } from '../../context';
+import { assertCan, now, today } from '../../context';
 import { AppError, fail } from '../../errors';
 import { logActivity } from '../../audit';
 import { partyBalance, partyBalances } from '../../accounting/ledger';
@@ -130,6 +130,13 @@ function assertNameFree(ctx: Ctx, name: string, exceptId?: number): void {
   if (dup) throw fail.validation(`A supplier named "${name.trim()}" already exists`, { name: 'Name already used' });
 }
 
+/**
+ * A supplier's opening balance is an accounting entry (payable or advance against the opening
+ * balance adjustment), so setting or changing it needs "Journals, capital, drawings, loans,
+ * transfers" (accounts.manage), not just "Add / edit suppliers".
+ */
+const OPENING_DENIED = 'You are not allowed to set or change opening balances of suppliers. Ask the owner or manager.';
+
 function openingFromDebit(debit: number): SupplierOpeningInput | null {
   if (!debit) return null;
   return debit < 0 ? { amount: -debit, direction: 'payable' } : { amount: debit, direction: 'advance' };
@@ -233,6 +240,8 @@ export function createSupplier(ctx: Ctx, input: SupplierInput): SupplierDetail {
   if (!name) throw fail.validation('Enter the supplier name', { name: 'Enter the supplier name' });
   assertNameFree(ctx, name);
   const email = normalizeEmail(input.email);
+  const debit = debitFromOpening(input.openingBalance);
+  if (debit) assertCan(ctx, 'accounts.manage', OPENING_DENIED);
   const id = ctx.db.insert('suppliers', {
     name,
     phone: input.phone || null,
@@ -242,7 +251,6 @@ export function createSupplier(ctx: Ctx, input: SupplierInput): SupplierDetail {
     notes: input.notes || null,
     created_at: now(ctx),
   });
-  const debit = debitFromOpening(input.openingBalance);
   if (debit) {
     const entryId = setPartyOpeningBalance(ctx, 'supplier', id, name, debit, null);
     ctx.db.update('suppliers', id, { opening_entry_id: entryId });
@@ -262,6 +270,10 @@ export function updateSupplier(ctx: Ctx, id: number, input: SupplierInput): Supp
   if (!name) throw fail.validation('Enter the supplier name', { name: 'Enter the supplier name' });
   if (row.is_active) assertNameFree(ctx, name, id);
   const email = normalizeEmail(input.email);
+  const oldDebit = debitFromOpening(before.openingBalance);
+  const newDebit = input.openingBalance === undefined ? oldDebit : debitFromOpening(input.openingBalance);
+  // Sending the saved opening balance back unchanged is fine; changing it needs the permission.
+  if (newDebit !== oldDebit) assertCan(ctx, 'accounts.manage', OPENING_DENIED);
   ctx.db.update('suppliers', id, {
     name,
     phone: input.phone || null,
@@ -274,14 +286,10 @@ export function updateSupplier(ctx: Ctx, id: number, input: SupplierInput): Supp
   const changes: string[] = [];
   if (before.name !== name) changes.push(`renamed from "${before.name}"`);
   if ((before.phone ?? '') !== (input.phone ?? '')) changes.push(`phone ${before.phone || '-'} → ${input.phone || '-'}`);
-  if (input.openingBalance !== undefined) {
-    const oldDebit = debitFromOpening(before.openingBalance);
-    const newDebit = debitFromOpening(input.openingBalance);
-    if (oldDebit !== newDebit) {
-      const entryId = setPartyOpeningBalance(ctx, 'supplier', id, name, newDebit, row.opening_entry_id);
-      if (entryId !== row.opening_entry_id) ctx.db.update('suppliers', id, { opening_entry_id: entryId });
-      changes.push(`${describeOpening(oldDebit)} → ${describeOpening(newDebit)}`);
-    }
+  if (oldDebit !== newDebit) {
+    const entryId = setPartyOpeningBalance(ctx, 'supplier', id, name, newDebit, row.opening_entry_id);
+    if (entryId !== row.opening_entry_id) ctx.db.update('suppliers', id, { opening_entry_id: entryId });
+    changes.push(`${describeOpening(oldDebit)} → ${describeOpening(newDebit)}`);
   }
   logActivity(ctx, 'supplier.update', `Updated supplier "${name}"${changes.length ? ': ' + changes.join(', ') : ''}`, {
     entityType: 'supplier',
@@ -371,7 +379,7 @@ export function supplierPayables(ctx: Ctx, asOf: string): ReportData {
     };
   });
   if (rows.length) {
-    rows.push({ cells: { name: `Total (${rows.length} suppliers)`, phone: '', payable, advance, lastPurchase: null, lastPayment: null, days: null }, style: 'total' });
+    rows.push({ cells: { name: `Total (${rows.length} supplier${rows.length === 1 ? '' : 's'})`, phone: '', payable, advance, lastPurchase: null, lastPayment: null, days: null }, style: 'total' });
   }
   return {
     title: 'Supplier payables',

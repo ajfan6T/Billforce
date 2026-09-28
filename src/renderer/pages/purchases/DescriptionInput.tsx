@@ -86,6 +86,9 @@ export function DescriptionInput({
         }}
         onChange={(e) => {
           setOpen(true);
+          // A highlight belongs to the suggestions for the old text: typing drops it at once, so a
+          // fast Enter never picks a stale suggestion over what was typed.
+          setActive(-1);
           onChange(e.target.value);
         }}
         onKeyDown={(e) => {

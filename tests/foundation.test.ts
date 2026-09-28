@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import { createTestApp, ledgerProblems, systemBalance } from './helpers';
 import { postEntry, replaceEntry, voidEntry, partyBalance } from '../src/core/accounting/ledger';
 import { nextDocNumber } from '../src/core/numbering';
@@ -19,7 +19,22 @@ import { updateSection } from '../src/core/settings';
 import { BillforceApp } from '../src/core/app';
 import { backupFolderFromDamagedFile, describeOpenFailure, findBackups, RecoveryError, restoreDamagedDatabase } from '../src/core/recovery';
 import { createBackup } from '../src/core/modules/data/backup';
-import { confirmLeave, hasUnsavedChanges, isScreenLocked, registerDirtyForm, setLeaveConfirmer, setScreenLocked } from '../src/renderer/guards';
+import {
+  confirmLeave,
+  currentCloseWarning,
+  DRAFT_KEPT_NOTE,
+  guardedLinkTarget,
+  hasUnsavedChanges,
+  isScreenLocked,
+  registerCloseWarning,
+  registerDirtyForm,
+  setLeaveConfirmer,
+  setScreenLocked,
+  type LinkClick,
+} from '../src/renderer/guards';
+import { closeQuestion, readCloseWarning } from '../electron/close-warning';
+import fsp from 'node:fs/promises';
+import { NO_PRINTER_MESSAGE, SaveFileError, writeFileSafely } from '../src/core/platform';
 
 describe('money & dates', () => {
   it('formats rupees the Indian way', () => {
@@ -436,6 +451,17 @@ describe('receipt printer checks', () => {
     expect(friendlyPrintFailure(undefined)).toBeUndefined();
   });
 
+  it('says that no printer is installed instead of "check that it is switched on"', async () => {
+    // What Chromium answers on a computer without any printer (Save & print with the print dialog).
+    expect(friendlyPrintFailure('Failed to enumerate printers')).toBe(NO_PRINTER_MESSAGE);
+    expect(friendlyPrintFailure('Failed to enumerate printers', 'POS-80')).toBe(NO_PRINTER_MESSAGE);
+    expect(NO_PRINTER_MESSAGE).toBe('No printer is installed on this computer. Add a printer in Windows Settings > Printers.');
+    const t = await createTestApp();
+    const bill = await t.call('sales.create', { items: [{ itemName: 'Pen', qty: 1, rate: 1000 }], payments: [{ mode: 'cash', amount: 1000 }] });
+    t.platform.printHtml = async () => ({ printed: false, message: 'Failed to enumerate printers' });
+    expect(await t.call('sales.print', { id: bill.id })).toMatchObject({ printed: false, message: NO_PRINTER_MESSAGE });
+  });
+
   it('passes the real print failure message through when it is already readable', async () => {
     const t = await createTestApp();
     updateSection(t.app.ctx(), 'receipt', { printerName: 'POS-80' });
@@ -549,6 +575,74 @@ describe('UI guards (lock screen, unsaved changes)', () => {
     setLeaveConfirmer(null);
   });
 
+  it('asks before any in-app link leaves a form with unsaved changes (plain <a href="#/…"> too)', () => {
+    const click = (over: Partial<LinkClick> = {}): LinkClick => ({ button: 0, metaKey: false, ctrlKey: false, shiftKey: false, altKey: false, defaultPrevented: false, ...over });
+    const link = (attrs: Record<string, string>) => ({ getAttribute: (n: string) => attrs[n] ?? null, hasAttribute: (n: string) => n in attrs });
+    const users = link({ href: '#/admin/users' });
+    // Nothing unsaved: links work as usual.
+    expect(guardedLinkTarget(click(), users, '#/settings?tab=security')).toBeNull();
+    const dirty = registerDirtyForm();
+    try {
+      expect(guardedLinkTarget(click(), users, '#/settings?tab=security')).toBe('/admin/users');
+      expect(guardedLinkTarget(click(), link({ href: '#/sales/bills/2' }), '#/sales/returns/new?billId=2')).toBe('/sales/bills/2');
+      // Left alone: new-tab / modified clicks, other buttons, links elsewhere, opted-out links, the page itself.
+      expect(guardedLinkTarget(click({ ctrlKey: true }), users, '#/settings')).toBeNull();
+      expect(guardedLinkTarget(click({ button: 1 }), users, '#/settings')).toBeNull();
+      expect(guardedLinkTarget(click({ defaultPrevented: true }), users, '#/settings')).toBeNull();
+      expect(guardedLinkTarget(click(), link({ href: 'https://example.com' }), '#/settings')).toBeNull();
+      expect(guardedLinkTarget(click(), link({ href: '#/admin/users', target: '_blank' }), '#/settings')).toBeNull();
+      expect(guardedLinkTarget(click(), link({ href: '#/admin/users', 'data-leave-guard': 'off' }), '#/settings')).toBeNull();
+      expect(guardedLinkTarget(click(), users, '#/admin/users')).toBeNull();
+      expect(guardedLinkTarget(click(), null, '#/settings')).toBeNull();
+    } finally {
+      dirty();
+    }
+    expect(guardedLinkTarget(click(), users, '#/settings')).toBeNull();
+  });
+
+  it('closing the window: a kept draft says so (Close / Stay), only real unsaved changes ask Leave / Stay', () => {
+    expect(currentCloseWarning()).toBeNull();
+    const added: string[] = [];
+    const removed: string[] = [];
+    const sent: unknown[] = [];
+    const fakeWindow = {
+      addEventListener: (t: string) => added.push(t),
+      removeEventListener: (t: string) => removed.push(t),
+      billforce: undefined as undefined | { setCloseWarning: (w: unknown) => void },
+    };
+    const g = globalThis as { window?: unknown };
+    g.window = fakeWindow;
+    try {
+      // Browser test server: a kept draft does not block closing (its box would say changes may be lost).
+      const draft = registerCloseWarning({ kind: 'draft', note: DRAFT_KEPT_NOTE });
+      expect(currentCloseWarning()).toEqual({ kind: 'draft', note: DRAFT_KEPT_NOTE });
+      expect(added).toEqual([]);
+      const unsaved = registerCloseWarning({ kind: 'unsaved' });
+      expect(currentCloseWarning()).toEqual({ kind: 'unsaved' });
+      expect(added).toEqual(['beforeunload']);
+      unsaved();
+      expect(removed).toEqual(['beforeunload']);
+      draft();
+      // Desktop app: every warning blocks the close and the main process is told which question to ask.
+      fakeWindow.billforce = { setCloseWarning: (w) => sent.push(w) };
+      const bill = registerCloseWarning({ kind: 'draft', note: DRAFT_KEPT_NOTE });
+      expect(added).toEqual(['beforeunload', 'beforeunload']);
+      bill();
+      expect(sent).toEqual([{ kind: 'draft', note: DRAFT_KEPT_NOTE }, null]);
+      expect(currentCloseWarning()).toBeNull();
+    } finally {
+      delete g.window;
+    }
+    const kept = closeQuestion(readCloseWarning({ kind: 'draft', note: DRAFT_KEPT_NOTE }));
+    expect(kept).toMatchObject({ message: 'Close Billforce?', detail: 'The bill in progress will be kept and shown again next time.', buttons: ['Close', 'Stay'] });
+    expect(kept.detail).not.toMatch(/lost/);
+    const lost = closeQuestion(readCloseWarning({ kind: 'unsaved' }));
+    expect(lost).toMatchObject({ message: 'You have unsaved changes. Leave without saving?', buttons: ['Leave', 'Stay'], defaultId: 1 });
+    // Anything else the page might send is not trusted: the careful question is asked.
+    expect(closeQuestion(readCloseWarning({ kind: 'nonsense' }))).toEqual(lost);
+    expect(closeQuestion(readCloseWarning(null))).toEqual(lost);
+  });
+
   it('holds the screen-lock flag that hotkeys and dialogs check', () => {
     expect(isScreenLocked()).toBe(false);
     setScreenLocked(true);
@@ -624,5 +718,97 @@ describe('upgrading older data files', () => {
     expect(fresh.value<number>('PRAGMA user_version')).toBe(2);
     db.close();
     fresh.close();
+  });
+});
+
+describe('saving a file where the user chose (pen drive)', () => {
+  it('writes through "<name>.partial" and renames, so the saved file is complete', async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'bf-save-'));
+    const target = path.join(dir, 'Shop_manual_20260928_120000.bfbackup');
+    const data = new Uint8Array(200_000).map((_, i) => i % 251);
+    await writeFileSafely(target, data);
+    expect(fs.readFileSync(target).equals(Buffer.from(data))).toBe(true);
+    expect(fs.readdirSync(dir)).toEqual(['Shop_manual_20260928_120000.bfbackup']);
+    await writeFileSafely(path.join(dir, 'Report.csv'), 'a,b\n1,2\n');
+    expect(fs.readFileSync(path.join(dir, 'Report.csv'), 'utf8')).toBe('a,b\n1,2\n');
+    fs.rmSync(dir, { recursive: true, force: true });
+  });
+
+  it('a pen drive that fills up while writing leaves nothing behind and keeps an older file of that name', async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'bf-full-'));
+    const target = path.join(dir, 'Shop_manual_20260928_120000.bfbackup');
+    fs.writeFileSync(target, 'older good copy');
+    const realOpen = fsp.open.bind(fsp);
+    // The first 8 KB fit, then the drive is full (as on a real pen drive).
+    const spy = vi.spyOn(fsp, 'open').mockImplementation((async (...args: Parameters<typeof fsp.open>) => {
+      const fh = await realOpen(...args);
+      const realWrite = fh.write.bind(fh) as (b: Buffer, o: number, l: number) => Promise<{ bytesWritten: number }>;
+      let written = 0;
+      (fh as any).write = async (b: Buffer, o: number, l: number) => {
+        if (written >= 8192) throw Object.assign(new Error('ENOSPC: no space left on device, write'), { code: 'ENOSPC' });
+        const r = await realWrite(b, o, Math.min(l, 8192 - written));
+        written += r.bytesWritten;
+        return r;
+      };
+      return fh;
+    }) as typeof fsp.open);
+    let err: unknown;
+    try {
+      await writeFileSafely(target, new Uint8Array(100_000));
+    } catch (e) {
+      err = e;
+    } finally {
+      spy.mockRestore();
+    }
+    expect(err).toBeInstanceOf(SaveFileError);
+    expect((err as SaveFileError).reason).toBe('full');
+    expect((err as Error).message).toMatch(/^The pen drive or disk is full, so the file could not be saved\. Nothing was left there\./);
+    expect(fs.readdirSync(dir)).toEqual(['Shop_manual_20260928_120000.bfbackup']);
+    expect(fs.readFileSync(target, 'utf8')).toBe('older good copy');
+
+    // "Save a copy to…" on that drive: plain words, nothing on the drive, nothing recorded.
+    const t = await createTestApp();
+    const copy = path.join(dir, 'Pen drive copy.bfbackup');
+    t.platform.saveFile = async (o) => {
+      const s2 = vi.spyOn(fsp, 'open').mockImplementation((async (...args: Parameters<typeof fsp.open>) => {
+        const fh = await realOpen(...args);
+        (fh as any).write = async () => {
+          throw Object.assign(new Error('ENOSPC: no space left on device, write'), { code: 'ENOSPC' });
+        };
+        return fh;
+      }) as typeof fsp.open);
+      try {
+        await writeFileSafely(copy, o.data);
+      } finally {
+        s2.mockRestore();
+      }
+      return copy;
+    };
+    const failed = await t.fails('backup.saveAs');
+    expect(failed.message).toBe('The pen drive or disk you chose is full, so the copy could not be saved. Nothing was left there. Free some space or choose another place and try again.');
+    expect(fs.existsSync(copy)).toBe(false);
+    expect(fs.existsSync(`${copy}.partial`)).toBe(false);
+    expect(t.app.db.value<number>('SELECT COUNT(*) FROM backup_history')).toBe(0);
+    fs.rmSync(dir, { recursive: true, force: true });
+  });
+
+  it('a file of that name that is open in Excel is not replaced, and says so', async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'bf-busy-'));
+    const target = path.join(dir, 'Trial balance.xlsx');
+    fs.writeFileSync(target, 'open in Excel');
+    const spy = vi.spyOn(fsp, 'rename').mockRejectedValue(Object.assign(new Error('EBUSY: resource busy or locked, rename'), { code: 'EBUSY' }));
+    let err: unknown;
+    try {
+      await writeFileSafely(target, 'new report');
+    } catch (e) {
+      err = e;
+    } finally {
+      spy.mockRestore();
+    }
+    expect((err as SaveFileError).reason).toBe('in-use');
+    expect((err as Error).message).toMatch(/open in another program \(for example Excel\)/);
+    expect(fs.readdirSync(dir)).toEqual(['Trial balance.xlsx']);
+    expect(fs.readFileSync(target, 'utf8')).toBe('open in Excel');
+    fs.rmSync(dir, { recursive: true, force: true });
   });
 });

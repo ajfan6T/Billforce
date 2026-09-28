@@ -139,7 +139,7 @@ export function ReportView({ report, loading, error, onRetry, onLink, hideTitle,
               <div className="rf-label">{s.label}</div>
               <div className="rf-value">
                 {typeof s.value === 'number' && s.type === 'money' ? (
-                  <Money value={s.value} />
+                  <Money value={s.value} className={s.tone === 'bad' ? 'neg' : ''} />
                 ) : typeof s.value === 'number' && s.type === 'drcr' ? (
                   <DrCr value={s.value} />
                 ) : (

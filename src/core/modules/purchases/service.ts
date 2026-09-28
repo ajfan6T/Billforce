@@ -28,6 +28,7 @@ import { formatDate, isValidISODate } from '../../../shared/dates';
 import { formatINR } from '../../../shared/money';
 import { purchaseTotals } from '../../../shared/purchase';
 import type { SettlementMode } from '../../../shared/constants';
+import { assertCancelKeepsClosedAccounts } from '../accounting/common';
 import { assertSameFinancialYear, itemsSummary, postingLines, resolveDocDate, type PostingLine } from '../customers/common';
 import { getSupplierRow } from '../suppliers/service';
 
@@ -543,6 +544,7 @@ export function cancelPurchase(ctx: Ctx, id: number, reason: string): Purchase {
   if (r.status === 'cancelled') throw fail.validation('This purchase is already cancelled.');
   const why = reason.trim();
   if (!why) throw fail.validation('Enter the reason for cancelling', { reason: 'Enter a reason' });
+  assertCancelKeepsClosedAccounts(ctx, r.journal_entry_id, 'this purchase');
   if (r.journal_entry_id) voidEntry(ctx, r.journal_entry_id, `Purchase ${r.purchase_no} cancelled: ${why}`);
   ctx.db.update('purchases', id, {
     status: 'cancelled',

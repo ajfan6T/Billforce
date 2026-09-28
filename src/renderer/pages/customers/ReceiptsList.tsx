@@ -11,7 +11,7 @@ import type { ApiOutput } from '../../api';
 import { formatINR } from '../../../shared/money';
 import { describeRange } from '../../../shared/dates';
 import { PAYMENT_MODE_LABELS, type SettlementMode } from '../../../shared/constants';
-import { CancelledBadge, listReport, ModeBadge, useRange } from './common';
+import { CancelledBadge, countText, listReport, ModeBadge, useRange } from './common';
 import { ReceiptModal } from './ReceiptModal';
 
 type Row = ApiOutput<'receipts.list'>['rows'][number];
@@ -67,7 +67,7 @@ export function ReceiptsListPage() {
         ],
         list.data.rows,
         {
-          totals: { date: null, no: 'Total', customer: `${list.data.totals.count} payments`, mode: null, reference: null, discount: list.data.totals.discount, amount: list.data.totals.amount },
+          totals: { date: null, no: 'Total', customer: countText(list.data.totals.count, 'payment'), mode: null, reference: null, discount: list.data.totals.discount, amount: list.data.totals.amount },
           summary: [
             { label: 'Total received', value: list.data.totals.amount, type: 'money' },
             { label: 'Cash', value: list.data.totals.byMode.cash, type: 'money' },
@@ -97,7 +97,7 @@ export function ReceiptsListPage() {
         }
       />
       <StatGrid>
-        <Stat label="Total received" value={formatINR(t?.amount ?? 0)} tone="green" hint={`${t?.count ?? 0} payments · ${describeRange(range)}`} />
+        <Stat label="Total received" value={formatINR(t?.amount ?? 0)} tone="green" hint={`${countText(t?.count ?? 0, 'payment')} · ${describeRange(range)}`} />
         <Stat label="Cash" value={formatINR(t?.byMode.cash ?? 0)} />
         <Stat label="UPI" value={formatINR(t?.byMode.upi ?? 0)} />
         <Stat label="Bank / cheque" value={formatINR(t?.byMode.bank ?? 0)} />
@@ -139,7 +139,7 @@ export function ReceiptsListPage() {
             footer={
               t && list.data!.rows.length
                 ? {
-                    date: `${t.count} payments`,
+                    date: countText(t.count, 'payment'),
                     discount: <span className="money">{formatINR(t.discount)}</span>,
                     amount: <span className="money">{formatINR(t.amount)}</span>,
                   }

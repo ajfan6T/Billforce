@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Link, useNavigate, useParams, useSearchParams } from 'react-router';
 import { AlertTriangle, History, Plus, Printer, RotateCcw, Save, Search, SplitSquareHorizontal, Star, Trash2, X } from 'lucide-react';
-import { call, errorMessage, type ApiOutput } from '../../api';
+import { ApiError, call, errorMessage, type ApiOutput } from '../../api';
 import { useQuery, useHotkeys } from '../../hooks';
 import { useAuth } from '../../auth';
 import { useDialogs, useToast, useUnsavedWarning } from '../../feedback';
@@ -18,6 +18,13 @@ import { FastMoneyInput, FastNumberInput } from './inputs';
 
 type ItemOption = ApiOutput<'items.search'>[number];
 type BillDetail = ApiOutput<'sales.get'>;
+
+/** The customer as the picker holds it, keeping balanceHidden (a hidden balance is 0, not "owes nothing"). */
+function customerOption(c: { id: number; name: string; phone: string | null; balance: number; creditLimit: number | null; balanceHidden?: boolean }): CustomerOption {
+  return { id: c.id, name: c.name, phone: c.phone, balance: c.balance, creditLimit: c.creditLimit, ...(c.balanceHidden ? { balanceHidden: true } : {}) };
+}
+
+const NOT_IN_LIST = (name: string) => `"${name}" is not in the item list. Choose the item from the item list — your role cannot set prices.`;
 
 interface SplitRow {
   key: string;
@@ -146,8 +153,16 @@ function PosForm({
     linesRef.current = next;
     setLinesState(next);
   }, []);
-  const [customer, setCustomer] = useState<CustomerOption | null>(null);
+  const [customer, setCustomerState] = useState<CustomerOption | null>(null);
+  // Read by handlers that run before React re-renders (e.g. the customer box losing focus as a customer is picked).
+  const customerRef = useRef<CustomerOption | null>(null);
+  const setCustomer = useCallback((c: CustomerOption | null) => {
+    customerRef.current = c;
+    setCustomerState(c);
+  }, []);
   const [walkInName, setWalkInName] = useState('');
+  const walkInNameRef = useRef('');
+  walkInNameRef.current = walkInName;
   const [walkInPhone, setWalkInPhone] = useState('');
   // A new bill is dated today at the moment it is saved, unless the user picked a date.
   const [date, setDate] = useState(cfg.today);
@@ -172,6 +187,7 @@ function PosForm({
   const searchRef = useRef<HTMLInputElement>(null);
   const cashRef = useRef<HTMLInputElement>(null);
   const saveBtnRef = useRef<HTMLButtonElement>(null);
+  const saveOnlyBtnRef = useRef<HTMLButtonElement>(null);
   const billDiscRef = useRef<HTMLInputElement>(null);
   const cells = useRef(new Map<string, HTMLInputElement>());
 
@@ -181,8 +197,31 @@ function PosForm({
   const custItems = useQuery('sales.customerItems', customer ? { customerId: customer.id, limit: 12 } : null);
   const last = useQuery('sales.lastBill', editing ? null : undefined);
 
+  // Editing: the bill as loaded, to tell whether anything was changed (set once the bill is on screen).
+  const editSnapshot = useRef<string | null>(null);
+  const editState = editing
+    ? JSON.stringify({
+        lines: lines.map(({ key: _k, ...l }) => l),
+        customer: customer?.id ?? null,
+        walkInName,
+        walkInPhone,
+        date,
+        billDiscMode,
+        billDiscValue,
+        pay,
+        split,
+        splitRows: splitRows.map(({ key: _k, ...r }) => r),
+        remarks,
+        cashReceived,
+      })
+    : '';
+  useEffect(() => {
+    if (editing && ready && editSnapshot.current === null) editSnapshot.current = editState;
+  }, [editing, ready, editState]);
+  const editChanged = editing && editSnapshot.current !== null && editState !== editSnapshot.current;
   // A new bill keeps a draft (restored when New bill opens again), so moving to another page needs no question.
-  useUnsavedWarning(lines.length > 0, { navigation: editing });
+  // An edited bill asks only when something was changed.
+  useUnsavedWarning(editing ? editChanged : lines.length > 0, { navigation: editing });
 
   // Toasts go to the bottom-left on this screen so they never cover the Save buttons.
   useEffect(() => {
@@ -224,8 +263,10 @@ function PosForm({
           const ok = await dialogs.confirm({ title: 'Replace the current items?', message: `The items on this bill will be replaced by the items of ${data.sourceBillNo}.`, confirmText: 'Replace' });
           if (!ok) return;
         }
+        // One-time (free-text) lines set their own price: left out for users who may not change rates.
+        const oneTime = canRate ? [] : data.lines.filter((l) => !l.itemId);
         setLines(
-          data.lines.map((l) => ({
+          data.lines.filter((l) => canRate || l.itemId).map((l) => ({
             key: uid(),
             itemId: l.itemId,
             itemName: l.itemName,
@@ -236,7 +277,7 @@ function PosForm({
             defaultRate: l.defaultRate,
           })),
         );
-        setCustomer(data.customer ? { id: data.customer.id, name: data.customer.name, phone: data.customer.phone, balance: data.customer.balance, creditLimit: data.customer.creditLimit } : null);
+        setCustomer(data.customer ? customerOption(data.customer) : null);
         setWalkInName(data.customerName ?? '');
         setWalkInPhone(data.customerPhone ?? '');
         if (data.billDiscountPct) {
@@ -249,12 +290,15 @@ function PosForm({
         toast.info(
           `Items copied from ${data.sourceBillNo}.${data.rateChanges ? ` ${data.rateChanges} item${data.rateChanges === 1 ? ' has' : 's have'} a different list rate now — check the rates.` : ''}`,
         );
+        if (oneTime.length) {
+          toast.warning(`Left out ${oneTime.map((l) => `"${l.itemName}"`).join(', ')}: not in the item list, and your role cannot set prices.`);
+        }
         focusSearch();
       } catch (e) {
         toast.error(e);
       }
     },
-    [dialogs, focusSearch, setLines, toast, canRate],
+    [dialogs, focusSearch, setLines, setCustomer, toast, canRate],
   );
 
   useEffect(() => {
@@ -272,7 +316,7 @@ function PosForm({
           defaultRate: null,
         })),
       );
-      setCustomer(b.customer ? { id: b.customer.id, name: b.customer.name, phone: b.customer.phone, balance: b.customer.balance, creditLimit: b.customer.creditLimit } : null);
+      setCustomer(b.customer ? customerOption(b.customer) : null);
       setWalkInName(b.customerId ? '' : (b.customerName ?? ''));
       setWalkInPhone(b.customerId ? '' : (b.customerPhone ?? ''));
       setDate(b.date);
@@ -326,7 +370,7 @@ function PosForm({
       if (presetCustomerId) {
         try {
           const c = await call('sales.customer', { id: presetCustomerId });
-          if (c.isActive) setCustomer({ id: c.id, name: c.name, phone: c.phone, balance: c.balance, creditLimit: c.creditLimit });
+          if (c.isActive) setCustomer(customerOption(c));
           else toast.warning(`${c.name} is inactive and cannot be billed.`);
         } catch (e) {
           toast.error(e);
@@ -383,6 +427,16 @@ function PosForm({
   const oldCreditSameCustomer = editBill && customer && editBill.customerId === customer.id ? editBill.credit : 0;
   const dueAfter = customer ? customer.balance - oldCreditSameCustomer + creditPart : 0;
   const overLimit = !!customer && creditPart > 0 && !!customer.creditLimit && customer.creditLimit > 0 && dueAfter > customer.creditLimit;
+  // Limits enforced: a customer with no limit gets credit only from users who may set limits (checked again
+  // when saving; a hidden limit is not known here).
+  const noLimitSet =
+    cfg.enforceCreditLimit &&
+    !!customer &&
+    !customer.balanceHidden &&
+    creditPart > 0 &&
+    !(customer.creditLimit && customer.creditLimit > 0) &&
+    !can('customers.credit') &&
+    !(editBill && editBill.customerId === customer.id && creditPart <= editBill.credit);
 
   const problems = useMemo(() => {
     const out: Array<{ message: string; key?: string; field?: CellField | 'customer' | 'split' | 'billDisc' }> = [];
@@ -400,8 +454,11 @@ function PosForm({
     if (split && splitPaid > total) out.push({ message: `Payments (${formatINR(splitPaid)}) are more than the total (${formatINR(total)}).`, field: 'split' });
     if (creditPart > 0 && !customer && total > 0) out.push({ message: `Choose a customer to keep ${formatINR(creditPart)} on credit.`, field: 'customer' });
     if (overLimit && cfg.enforceCreditLimit) out.push({ message: `${customer!.name} would go over the credit limit of ${formatINR(customer!.creditLimit!)}.`, field: 'customer' });
+    if (noLimitSet) {
+      out.push({ message: `${customer!.name} has no credit limit set. Ask the owner to set a credit limit for this customer first, or take the full payment now.`, field: 'customer' });
+    }
     return out;
-  }, [lines, calc, total, split, splitPaid, creditPart, customer, overLimit, cfg.enforceCreditLimit]);
+  }, [lines, calc, total, split, splitPaid, creditPart, customer, overLimit, noLimitSet, cfg.enforceCreditLimit]);
 
   useEffect(() => {
     if (error) setError(null);
@@ -445,10 +502,16 @@ function PosForm({
     else focusSearch();
   };
 
-  const addFreeText = (name: string, qty: number) => {
+  /** A one-time line for text that matches no item; needs "Change rates" (it sets its own price). */
+  const addFreeText = (name: string, qty: number): boolean => {
     const clean = name.trim().replace(/\s+/g, ' ');
+    if (!canRate) {
+      toast.error(NOT_IN_LIST(clean));
+      return false;
+    }
     const key = addLine({ itemId: null, itemName: clean.charAt(0).toUpperCase() + clean.slice(1), unit: null, qty, rate: null, discText: '', defaultRate: null });
     focusCell(key, 'rate');
+    return true;
   };
 
   const updateLine = (key: string, patch: Partial<PosLine>) => setLines(linesRef.current.map((l) => (l.key === key ? { ...l, ...patch } : l)));
@@ -466,9 +529,10 @@ function PosForm({
     else focusSearch();
   };
 
-  // Catalogue items are billed at their list rate unless the user may change rates
-  // (one-time items and items without a list rate always take the typed rate).
-  const rateLocked = (l: PosLine) => !canRate && !!l.itemId && l.defaultRate !== 0;
+  // Catalogue items are billed at their list rate unless the user may change rates (items without a
+  // list rate take the typed rate). One-time lines need the permission too: without it, the only ones
+  // on screen are those already saved on an edited bill, and they keep their saved rate.
+  const rateLocked = (l: PosLine) => !canRate && (!l.itemId || l.defaultRate !== 0);
 
   const onCellEnter = (key: string, field: CellField) => {
     const l = linesRef.current.find((x) => x.key === key);
@@ -490,16 +554,17 @@ function PosForm({
     }
     setSearchText('');
     if (chosen) addItem(chosen, qty);
-    else if (name) addFreeText(name, qty);
+    else if (name && !addFreeText(name, qty)) setSearchText(searchText);
   };
 
   const enterNoMatch = async (text: string) => {
     const { qty, name } = parseQuickEntry(text);
     if (!name) {
       if (linesRef.current.length) {
-        // Empty search + Enter: go to payment (cash box), or to the save button for other modes.
+        // Empty search + Enter: go to payment (cash box), or for other modes to the save button that
+        // follows the "print automatically" setting (the same as Enter in the cash box).
         if (!split && pay.mode === 'cash') cashRef.current?.focus();
-        else saveBtnRef.current?.focus();
+        else (cfg.autoPrint ? saveBtnRef : saveOnlyBtnRef).current?.focus();
       }
       return;
     }
@@ -515,7 +580,8 @@ function PosForm({
     } catch {
       /* fall through to a one-time line */
     }
-    addFreeText(name, qty);
+    // Not added (no permission for one-time items): leave the text so it can be corrected.
+    if (!addFreeText(name, qty)) setSearchText(text);
   };
 
   /** Enter in a side-panel box goes back to the item search (or the cash box once items are in). */
@@ -552,22 +618,37 @@ function PosForm({
     focusSearch();
   };
 
-  const clearBill = async () => {
-    if (editing) {
+  /** Leave the edit screen for the bill; asks first only when something was changed. */
+  const backToBill = async () => {
+    if (editChanged) {
       const ok = await dialogs.confirm({ title: 'Discard your changes?', message: `Bill ${editBill!.billNo} will stay as it was.`, confirmText: 'Discard changes', danger: true });
-      if (ok) navigate(`/sales/bills/${editBill!.id}`);
-      return;
+      if (!ok) return;
     }
+    navigate(`/sales/bills/${editBill!.id}`);
+  };
+
+  const clearBill = async () => {
+    if (editing) return backToBill();
     if (!linesRef.current.length && !customer) return reset();
     const ok = await dialogs.confirm({ title: 'Clear this bill?', message: 'All items on the screen will be removed. Nothing has been saved yet.', confirmText: 'Clear bill', danger: true });
     if (!ok) return;
     // Keep what was cleared so a slip of the keyboard can be undone.
     const cleared: Draft = { lines: linesRef.current, customer, walkInName, walkInPhone, billDiscMode, billDiscValue, pay, split, splitRows, remarks };
     reset();
-    toast.info(`Bill cleared (${cleared.lines.length} item${cleared.lines.length === 1 ? '' : 's'}).`, { label: 'Undo', onClick: () => restoreDraft(cleared) });
+    toast.info(`Bill cleared (${cleared.lines.length} item${cleared.lines.length === 1 ? '' : 's'}).`, { label: 'Undo', onClick: () => void restoreDraft(cleared) });
   };
 
-  const restoreDraft = (d: Draft) => {
+  const restoreDraft = async (d: Draft) => {
+    // Undo after the next bill was started: never replace it without asking.
+    if (linesRef.current.length || customerRef.current) {
+      const ok = await dialogs.confirm({
+        title: 'Replace the current bill with the cleared one?',
+        message: `The ${linesRef.current.length} item${linesRef.current.length === 1 ? '' : 's'} on the screen now will be removed, and the ${d.lines.length} cleared item${d.lines.length === 1 ? '' : 's'} put back.`,
+        confirmText: 'Replace',
+        cancelText: 'Keep current bill',
+      });
+      if (!ok) return;
+    }
     setLines(d.lines);
     setCustomer(d.customer);
     setWalkInName(d.walkInName ?? '');
@@ -659,22 +740,86 @@ function PosForm({
       if (res.date < res.createdAt.slice(0, 10)) toast.warning(`Bill ${res.billNo} is dated ${formatDate(res.date)}, a past date.`);
       // "Save" (F10) never prints; "Save & print" (F9) does.
       const willPrint = print;
-      toast.success(`Bill ${res.billNo} saved · ${formatINR(res.total)}${cashNote}${willPrint ? ' · printing' : ''}`, {
-        label: willPrint ? 'Reprint' : 'Print',
-        onClick: () => void printDoc('bill', res.id),
-      });
+      const savedText = `Bill ${res.billNo} saved · ${formatINR(res.total)}${cashNote}`;
       reset();
       void nextNo.reload();
       void last.reload();
       void recent.reload();
       void reloadCfg();
-      if (willPrint) void printDoc('bill', res.id, { quiet: true });
+      if (willPrint) {
+        // One message that says what really happened: printed, or saved but not printed (printDoc
+        // shows the printer problem itself). The counter stays free for the next customer meanwhile.
+        void printDoc('bill', res.id, { quiet: true }).then((printed) =>
+          toast.success(printed ? `${savedText} · printed` : `${savedText} · not printed`, {
+            label: printed ? 'Reprint' : 'Print',
+            onClick: () => void printDoc('bill', res.id),
+          }),
+        );
+      } else {
+        toast.success(savedText, { label: 'Print', onClick: () => void printDoc('bill', res.id) });
+      }
     } catch (e) {
+      if (await refreshListRates(e)) return;
       setError(errorMessage(e));
+      markBadLines(e);
       toast.error(e);
     } finally {
       setSaving(false);
     }
+  };
+
+  /** Lines the server complained about (fields "items.N.…") are marked on the screen. */
+  const markBadLines = (e: unknown) => {
+    if (!(e instanceof ApiError) || !e.fields) return;
+    const keys = Object.keys(e.fields)
+      .map((f) => /^items\.(\d+)\./.exec(f)?.[1])
+      .filter((x): x is string => x !== undefined)
+      .map((i) => linesRef.current[Number(i)]?.key)
+      .filter((k): k is string => !!k);
+    if (keys.length) setBadKeys(new Set(keys));
+  };
+
+  /**
+   * A list rate changed while the bill was open (e.g. the owner updated today's prices): the server
+   * refuses a locked line at its old rate. Bring those lines to the current list rate, say so, and let
+   * the user save again. True when something was updated.
+   */
+  const refreshListRates = async (e: unknown): Promise<boolean> => {
+    if (!(e instanceof ApiError) || e.code !== 'FORBIDDEN' || !e.fields) return false;
+    const flagged = new Set(
+      Object.keys(e.fields)
+        .map((f) => /^items\.(\d+)\.rate$/.exec(f)?.[1])
+        .filter((x): x is string => x !== undefined)
+        .map((i) => linesRef.current[Number(i)]?.key),
+    );
+    if (!flagged.size) return false;
+    // A new bill takes today's list rate on every locked line; an edited bill only on the line refused
+    // (its other lines may keep the rates they were saved with).
+    const targets = linesRef.current.filter((l) => l.itemId && rateLocked(l) && (flagged.has(l.key) || !editing));
+    const updates = new Map<string, { rate: number; name: string }>();
+    await Promise.all(
+      targets.map(async (l) => {
+        try {
+          const it = await call('items.get', { id: l.itemId! });
+          if (it.rate !== l.rate) updates.set(l.key, { rate: it.rate, name: l.itemName });
+        } catch {
+          /* the item is gone: the server's message stands */
+        }
+      }),
+    );
+    if (!updates.size) return false;
+    setLines(linesRef.current.map((l) => {
+      const u = updates.get(l.key);
+      return u ? { ...l, rate: u.rate || l.rate, defaultRate: u.rate } : l;
+    }));
+    const list = [...updates.values()];
+    toast.warning(
+      `The list rate changed: ${list.map((u) => `${u.name} is now ${formatINR(u.rate)}`).join(', ')}. The bill now uses the new rate${list.length === 1 ? '' : 's'} — check the total and save again.`,
+    );
+    setError(null);
+    void recent.reload();
+    focusSearch();
+    return true;
   };
 
   const repeatLast = async () => {
@@ -728,7 +873,8 @@ function PosForm({
   /* ------------------------------ render ------------------------------ */
   const parsed = parseQuickEntry(searchText);
   const recentChips = (recent.data ?? []).slice(0, 14);
-  const custChips = customer ? (custItems.data ?? []) : [];
+  // One-time items set their own price: no chips for them without "Change rates".
+  const custChips = customer ? (custItems.data ?? []).filter((ci) => canRate || ci.itemId) : [];
   const cashChange = pay.mode === 'cash' && !split && cashReceived !== null ? cashReceived - total : null;
   const billNo = editing ? editBill!.billNo : (nextNo.data?.billNo ?? cfg.nextBillNo);
   // An edited bill must stay in its own financial year (its number belongs to it).
@@ -753,7 +899,7 @@ function PosForm({
             </Button>
           )}
           {editing && (
-            <Button size="sm" variant="ghost" icon={<History size={15} />} onClick={() => navigate(`/sales/bills/${editBill!.id}`)}>
+            <Button size="sm" variant="ghost" icon={<History size={15} />} onClick={() => void backToBill()}>
               Back to bill
             </Button>
           )}
@@ -795,7 +941,7 @@ function PosForm({
               </div>
             )}
             footer={
-              parsed.name
+              parsed.name && canRate
                 ? () => (
                     <div className="small muted">
                       <kbd>Enter</kbd> on no match adds “{parsed.name}” as a one-time item{parsed.hasQty ? ` × ${formatQty(parsed.qty)}` : ''}
@@ -866,7 +1012,7 @@ function PosForm({
                   Type an item name above and press <kbd>Enter</kbd>, or tap a quick-add button.
                 </div>
                 <div className="small">
-                  Tip: <code>3*tea</code> adds 3 teas · a name not in the list becomes a one-time item
+                  Tip: <code>3*tea</code> adds 3 teas{canRate ? ' · a name not in the list becomes a one-time item' : ''}
                 </div>
               </>
             }
@@ -913,16 +1059,26 @@ function PosForm({
               onBlur={(e) => {
                 // A name typed here that matches no customer is not thrown away: use it as the walk-in name.
                 const typed = e.target instanceof HTMLInputElement && e.target.getAttribute('role') === 'combobox' ? e.target.value.trim() : '';
-                if (!typed || customer || walkInName.trim() || document.querySelector('.modal')) return;
-                setWalkInName(typed.slice(0, 120));
-                toast.info(`"${typed}" will be printed as the walk-in name. To bill a saved customer, press F4 and pick or add them.`);
+                if (!typed) return;
+                // Picking a customer (Enter or click) also takes the focus away from this box, before React has
+                // shown the pick. Decide once that has settled: only text left without a pick is a walk-in name.
+                setTimeout(() => {
+                  if (customerRef.current || walkInNameRef.current.trim() || document.querySelector('.modal')) return;
+                  setWalkInName(typed.slice(0, 120));
+                  toast.info(`"${typed}" will be printed as the walk-in name. To bill a saved customer, press F4 and pick or add them.`);
+                }, 0);
               }}
             >
               <CustomerPicker
                 value={customer}
                 onChange={(c) => {
                   setCustomer(c);
-                  if (c) focusSearch();
+                  if (c) {
+                    // The saved customer is billed: nothing typed for a walk-in stays behind (hidden).
+                    setWalkInName('');
+                    setWalkInPhone('');
+                    focusSearch();
+                  }
                 }}
                 placeholder="Search name or phone…"
               />
@@ -1156,7 +1312,7 @@ function PosForm({
             <Button ref={saveBtnRef} variant="primary" icon={<Printer size={18} />} kbd="F9" loading={saving} onClick={() => void save(true)}>
               {editing ? 'Save changes & print' : 'Save & print'}
             </Button>
-            <Button icon={<Save size={16} />} kbd="F10" disabled={saving} onClick={() => void save(false)}>
+            <Button ref={saveOnlyBtnRef} icon={<Save size={16} />} kbd="F10" disabled={saving} onClick={() => void save(false)}>
               {editing ? 'Save changes' : 'Save'}
             </Button>
             <Button variant="ghost" kbd="Esc" disabled={saving} onClick={() => void clearBill()}>

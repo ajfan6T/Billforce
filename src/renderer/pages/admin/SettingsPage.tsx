@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { useSearchParams } from 'react-router';
+import { Link, useSearchParams } from 'react-router';
 import { FolderOpen, Save } from 'lucide-react';
 import { Alert, Button, Card, ErrorBox, KeyValues, Loading, Page, PageHeader, Tabs } from '../../components/ui';
 import { Field, FormGrid, NumberInput, SegmentedControl, Switch, TextArea, TextInput } from '../../components/forms';
@@ -7,7 +7,7 @@ import { useHotkeys, useQuery } from '../../hooks';
 import { useDialogs, useToast, useUnsavedWarning } from '../../feedback';
 import { useAuth } from '../../auth';
 import { call } from '../../api';
-import { PAYMENT_MODE_LABELS, PAYMENT_MODES, SEQUENCE_KEYS, SEQUENCE_LABELS, type PaymentMode } from '../../../shared/constants';
+import { PAYMENT_MODE_LABELS, PAYMENT_MODES, SEQUENCE_KEYS, SEQUENCE_LABELS, type PaymentMode, type SequenceKey } from '../../../shared/constants';
 import { formatDate, formatDateTime, fyOf, todayISO } from '../../../shared/dates';
 import type { AppSettings } from '../../../shared/settings';
 import { useSectionForm } from './useSectionForm';
@@ -116,11 +116,14 @@ const PREFIX_RE = /^[A-Z0-9]{1,8}$/;
 
 function BillingTab({ settings, onSaved, onDirty }: TabProps<'billing'>) {
   const f = useSectionForm('billing', settings.billing, onSaved);
+  // The real next number of each series (bills already made this year count), not always 0001.
+  const numbers = useQuery('settings.nextNumbers', undefined);
   useEffect(() => onDirty(f.dirty), [f.dirty, onDirty]);
   useHotkeys({ 'ctrl+s': () => void f.save('Billing settings saved') }, [f.save]);
   const d = f.draft;
   if (!d) return null;
-  const fy = fyOf(todayISO());
+  const fyShort = numbers.data?.fyShort ?? fyOf(todayISO()).short;
+  const nextOf = (k: SequenceKey) => (numbers.data ? String(numbers.data.next[k]).padStart(4, '0') : '…');
   const problems: Record<string, string> = {};
   const seen = new Map<string, string>();
   for (const k of SEQUENCE_KEYS) {
@@ -146,7 +149,7 @@ function BillingTab({ settings, onSaved, onDirty }: TabProps<'billing'>) {
           <SwitchRow title="Default payment mode" hint="Selected when a new bill opens">
             <SegmentedControl<PaymentMode> size="sm" value={d.defaultPaymentMode} onChange={(v) => f.set('defaultPaymentMode', v)} options={PAYMENT_MODES.map((m) => ({ value: m, label: PAYMENT_MODE_LABELS[m] }))} />
           </SwitchRow>
-          <SwitchRow title="Stop bills over the credit limit" hint="When a customer has a credit limit, do not allow a credit bill that takes them over it">
+          <SwitchRow title="Stop bills over the credit limit" hint="Refuse a credit bill that takes a customer over their credit limit. Customers without a credit limit can then buy on credit only after the owner (or a user allowed to set credit limits) gives them one.">
             <Switch checked={d.enforceCreditLimit} onChange={(v) => f.set('enforceCreditLimit', v)} />
           </SwitchRow>
         </div>
@@ -163,7 +166,7 @@ function BillingTab({ settings, onSaved, onDirty }: TabProps<'billing'>) {
               <tr>
                 <th>Series</th>
                 <th>Prefix</th>
-                <th>Next number looks like</th>
+                <th>Next number</th>
               </tr>
             </thead>
             <tbody>
@@ -182,7 +185,7 @@ function BillingTab({ settings, onSaved, onDirty }: TabProps<'billing'>) {
                         />
                       </Field>
                     </td>
-                    <td className="prefix-example">{`${d.prefixes[k] || '???'}/${fy.short}/0001`}</td>
+                    <td className="prefix-example">{`${d.prefixes[k] || '???'}/${fyShort}/${nextOf(k)}`}</td>
                   </tr>
                 );
               })}
@@ -236,7 +239,7 @@ function SecurityTab({ settings, onSaved, onDirty }: TabProps<'security'>) {
       </Card>
       <Card title="Logins and passwords">
         <p className="muted mt-0 mb-0">
-          Give every person their own login in <a href="#/admin/users">Users &amp; permissions</a>, so the activity log shows who did what. After 5 wrong passwords a login is locked
+          Give every person their own login in <Link to="/admin/users">Users &amp; permissions</Link>, so the activity log shows who did what. After 5 wrong passwords a login is locked
           for a minute. The owner can reset anyone's password; the owner's own password can be reset with the recovery code.
         </p>
       </Card>

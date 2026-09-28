@@ -12,7 +12,8 @@ import { call, type ApiOutput } from '../../api';
 import { formatINR } from '../../../shared/money';
 import { formatDate, formatDateTime } from '../../../shared/dates';
 import { CancelledBadge, fmtDate, fmtMode, fmtMoney, ModeBadge, PostingTable, RevisionHistory, type DiffField } from './common';
-import { expensePayload, expenseProblem, ExpenseFields, type ExpenseDraft } from './ExpenseFields';
+import { expensePayload, expensePayment, expenseProblem, ExpenseFields, type ExpenseDraft } from './ExpenseFields';
+import { useShortfallConfirm } from './PaymentBalance';
 
 type Expense = ApiOutput<'expenses.get'>;
 
@@ -162,12 +163,15 @@ function EditExpenseModal({ expense, onClose, onSaved }: { expense: Expense; onC
   }));
   const [reason, setReason] = useState('');
   const problem = expenseProblem(draft);
+  const confirmShortfall = useShortfallConfirm();
   const save = async () => {
-    if (problem) return;
+    if (problem || m.loading) return;
+    const accepted = await confirmShortfall(expensePayment(draft, expense.journalEntryId));
+    if (!accepted) return;
     try {
       const r = await m.run({ ...expensePayload(draft), id: expense.id, reason: reason.trim() || null });
       toast.success(`Saved expense ${r.expenseNo}`);
-      for (const w of r.warnings) toast.warning(w);
+      for (const w of r.warnings) if (!accepted.includes(w)) toast.warning(w);
       onSaved();
     } catch {
       /* shown below */
@@ -198,7 +202,7 @@ function EditExpenseModal({ expense, onClose, onSaved }: { expense: Expense; onC
           void save();
         }}
       >
-        <ExpenseFields value={draft} onChange={setDraft} fields={m.fields} layout="modal" />
+        <ExpenseFields value={draft} onChange={setDraft} fields={m.fields} layout="modal" entryId={expense.journalEntryId} savedHeadId={expense.accountId} />
         <Field label="Reason for change" hint="Optional. Saved in the history with the old and new details.">
           <TextInput value={reason} onChange={(e) => setReason(e.target.value)} maxLength={500} placeholder="e.g. amount typed wrong" />
         </Field>

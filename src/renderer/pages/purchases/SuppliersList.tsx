@@ -10,7 +10,7 @@ import { useAuth } from '../../auth';
 import type { ApiOutput } from '../../api';
 import { formatINR } from '../../../shared/money';
 import { formatDate, todayISO } from '../../../shared/dates';
-import { InactiveBadge, listReport, PayableText } from '../customers/common';
+import { countText, InactiveBadge, listReport, PayableText } from '../customers/common';
 import { SupplierFormModal } from './SupplierFormModal';
 import { SupplierPaymentModal } from './SupplierPaymentModal';
 
@@ -95,7 +95,7 @@ export function SuppliersListPage() {
     <Page>
       <PageHeader
         title="Suppliers"
-        subtitle={rows ? `${rows.length} supplier${rows.length === 1 ? '' : 's'}` : undefined}
+        subtitle={rows ? countText(rows.length, 'supplier') : undefined}
         actions={
           <>
             {can('suppliers.pay') && (
@@ -154,7 +154,7 @@ export function SuppliersListPage() {
             footer={
               rows && rows.length > 1
                 ? {
-                    name: `${rows.length} suppliers`,
+                    name: countText(rows.length, 'supplier'),
                     payable: <span className="money">{formatINR(totals.payable - totals.advance)}</span>,
                     purchasedThisFy: <span className="money">{formatINR(totals.purchased)}</span>,
                   }

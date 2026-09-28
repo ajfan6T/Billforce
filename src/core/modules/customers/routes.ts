@@ -50,15 +50,17 @@ export const customersRoutes = {
     handler: (ctx, input) => customers.quickCreateCustomer(ctx, input),
   }),
 
+  // Balances and credit limits go only to users who may see them (customerForViewer); today the
+  // read routes already need customers.view / customers.receive, but add / edit need only customers.manage.
   'customers.list': route({
     access: 'customers.view',
     input: z.object({ q: z.string().nullish(), onlyWithBalance: z.boolean().optional(), includeInactive: z.boolean().optional() }),
-    handler: (ctx, input) => customers.listCustomers(ctx, input),
+    handler: (ctx, input) => customers.customerListForViewer(ctx, customers.listCustomers(ctx, input)),
   }),
   'customers.get': route({
     access: ['customers.view', 'customers.receive'],
     input: z.object({ id: zCustomerId }),
-    handler: (ctx, input) => customers.getCustomer(ctx, input.id),
+    handler: (ctx, input) => customers.customerForViewer(ctx, customers.getCustomer(ctx, input.id)),
   }),
   'customers.formInfo': route({
     access: ['customers.view', 'customers.manage', 'suppliers.view', 'suppliers.manage'],
@@ -68,19 +70,19 @@ export const customersRoutes = {
     access: 'customers.manage',
     mutation: true,
     input: zCustomerInput,
-    handler: (ctx, input) => customers.createCustomer(ctx, input),
+    handler: (ctx, input) => customers.customerForViewer(ctx, customers.createCustomer(ctx, input)),
   }),
   'customers.update': route({
     access: 'customers.manage',
     mutation: true,
     input: zCustomerInput.extend({ id: zCustomerId }),
-    handler: (ctx, { id, ...input }) => customers.updateCustomer(ctx, id, input),
+    handler: (ctx, { id, ...input }) => customers.customerForViewer(ctx, customers.updateCustomer(ctx, id, input)),
   }),
   'customers.setActive': route({
     access: 'customers.manage',
     mutation: true,
     input: z.object({ id: zCustomerId, active: z.boolean() }),
-    handler: (ctx, input) => customers.setCustomerActive(ctx, input.id, input.active),
+    handler: (ctx, input) => customers.customerForViewer(ctx, customers.setCustomerActive(ctx, input.id, input.active)),
   }),
   'customers.remove': route({
     access: 'customers.manage',

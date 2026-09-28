@@ -68,6 +68,9 @@ export function JournalFormPage() {
     ]);
   }, [existing.data]);
 
+  // Accounts already on the entry being edited stay in the lists even if deactivated since.
+  const savedAccountIds = useMemo(() => (existing.data ? [...new Set(existing.data.lines.map((l) => l.accountId))] : undefined), [existing.data]);
+
   const partyTypeOf = useMemo(() => {
     const m = new Map<number, PartyType | null>();
     for (const a of accounts.data ?? []) m.set(a.id, a.partyType);
@@ -227,7 +230,7 @@ export function JournalFormPage() {
               return (
                 <div className="ac-line" key={l.key}>
                   <span className="ac-line-no">{i + 1}</span>
-                  <AccountSelect value={l.accountId} onChange={(id) => pickAccount(l, id)} placeholder="Choose account…" />
+                  <AccountSelect value={l.accountId} onChange={(id) => pickAccount(l, id)} alsoShow={savedAccountIds} placeholder="Choose account…" />
                   <div>
                     {pt === 'customer' ? (
                       <CustomerPicker

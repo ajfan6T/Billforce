@@ -13,6 +13,7 @@ import { renderReceiptHtml } from '../../print/receipt';
 import { amountInWords, formatINR } from '../../../shared/money';
 import { formatDate, formatTime } from '../../../shared/dates';
 import { PAYMENT_MODE_LABELS, type SettlementMode } from '../../../shared/constants';
+import { assertCancelKeepsClosedAccounts } from '../accounting/common';
 import { advanceWarning, assertSameFinancialYear, balanceThroughEntry, modeText, postingLines, resolveDocDate, type PostingLine } from '../customers/common';
 import { getSupplierRow } from '../suppliers/service';
 
@@ -301,6 +302,7 @@ export function cancelSupplierPayment(ctx: Ctx, id: number, reason: string): Sup
   if (r.status === 'cancelled') throw fail.validation('This payment is already cancelled.');
   const why = reason.trim();
   if (!why) throw fail.validation('Enter the reason for cancelling', { reason: 'Enter a reason' });
+  assertCancelKeepsClosedAccounts(ctx, r.journal_entry_id, 'this payment');
   if (r.journal_entry_id) voidEntry(ctx, r.journal_entry_id, `Payment ${r.payment_no} cancelled: ${why}`);
   ctx.db.update('supplier_payments', id, {
     status: 'cancelled',

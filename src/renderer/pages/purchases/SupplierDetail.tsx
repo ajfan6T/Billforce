@@ -11,7 +11,7 @@ import { useLinkedPeriod, useOpenLink } from '../../links';
 import { call, type ApiOutput } from '../../api';
 import { formatINR } from '../../../shared/money';
 import { describeRange, formatDate } from '../../../shared/dates';
-import { CancelledBadge, InactiveBadge, InfoRow, ModeBadge } from '../customers/common';
+import { CancelledBadge, countText, InactiveBadge, InfoRow, ModeBadge } from '../customers/common';
 import { SupplierFormModal } from './SupplierFormModal';
 import { SupplierPaymentModal } from './SupplierPaymentModal';
 
@@ -172,7 +172,7 @@ export function SupplierDetailPage() {
         <Stat
           label="Total purchased"
           value={formatINR(s.totals.purchased)}
-          hint={`${s.totals.purchases} bill${s.totals.purchases === 1 ? '' : 's'}${s.lastPurchaseDate ? ` · last ${formatDate(s.lastPurchaseDate)}` : ''}`}
+          hint={`${countText(s.totals.purchases, 'bill')}${s.lastPurchaseDate ? ` · last ${formatDate(s.lastPurchaseDate)}` : ''}`}
         />
         <Stat
           label="Total paid"
@@ -248,7 +248,7 @@ export function SupplierDetailPage() {
               footer={
                 purchases.data && purchases.data.rows.length
                   ? {
-                      date: `${purchases.data.totals.count} bills`,
+                      date: countText(purchases.data.totals.count, 'bill'),
                       total: <span className="money">{formatINR(purchases.data.totals.total)}</span>,
                       credit: <span className="money">{formatINR(purchases.data.totals.credit)}</span>,
                     }
@@ -273,7 +273,7 @@ export function SupplierDetailPage() {
               footer={
                 payments.data && payments.data.rows.length
                   ? {
-                      date: `${payments.data.totals.count} payments`,
+                      date: countText(payments.data.totals.count, 'payment'),
                       discount: <span className="money">{formatINR(payments.data.totals.discount)}</span>,
                       amount: <span className="money">{formatINR(payments.data.totals.amount)}</span>,
                     }

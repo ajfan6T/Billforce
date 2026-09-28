@@ -9,7 +9,7 @@ import http from 'node:http';
 import fs from 'node:fs';
 import path from 'node:path';
 import { BillforceApp } from '../src/core/app';
-import type { FileFilter, Platform, PrinterInfo, PrintOptions, PrintResult } from '../src/core/platform';
+import { writeFileSafely, type FileFilter, type Platform, type PrinterInfo, type PrintOptions, type PrintResult } from '../src/core/platform';
 
 function arg(name: string, fallback: string): string {
   const i = process.argv.indexOf(`--${name}`);
@@ -48,7 +48,7 @@ class WebPlatform implements Platform {
     const dir = path.join(dataDir, 'downloads');
     fs.mkdirSync(dir, { recursive: true });
     const file = path.join(dir, opts.defaultName);
-    fs.writeFileSync(file, typeof opts.data === 'string' ? opts.data : Buffer.from(opts.data));
+    await writeFileSafely(file, opts.data);
     return file;
   }
   async pickFile(): Promise<string | null> {

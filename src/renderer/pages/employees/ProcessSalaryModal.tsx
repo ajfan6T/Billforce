@@ -11,6 +11,7 @@ import { formatINR } from '../../../shared/money';
 import { formatDate, todayISO } from '../../../shared/dates';
 import type { SettlementMode } from '../../../shared/constants';
 import { AttendanceChips, MonthPicker, fmtDays, salaryLabel } from './common';
+import { PaymentBalanceHint, useShortfallConfirm } from '../accounts/PaymentBalance';
 
 type Slip = ApiOutput<'salary.process'>;
 
@@ -115,9 +116,15 @@ export function ProcessSalaryModal({
                 ? `Pay between ₹0.01 and ${formatINR(net)}`
                 : null;
 
+  const paying = payNow && net > 0 && payNowAmount ? { mode: pay.mode, accountId: pay.accountId, amount: payNowAmount, date: date || p?.date } : null;
+  const confirmShortfall = useShortfallConfirm();
+
   const save = async (e?: FormEvent) => {
     e?.preventDefault();
     if (!p || problem || m.loading) return;
+    // Ask before the payment takes cash / bank below zero, not only after the salary is saved and paid.
+    const accepted = await confirmShortfall(paying);
+    if (!accepted) return;
     try {
       const slip = await m.run({
         employeeId: p.employeeId,
@@ -130,7 +137,7 @@ export function ProcessSalaryModal({
         payNow: payNow && net > 0 && payNowAmount ? { mode: pay.mode, accountId: pay.accountId, amount: payNowAmount } : null,
       });
       toast.success(`Salary ${slip.salaryNo} saved for ${slip.employeeName}${slip.paid ? ` · paid ${formatINR(slip.paid)}` : ''}`);
-      for (const w of slip.warnings) toast.warning(w);
+      for (const w of slip.warnings) if (!accepted.includes(w)) toast.warning(w);
       onSaved(slip);
     } catch {
       /* shown below */
@@ -272,6 +279,7 @@ export function ProcessSalaryModal({
                 {payNow && net > 0 && (
                   <div className="process-box stack-sm">
                     <SettlementPicker value={pay} onChange={setPay} size="sm" />
+                    <PaymentBalanceHint payment={paying} />
                     <Field label="Amount paid now" error={m.fields['payNow.amount']} hint={payNowAmount && payNowAmount < net ? `${formatINR(net - payNowAmount)} stays as salary due` : 'Full net salary'}>
                       <MoneyInput
                         value={payNowAmount}

@@ -3,7 +3,7 @@ import { AlertTriangle, CheckCircle2, Info, X, XCircle } from 'lucide-react';
 import { errorMessage } from './api';
 import { Button } from './components/ui';
 import { Modal } from './components/modal';
-import { registerDirtyForm, setLeaveConfirmer } from './guards';
+import { DRAFT_KEPT_NOTE, registerCloseWarning, registerDirtyForm, setLeaveConfirmer } from './guards';
 
 /* ------------------------------ Toasts ------------------------------ */
 
@@ -52,6 +52,12 @@ interface DialogApi {
   confirm(opts: ConfirmOptions): Promise<boolean>;
   /** Ask for text (e.g. a reason for cancelling). Resolves null if cancelled. */
   prompt(opts: PromptOptions): Promise<string | null>;
+  /**
+   * Close the open question as if Cancel was pressed (confirm -> false, prompt -> null), and drop toasts
+   * that offer an action. Used when the session ends: the next person must not answer the previous user's
+   * question (e.g. "Clear this bill?") or press their "Undo".
+   */
+  closeAll(): void;
 }
 
 const DialogContext = createContext<DialogApi | null>(null);
@@ -75,7 +81,13 @@ export function FeedbackProvider({ children }: { children: ReactNode }) {
     warning: (m) => push('warning', m),
   }).current;
 
-  const [dialog, setDialog] = useState<DialogState | null>(null);
+  const [dialog, setDialogState] = useState<DialogState | null>(null);
+  // The open question, readable at once (closeAll runs outside React's render).
+  const dialogRef = useRef<DialogState | null>(null);
+  const setDialog = useCallback((d: DialogState | null) => {
+    dialogRef.current = d;
+    setDialogState(d);
+  }, []);
   const [promptValue, setPromptValue] = useState('');
   const dialogApi = useRef<DialogApi>({
     confirm: (opts) => new Promise<boolean>((resolve) => setDialog({ type: 'confirm', opts, resolve })),
@@ -84,6 +96,13 @@ export function FeedbackProvider({ children }: { children: ReactNode }) {
         setPromptValue(opts.defaultValue ?? '');
         setDialog({ type: 'prompt', opts, resolve });
       }),
+    closeAll: () => {
+      const open = dialogRef.current;
+      setDialog(null);
+      if (open?.type === 'confirm') open.resolve(false);
+      else if (open?.type === 'prompt') open.resolve(null);
+      setToasts((t) => t.filter((x) => !x.action));
+    },
   }).current;
 
   // In-app navigation away from a form with unsaved changes asks with this dialog (see guards.ts).
@@ -101,7 +120,7 @@ export function FeedbackProvider({ children }: { children: ReactNode }) {
   }, [dialogApi]);
 
   const close = (value: boolean | string | null) => {
-    if (!dialog) return;
+    if (!dialog || dialogRef.current !== dialog) return;
     if (dialog.type === 'confirm') dialog.resolve(value === true);
     else dialog.resolve(typeof value === 'string' ? value : null);
     setDialog(null);
@@ -224,24 +243,22 @@ export function useDialogs(): DialogApi {
 
 /**
  * Warn before leaving a page with unsaved changes: closing the window (the desktop app asks
- * "Leave without saving?") and, unless `navigation: false`, moving to another page from the
- * sidebar, "Back" links, link buttons and F2 (they ask with the same question first).
- * Pass `navigation: false` when the page keeps its own draft (the billing screen).
+ * "Leave without saving?") and, unless `navigation: false`, moving to another page from any in-app
+ * link, "Back" links, link buttons, F2 and Cancel buttons that use `useGuardedNavigate().go` (they ask
+ * with the same question first).
+ * Pass `navigation: false` when the page keeps its own draft (the billing screen): leaving it does not ask,
+ * and closing the desktop app says the draft will be kept (`draftNote`) instead of "will be lost".
  */
-export function useUnsavedWarning(dirty: boolean, opts: { navigation?: boolean } = {}): void {
-  const guardNavigation = opts.navigation !== false;
+export function useUnsavedWarning(dirty: boolean, opts: { navigation?: boolean; draftNote?: string } = {}): void {
+  const keepsDraft = opts.navigation === false;
+  const note = opts.draftNote ?? DRAFT_KEPT_NOTE;
   useEffect(() => {
     if (!dirty) return;
-    const h = (e: BeforeUnloadEvent) => {
-      e.preventDefault();
-      // Older Chromium needs returnValue set to show the leave prompt.
-      e.returnValue = '';
-    };
-    window.addEventListener('beforeunload', h);
-    const unregister = guardNavigation ? registerDirtyForm() : null;
+    const unregisterClose = registerCloseWarning(keepsDraft ? { kind: 'draft', note } : { kind: 'unsaved' });
+    const unregister = keepsDraft ? null : registerDirtyForm();
     return () => {
-      window.removeEventListener('beforeunload', h);
+      unregisterClose();
       unregister?.();
     };
-  }, [dirty, guardNavigation]);
+  }, [dirty, keepsDraft, note]);
 }

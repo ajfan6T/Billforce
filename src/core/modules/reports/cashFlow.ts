@@ -5,7 +5,8 @@
  * movement is attributed to the lines on the OTHER side of the entry (credits for
  * money in, debits for money out), in proportion to their amounts. Each of those
  * accounts belongs to one activity line (cash sales, paid to suppliers, loans
- * taken, ...). Transfers between cash and bank accounts have no other side and
+ * taken, ...); round off belongs to the line of the entry's main account (a
+ * refund's round off is part of the refund). Transfers between cash and bank accounts have no other side and
  * are left out. Opening balance entries count towards the opening balance.
  *
  *   opening + money in - money out = closing   (always equal to the actual cash + bank balance)
@@ -13,7 +14,7 @@
 import type { Ctx } from '../../context';
 import { formatDate } from '../../../shared/dates';
 import type { ReportData, ReportRow } from '../../../shared/report';
-import { accountsMeta, allocate, assertRange, rangeSubtitle, type AccountMeta } from './common';
+import { accountsMeta, assertRange, rangeSubtitle, type AccountMeta } from './common';
 
 export type Activity = 'operating' | 'investing' | 'financing';
 
@@ -103,6 +104,18 @@ export function flowLineOf(a: Pick<AccountMeta, 'groupCode' | 'systemKey'>): str
   return 'other';
 }
 
+/**
+ * Split `amount` in proportion to `weights` in whole paise; the paise left over by rounding
+ * down all go to the biggest weight (so a small share never gets an odd paisa of its own).
+ */
+function allocateToLargest(amount: number, weights: number[]): number[] {
+  const total = weights.reduce((s, w) => s + w, 0);
+  if (!total) return weights.map(() => 0);
+  const out = weights.map((w) => Math.trunc((amount * w) / total));
+  out[weights.indexOf(Math.max(...weights))] += amount - out.reduce((s, v) => s + v, 0);
+  return out;
+}
+
 export interface CashFlowFigures {
   opening: number;
   inflow: number;
@@ -134,6 +147,7 @@ export function cashFlow(ctx: Ctx, input: { from: string; to: string }): { repor
   const cashAccounts = accounts.filter((a) => a.groupCode === 'cash' || a.groupCode === 'bank');
   const cashIds = new Set(cashAccounts.map((a) => a.id));
   const ids = [...cashIds];
+  const roundOffIds = new Set(accounts.filter((a) => a.systemKey === 'ROUND_OFF').map((a) => a.id));
   const inIds = ids.length ? ids.map(() => '?').join(', ') : 'NULL';
 
   const balanceBy = (where: string, params: unknown[]) =>
@@ -171,15 +185,23 @@ export function cashFlow(ctx: Ctx, input: { from: string; to: string }): { repor
     if (!cashNet) continue; // transfer between cash / bank accounts, or a net-zero entry
     // Money in is explained by the credit lines on the other side; money out by the debit lines.
     const others = entryLines.filter((l) => !cashIds.has(l.account_id) && (cashNet > 0 ? l.credit > 0 : l.debit > 0));
-    const parts = allocate(
-      cashNet,
-      others.map((l) => (cashNet > 0 ? l.credit : l.debit)),
-    );
-    others.forEach((l, k) => {
-      const acct = byId.get(l.account_id);
-      const key = acct ? flowLineOf(acct) : 'other';
+    const weight = (l: LineRow) => (cashNet > 0 ? l.credit : l.debit);
+    // Round off only evens out a document's total, so it follows the entry's main line: a ₹650 refund whose
+    // round off is ₹0.17 is ₹650 of refunds, not ₹649.83 of refunds and ₹0.17 of cash sales.
+    const main = others.filter((l) => !roundOffIds.has(l.account_id)).sort((a, b) => weight(b) - weight(a))[0];
+    const keyOf = (l: LineRow) => {
+      const acct = byId.get((roundOffIds.has(l.account_id) && main ? main : l).account_id);
+      return acct ? flowLineOf(acct) : 'other';
+    };
+    // One share per activity line, so paise are never split off into a line of their own; the paise
+    // left over by rounding go to the line with the biggest share.
+    const byKey = new Map<string, number>();
+    for (const l of others) byKey.set(keyOf(l), (byKey.get(keyOf(l)) ?? 0) + weight(l));
+    const keys = [...byKey.keys()];
+    const parts = allocateToLargest(cashNet, keys.map((k) => byKey.get(k)!));
+    keys.forEach((key, k) => {
       if (parts[k] > 0) flows[key].in += parts[k];
-      else flows[key].out += -parts[k];
+      else if (parts[k] < 0) flows[key].out += -parts[k];
     });
   }
 

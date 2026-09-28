@@ -9,6 +9,7 @@ import { SetupWizard } from './pages/auth/Setup';
 import { LockScreen, LoginScreen } from './pages/auth/Login';
 import { ForcePasswordChange } from './pages/admin/ForcePasswordChange';
 import { EmptyState, Loading, Page } from './components/ui';
+import { useLinkGuard } from './guards';
 import type { AppRoute } from './routing';
 
 function NoAccess() {
@@ -31,6 +32,8 @@ function Guard({ route }: { route: AppRoute }) {
 
 function Root() {
   const { status, session, locked } = useAuth();
+  // Any in-app link asks "Leave without saving?" first when a form has unsaved changes.
+  useLinkGuard();
   if (!status) return <Loading label="Starting Billforce…" />;
   if (!status.setupDone) return <SetupWizard />;
   if (!session) return <LoginScreen />;

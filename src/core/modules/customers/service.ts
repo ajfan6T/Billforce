@@ -172,6 +172,33 @@ export interface CustomerDetail {
   lastPaymentDate: string | null;
   /** True when the customer has no history and can be deleted instead of deactivated. */
   canRemove: boolean;
+  /** The user may not see customer balances: balance, credit limit, opening balance and money totals are blanked. */
+  balanceHidden?: boolean;
+}
+
+/**
+ * What the customers.* routes send back: users who may not see customer balances (e.g. a role
+ * with "Add / edit customers" but not "View customers & balances") get the customer's details
+ * without the balance, credit limit, opening balance or money totals. Internal callers (import,
+ * the service itself) use getCustomer / listCustomers directly and always see the real figures.
+ */
+export function customerForViewer(ctx: Ctx, d: CustomerDetail): CustomerDetail {
+  if (canSeeCustomerBalances(ctx)) return d;
+  const t = d.totals;
+  return {
+    ...d,
+    creditLimit: null,
+    openingBalance: null,
+    balance: 0,
+    overLimit: false,
+    totals: { ...t, billed: 0, paidAtBilling: 0, received: 0, discount: 0, returned: 0, refunded: 0, opening: 0, adjustments: 0 },
+    balanceHidden: true,
+  };
+}
+
+export function customerListForViewer(ctx: Ctx, rows: CustomerListRow[]): CustomerListRow[] {
+  if (canSeeCustomerBalances(ctx)) return rows;
+  return rows.map((r) => ({ ...r, creditLimit: null, balance: 0, billedThisFy: 0 }));
 }
 
 export function getCustomerRow(ctx: Ctx, id: number): CustomerRow {
@@ -466,7 +493,7 @@ export function customerOutstanding(ctx: Ctx, asOf: string): ReportData {
     };
   });
   if (rows.length) {
-    rows.push({ cells: { name: `Total (${rows.length} customers)`, phone: '', due, advance, lastBill: null, lastPayment: null, days: null }, style: 'total' });
+    rows.push({ cells: { name: `Total (${rows.length} customer${rows.length === 1 ? '' : 's'})`, phone: '', due, advance, lastBill: null, lastPayment: null, days: null }, style: 'total' });
   }
   const dueCount = list.filter((x) => x.bal > 0).length;
   return {

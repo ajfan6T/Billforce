@@ -28,18 +28,29 @@ export function Modal({ open, title, onClose, children, footer, width = 560, loc
   const ref = useRef<HTMLDivElement>(null);
   const closeRef = useRef(onClose);
   closeRef.current = onClose;
+  const lockedRef = useRef(locked);
+  lockedRef.current = locked;
+  // Where focus was before the dialog opened, to return it there on close. Read while rendering the
+  // opening: by the time effects run, a field inside the dialog has already taken focus (autoFocus).
+  const returnFocus = useRef<HTMLElement | null>(null);
+  const wasOpen = useRef(false);
+  if (open && !wasOpen.current && typeof document !== 'undefined') {
+    const active = document.activeElement;
+    returnFocus.current = active instanceof HTMLElement && active !== document.body ? active : null;
+  }
+  wasOpen.current = open;
   useEffect(() => {
     if (!open) return;
     const id = nextModalId++;
     stack.push(id);
-    const prev = document.activeElement as HTMLElement | null;
+    const prev = returnFocus.current;
     const h = (e: KeyboardEvent) => {
       // While the lock screen is up, dialogs underneath must not react to the keyboard.
       if (isScreenLocked()) return;
       if (e.key === 'Escape' && stack[stack.length - 1] === id) {
         e.stopImmediatePropagation();
         e.preventDefault();
-        if (!locked) closeRef.current();
+        if (!lockedRef.current) closeRef.current();
       }
     };
     window.addEventListener('keydown', h, true);
@@ -52,9 +63,11 @@ export function Modal({ open, title, onClose, children, footer, width = 560, loc
       if (i >= 0) stack.splice(i, 1);
       window.removeEventListener('keydown', h, true);
       clearTimeout(t);
-      prev?.focus?.();
+      if (prev?.isConnected) prev.focus();
     };
-  }, [open, locked]);
+    // Only opening / closing: `locked` (e.g. while saving) is read through lockedRef, so it neither moves
+    // focus nor changes which dialog is on top.
+  }, [open]);
   if (!open) return null;
   return createPortal(
     <div className="modal-backdrop" onMouseDown={(e) => e.target === e.currentTarget && !locked && onClose()}>

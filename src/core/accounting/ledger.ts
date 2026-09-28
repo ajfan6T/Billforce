@@ -8,7 +8,7 @@
  *   - nothing is posted into a closed financial year or before the books start
  */
 import type { Ctx } from '../context';
-import { now, currentUserId } from '../context';
+import { now, currentUserId, today } from '../context';
 import { AppError } from '../errors';
 import type { PartyType, SettlementMode, VoucherType } from '../../shared/constants';
 import { PAYMENT_MODE_LABELS } from '../../shared/constants';
@@ -347,20 +347,40 @@ export function paymentAccountId(ctx: Ctx, mode: SettlementMode, accountId?: num
  * Payments are still allowed (the shop may have forgotten to record a receipt),
  * but the user should be told.
  */
-export function negativeBalanceWarning(ctx: Ctx, accountId: number, outflow: number, date: string): string | null {
+export function negativeBalanceWarning(ctx: Ctx, accountId: number, outflow: number, date: string, excludeEntryId?: number | null): string | null {
   if (outflow <= 0) return null;
   const acct = getAccount(ctx, accountId);
   if (acct.group_code !== 'cash' && acct.group_code !== 'bank') return null;
+  // excludeEntryId: the saved version of a document being edited (checked before saving, so it is still posted).
+  const skip = excludeEntryId ? ' AND e.id <> ?' : '';
+  const skipParams = excludeEntryId ? [excludeEntryId] : [];
   // One pass over the account's lines (answered from the covering index on journal_lines).
   const row = ctx.db.get<{ upto: number; total: number }>(
     `SELECT COALESCE(SUM(CASE WHEN e.date <= ? THEN l.debit - l.credit ELSE 0 END), 0) AS upto,
             COALESCE(SUM(l.debit - l.credit), 0) AS total
        FROM journal_lines l JOIN journal_entries e ON e.id = l.entry_id
-      WHERE l.account_id = ? AND e.is_void = 0`,
-    [date, accountId],
+      WHERE l.account_id = ? AND e.is_void = 0${skip}`,
+    [date, accountId, ...skipParams],
   ) ?? { upto: 0, total: 0 };
+  const rupees = (paise: number) => (Math.abs(paise) / 100).toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
   const worst = Math.min(row.upto, row.total) - outflow;
-  if (worst >= 0) return null;
-  const rupees = (Math.abs(worst) / 100).toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
-  return `${acct.name} will be short by ₹${rupees} after this payment. Check that all money received has been entered.`;
+  if (worst < 0) return `${acct.name} will be short by ₹${rupees(worst)} after this payment. Check that all money received has been entered.`;
+  // A backdated payment lowers every day from its date on: a day in between may go below zero even though
+  // the balance on the payment's date and today are enough (money came in later). Walk the later days (only
+  // the entries after the payment's date are read; a payment dated today has none).
+  if (date >= today(ctx)) return null;
+  const days = ctx.db.all<{ date: string; net: number }>(
+    `SELECT e.date, SUM(l.debit - l.credit) AS net FROM journal_entries e CROSS JOIN journal_lines l ON l.entry_id = e.id
+      WHERE e.date > ? AND e.is_void = 0 AND l.account_id = ?${skip} GROUP BY e.date ORDER BY e.date`,
+    [date, accountId, ...skipParams],
+  );
+  let running = row.upto - outflow;
+  let low = { balance: 0, date: '' };
+  for (const d of days) {
+    running += d.net;
+    if (running < low.balance) low = { balance: running, date: d.date };
+  }
+  if (!low.date) return null;
+  const [y, m, dd] = low.date.split('-');
+  return `${acct.name} will be short by ₹${rupees(low.balance)} on ${dd}-${m}-${y} after this payment. Check that all money received has been entered.`;
 }

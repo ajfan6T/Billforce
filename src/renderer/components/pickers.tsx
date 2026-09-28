@@ -3,7 +3,7 @@
  * routes (customers.search / quickCreate, suppliers.search / quickCreate,
  * accounts.list / paymentAccounts, employees.search).
  */
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { Banknote, CreditCard, Landmark, Smartphone, UserPlus, X } from 'lucide-react';
 import { call, type ApiOutput } from '../api';
 import { useQuery } from '../hooks';
@@ -37,6 +37,7 @@ function QuickAddModal({
   const [phone, setPhone] = useState('');
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const phoneRef = useRef<HTMLInputElement>(null);
   useEffect(() => {
     if (open) {
       const digits = /^[0-9+\s-]{6,}$/.test(initialName.trim());
@@ -46,6 +47,7 @@ function QuickAddModal({
     }
   }, [open, initialName]);
   const save = async () => {
+    if (busy || !name.trim()) return;
     setBusy(true);
     setError(null);
     try {
@@ -75,10 +77,32 @@ function QuickAddModal({
     >
       <div className="stack">
         <Field label="Name" required>
-          <TextInput value={name} onChange={(e) => setName(e.target.value)} autoFocus />
+          <TextInput
+            value={name}
+            onChange={(e) => setName(e.target.value)}
+            autoFocus
+            onKeyDown={(e) => {
+              // Keyboard flow: Enter moves on to Phone; with the phone already there it adds at once.
+              if (e.key !== 'Enter') return;
+              e.preventDefault();
+              if (!name.trim()) return;
+              if (phone.trim()) void save();
+              else phoneRef.current?.focus();
+            }}
+          />
         </Field>
-        <Field label="Phone">
-          <TextInput value={phone} onChange={(e) => setPhone(e.target.value)} onKeyDown={(e) => e.key === 'Enter' && name.trim() && save()} />
+        <Field label="Phone" hint="Optional: press Enter to add without it">
+          <TextInput
+            ref={phoneRef}
+            value={phone}
+            inputMode="tel"
+            onChange={(e) => setPhone(e.target.value)}
+            onKeyDown={(e) => {
+              if (e.key !== 'Enter') return;
+              e.preventDefault();
+              void save();
+            }}
+          />
         </Field>
         {error && <div className="field-error">{error}</div>}
       </div>
@@ -296,6 +320,7 @@ export function AccountSelect({
   types,
   placeholder = 'Choose account…',
   exclude,
+  alsoShow,
   allowEmpty,
   disabled,
 }: {
@@ -306,20 +331,23 @@ export function AccountSelect({
   placeholder?: string;
   /** Account ids to leave out (e.g. the "from" account in a transfer). */
   exclude?: number[];
+  /** Inactive accounts to list anyway: those a document being edited already uses. */
+  alsoShow?: number[];
   allowEmpty?: boolean;
   disabled?: boolean;
 }) {
-  const q = useQuery('accounts.list', { groups, types });
+  const q = useQuery('accounts.list', alsoShow?.length ? { groups, types, includeInactive: true } : { groups, types });
   const byGroup = useMemo(() => {
     const m = new Map<string, Array<{ id: number; name: string; code: string | null }>>();
     for (const a of q.data ?? []) {
       if (exclude?.includes(a.id)) continue;
+      if (!a.isActive && !alsoShow?.includes(a.id)) continue;
       const list = m.get(a.groupName) ?? [];
-      list.push({ id: a.id, name: a.name, code: a.code });
+      list.push({ id: a.id, name: a.isActive ? a.name : `${a.name} (inactive)`, code: a.code });
       m.set(a.groupName, list);
     }
     return m;
-  }, [q.data, exclude]);
+  }, [q.data, exclude, alsoShow]);
   return (
     <select
       className="input select"

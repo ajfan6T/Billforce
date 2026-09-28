@@ -212,7 +212,8 @@ export function balanceSheet(ctx: Ctx, input: { asOf: string }): BalanceSheetRes
       summary: [
         { label: 'Total assets', value: assets, type: 'money' },
         { label: 'Total capital & liabilities', value: liabilities, type: 'money' },
-        { label: profitCurrent >= 0 ? 'Profit this year' : 'Loss this year', value: profitCurrent, type: 'money' },
+        // A loss is shown as a positive amount next to the word "Loss", in red (as the dashboard's "FY loss").
+        { label: profitCurrent >= 0 ? 'Profit this year' : 'Loss this year', value: Math.abs(profitCurrent), type: 'money', ...(profitCurrent < 0 ? { tone: 'bad' as const } : {}) },
         { label: 'Status', value: balanced ? 'Balanced' : `Difference ${(difference / 100).toFixed(2)}`, type: 'text' },
       ],
       notes,

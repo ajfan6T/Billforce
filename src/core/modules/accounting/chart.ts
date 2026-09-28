@@ -4,7 +4,7 @@
  * accounts used by the Cash / UPI / Bank payment modes.
  */
 import type { Ctx } from '../../context';
-import { now } from '../../context';
+import { now, today } from '../../context';
 import { fail } from '../../errors';
 import { logActivity } from '../../audit';
 import { getSection, updateSection } from '../../settings';
@@ -12,7 +12,8 @@ import { ACCOUNT_GROUPS } from '../../accounting/chart';
 import { accountBalance, getAccount, paymentAccountId, postEntry, replaceEntry, voidEntry, type AccountRow } from '../../accounting/ledger';
 import { ACCOUNT_TYPE_LABELS, ACCOUNT_TYPES, type AccountType, type PartyType, type SettlementMode } from '../../../shared/constants';
 import { formatDrCr } from '../../../shared/money';
-import { listAccounts } from './accounts';
+import { fyOf } from '../../../shared/dates';
+import { accountBalanceSums, listAccounts } from './accounts';
 import { openingLockedReason } from './common';
 
 export interface GroupInfo {
@@ -95,6 +96,10 @@ export function accountOpeningEntry(ctx: Ctx, accountId: number): { id: number; 
   return { ...row, amount };
 }
 
+function inactiveOpeningReason(name: string): string {
+  return `"${name}" is inactive — activate it first to change its opening balance.`;
+}
+
 function openingProblem(acct: Pick<AccountRow, 'party_type' | 'system_key' | 'type'>): string | null {
   if (acct.party_type) return 'Opening balances of customers, suppliers and employees are entered on their own pages.';
   if (acct.system_key === 'OPENING_EQUITY') return 'This account holds the balancing figure of all opening balances.';
@@ -111,6 +116,11 @@ export function setAccountOpening(ctx: Ctx, acct: AccountRow, debitBalance: numb
   if (problem && debitBalance !== 0) throw fail.validation(problem, { openingBalance: problem });
   const date = getSection(ctx, 'accounts').booksStartDate;
   const existing = accountOpeningEntry(ctx, acct.id);
+  // An account is deactivated only at a zero balance and must stay there (a rename still re-writes the narration).
+  if (!acct.is_active && debitBalance !== (existing?.amount ?? 0)) {
+    const msg = inactiveOpeningReason(acct.name);
+    throw fail.validation(msg, { openingBalance: msg });
+  }
   const locked = openingLockedReason(ctx);
   if (locked) {
     // The first year is closed: the opening entry is final (a rename keeps its old narration).
@@ -183,12 +193,38 @@ export interface ChartType {
   groups: ChartGroup[];
 }
 
-export function chartTree(
-  ctx: Ctx,
-  opts: { includeInactive?: boolean; asOf?: string } = {},
-): { types: ChartType[]; totalDebit: number; totalCredit: number; booksStartDate: string; openingLockedReason: string | null } {
+export interface ChartTree {
+  types: ChartType[];
+  totalDebit: number;
+  totalCredit: number;
+  booksStartDate: string;
+  openingLockedReason: string | null;
+  /** Date the balances are as on. */
+  asOf: string;
+  /** Financial year whose income and expenses are shown (they start every year at zero). */
+  financialYear: { start: string; name: string };
+  /**
+   * Income less expenses (debit - credit) of earlier years that are not closed yet: shown under
+   * Capital as "Profit & loss (previous years)", as in the trial balance and balance sheet.
+   */
+  previousYears: number;
+}
+
+export function chartTree(ctx: Ctx, opts: { includeInactive?: boolean; asOf?: string } = {}): ChartTree {
+  // Income and expense accounts show the financial year's figures (like the trial balance and their ledgers);
+  // earlier years that are not closed are one "Profit & loss (previous years)" figure under Capital.
+  const asOf = opts.asOf || today(ctx);
+  const fy = fyOf(asOf);
+  const sums = accountBalanceSums(ctx, opts.asOf, null);
+  const isPl = (type: AccountType) => type === 'income' || type === 'expense';
+  let previousYears = 0;
+  const all = listAccounts(ctx, { includeInactive: true }).map((a) => {
+    const s = sums.get(a.id);
+    if (isPl(a.type)) previousYears += (s?.all ?? 0) - (s?.year ?? 0);
+    return { ...a, balance: (isPl(a.type) ? s?.year : s?.all) ?? 0 };
+  });
   // Inactive accounts that still have a balance (e.g. an expense head no longer used this year) always show, so the totals agree.
-  const accounts = listAccounts(ctx, { includeInactive: true, withBalances: true, asOf: opts.asOf }).filter((a) => opts.includeInactive || a.isActive || a.balance);
+  const accounts = all.filter((a) => opts.includeInactive || a.isActive || a.balance);
   const counts = new Map(
     ctx.db.all<{ account_id: number; n: number }>('SELECT account_id, COUNT(DISTINCT entry_id) AS n FROM journal_lines GROUP BY account_id').map((r) => [r.account_id, r.n]),
   );
@@ -221,14 +257,23 @@ export function chartTree(
         const balance = list.reduce((s, a) => s + a.balance, 0);
         return { code: g.code, name: g.name, description: g.description, allowUserAccounts: !!g.allow_user_accounts, balance, accounts: list };
       });
-    const balance = tGroups.reduce((s, g) => s + g.balance, 0);
+    const balance = tGroups.reduce((s, g) => s + g.balance, 0) + (type === 'equity' ? previousYears : 0);
     return { type, label: ACCOUNT_TYPE_LABELS[type], balance, groups: tGroups };
   });
-  for (const a of accounts) {
-    if ((a.balance ?? 0) > 0) totalDebit += a.balance!;
-    else totalCredit -= a.balance ?? 0;
+  for (const bal of [...accounts.map((a) => a.balance), previousYears]) {
+    if (bal > 0) totalDebit += bal;
+    else totalCredit -= bal;
   }
-  return { types, totalDebit, totalCredit, booksStartDate: getSection(ctx, 'accounts').booksStartDate, openingLockedReason: openingLockedReason(ctx) };
+  return {
+    types,
+    totalDebit,
+    totalCredit,
+    booksStartDate: getSection(ctx, 'accounts').booksStartDate,
+    openingLockedReason: openingLockedReason(ctx),
+    asOf,
+    financialYear: { start: fy.start, name: fy.name },
+    previousYears,
+  };
 }
 
 /* ------------------------------ Account detail ------------------------------ */
@@ -246,8 +291,13 @@ export interface AccountDetail {
   partyType: PartyType | null;
   isActive: boolean;
   description: string | null;
-  /** Current balance (debit - credit). */
+  /**
+   * Current balance (debit - credit). Income and expense accounts start every financial year at
+   * zero: theirs is for this financial year (from `balanceFrom`), like the trial balance and ledger.
+   */
   balance: number;
+  /** Start of the financial year the balance is counted from (income / expense accounts); null = since the books start. */
+  balanceFrom: string | null;
   entryCount: number;
   /** Opening balance on the books start date (debit - credit); null when the account cannot have one. */
   openingBalance: number | null;
@@ -311,6 +361,8 @@ export function getAccountDetail(ctx: Ctx, id: number): AccountDetail {
         ? 'The group can only be changed before the account has any entries.'
         : null;
   const openingBlocked = openingProblem(a);
+  const pl = a.type === 'income' || a.type === 'expense';
+  const fyStart = fyOf(today(ctx)).start;
   return {
     id: a.id,
     code: a.code,
@@ -324,7 +376,8 @@ export function getAccountDetail(ctx: Ctx, id: number): AccountDetail {
     partyType: a.party_type,
     isActive: !!a.is_active,
     description: row.description,
-    balance: accountBalance(ctx, id),
+    balance: pl ? accountBalance(ctx, id, { from: fyStart, excludeClosing: true }) : accountBalance(ctx, id),
+    balanceFrom: pl ? fyStart : null,
     entryCount: entries,
     openingBalance: openingBlocked ? null : (accountOpeningEntry(ctx, id)?.amount ?? 0),
     openingBlockedReason: openingBlocked,

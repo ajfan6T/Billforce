@@ -4,6 +4,7 @@ import { DateInput, Field, FormGrid, MoneyInput, SegmentedControl, Select, TextA
 import { Modal } from '../../components/modal';
 import { useMutation, useQuery } from '../../hooks';
 import { useToast } from '../../feedback';
+import { useAuth } from '../../auth';
 import type { ApiOutput } from '../../api';
 import { formatDate, todayISO } from '../../../shared/dates';
 import { GroupField, WEEKDAYS } from './common';
@@ -77,6 +78,10 @@ export function EmployeeFormModal({
   const booksStart = employee?.booksStartDate ?? info.data?.booksStartDate;
   const openingLocked = employee ? employee.openingLocked : !!info.data?.openingLocked;
   const showPay = employee ? employee.showPay : true;
+  // The advance given before the books start is an accounting entry: only "Salary & advances" may set it.
+  const { can } = useAuth();
+  const canOpening = can('employees.salary');
+  const openingEditable = !openingLocked && canOpening;
 
   const save = async (e?: FormEvent) => {
     e?.preventDefault();
@@ -93,7 +98,7 @@ export function EmployeeFormModal({
       idProof: f.idProof.trim() || null,
       bankDetails: f.bankDetails.trim() || null,
       notes: f.notes.trim() || null,
-      openingAdvance: openingLocked ? undefined : (f.openingAdvance ?? 0),
+      openingAdvance: openingEditable ? (f.openingAdvance ?? 0) : undefined,
     };
     try {
       const saved = employee ? await update.run({ ...input, id: employee.id }) : await create.run(input);
@@ -178,10 +183,12 @@ export function EmployeeFormModal({
               hint={
                 openingLocked
                   ? 'Cannot be changed: the first financial year is closed'
-                  : `Advance still to be recovered on ${booksStart ? formatDate(booksStart) : 'the day your books start'}`
+                  : !canOpening
+                    ? 'Only the owner or manager can set this'
+                    : `Advance still to be recovered on ${booksStart ? formatDate(booksStart) : 'the day your books start'}`
               }
             >
-              <MoneyInput value={f.openingAdvance} onChange={(v) => set('openingAdvance', v)} placeholder="0.00" disabled={openingLocked} />
+              <MoneyInput value={f.openingAdvance} onChange={(v) => set('openingAdvance', v)} placeholder="0.00" disabled={!openingEditable} />
             </Field>
           )}
         </FormGrid>

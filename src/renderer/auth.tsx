@@ -1,6 +1,7 @@
-import { createContext, useCallback, useContext, useEffect, useMemo, useState, type ReactNode } from 'react';
+import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 import { call, onAppEvent, type ApiOutput } from './api';
 import { setScreenLocked } from './guards';
+import { useDialogs } from './feedback';
 import type { Permission } from '../shared/permissions';
 
 type Status = ApiOutput<'app.status'>;
@@ -15,8 +16,13 @@ interface AuthApi {
   canAny: (ps: Permission[]) => boolean;
   refresh: () => Promise<void>;
   logout: () => Promise<void>;
-  /** Show the lock screen (keeps the user, asks for the password again). */
-  lock: () => void;
+  /**
+   * Show the lock screen (keeps the user, asks for the password again). `returnFocusTo`: where focus goes
+   * after unlocking when that is not the element focused now (e.g. locking from the user menu).
+   */
+  lock: (returnFocusTo?: HTMLElement | null) => void;
+  /** For the lock screen: the element given to the last lock() call. */
+  lockReturnFocus: () => HTMLElement | null;
   locked: boolean;
   unlock: () => void;
 }
@@ -25,9 +31,12 @@ const AuthContext = createContext<AuthApi | null>(null);
 
 export function AuthProvider({ children }: { children: ReactNode }) {
   const [status, setStatus] = useState<Status | null>(null);
+  const { closeAll } = useDialogs();
   const [locked, setLockedState] = useState(false);
+  const lockFocusRef = useRef<HTMLElement | null>(null);
   // The module flag is set at once (not after the next render) so no shortcut slips through while locking.
   const setLocked = useCallback((v: boolean) => {
+    if (!v) lockFocusRef.current = null;
     setScreenLocked(v);
     setLockedState(v);
   }, []);
@@ -55,10 +64,13 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   // Auto-lock after inactivity (Settings > Security).
   const minutes = status?.autoLockMinutes ?? 0;
   const hasSession = !!status?.session;
-  // A lock belongs to a session: once logged out (or the session ended) the next login starts unlocked.
+  // A lock belongs to a session: once logged out (or the session ended) the next login starts unlocked,
+  // and no question of the previous user (e.g. "Clear this bill?") is left over the login screen.
   useEffect(() => {
-    if (!hasSession) setLocked(false);
-  }, [hasSession, setLocked]);
+    if (hasSession) return;
+    setLocked(false);
+    closeAll();
+  }, [hasSession, setLocked, closeAll]);
   useEffect(() => {
     if (!minutes || !hasSession) return;
     let last = Date.now();
@@ -87,15 +99,22 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       canAny: (ps) => ps.some(can),
       refresh,
       logout: async () => {
+        // "Switch user" on the lock screen: the previous user's open question is cancelled (never answered
+        // by the next person) before the login screen shows.
+        closeAll();
         await call('auth.logout');
         setLocked(false);
         await refresh();
       },
-      lock: () => setLocked(true),
+      lock: (returnFocusTo) => {
+        lockFocusRef.current = returnFocusTo ?? null;
+        setLocked(true);
+      },
+      lockReturnFocus: () => lockFocusRef.current,
       locked,
       unlock: () => setLocked(false),
     };
-  }, [status, locked, refresh, setLocked]);
+  }, [status, locked, refresh, setLocked, closeAll]);
 
   return <AuthContext.Provider value={api}>{children}</AuthContext.Provider>;
 }

@@ -4,8 +4,10 @@ import { Alert, Button } from '../../components/ui';
 import { Field, FormGrid, MoneyInput, SegmentedControl, TextArea, TextInput } from '../../components/forms';
 import { useMutation, useQuery } from '../../hooks';
 import { useToast } from '../../feedback';
+import { useAuth } from '../../auth';
 import type { ApiOutput } from '../../api';
 import { formatDate } from '../../../shared/dates';
+import { formatINR } from '../../../shared/money';
 import { BoxField } from '../customers/common';
 
 type SupplierDetail = ApiOutput<'suppliers.get'>;
@@ -34,6 +36,11 @@ function initial(s?: SupplierDetail | null, name?: string): FormState {
   };
 }
 
+/**
+ * Add or edit a supplier, including the opening balance. The opening balance is an accounting
+ * entry, so it needs "Journals, capital, drawings, loans, transfers" (accounts.manage); without it
+ * it is shown read-only and not sent.
+ */
 export function SupplierFormModal({
   open,
   supplier,
@@ -53,6 +60,8 @@ export function SupplierFormModal({
   const update = useMutation('suppliers.update');
   const m = supplier ? update : create;
   const toast = useToast();
+  const { can } = useAuth();
+  const canOpening = can('accounts.manage');
 
   useEffect(() => {
     if (open) {
@@ -75,7 +84,8 @@ export function SupplierFormModal({
       email: f.email.trim() || null,
       address: f.address.trim() || null,
       notes: f.notes.trim() || null,
-      ...(locked ? {} : { openingBalance: f.openingAmount ? { amount: f.openingAmount, direction: f.openingDirection } : null }),
+      // Left out = kept as saved (the server refuses changes without accounts.manage).
+      ...(locked || !canOpening ? {} : { openingBalance: f.openingAmount ? { amount: f.openingAmount, direction: f.openingDirection } : null }),
     };
     try {
       const saved = supplier ? await update.run({ id: supplier.id, ...payload }) : await create.run(payload);
@@ -133,11 +143,24 @@ export function SupplierFormModal({
         <div className="section-title" style={{ margin: '4px 0 0' }}>
           Opening balance
         </div>
-        {locked ? (
+        {!canOpening ? (
+          <Alert tone="neutral">
+            {supplier?.openingBalance
+              ? `Opening balance ${formatINR(supplier.openingBalance.amount)} ${supplier.openingBalance.direction === 'payable' ? 'payable' : 'advance paid'}. `
+              : supplier
+                ? 'No opening balance. '
+                : ''}
+            Only the owner or manager can set or change opening balances.
+          </Alert>
+        ) : locked ? (
           <Alert tone="neutral">The year your books started in is closed, so the opening balance can no longer be changed.</Alert>
         ) : (
           <FormGrid>
-            <Field label="Amount" hint={info.data ? `Balance on ${formatDate(info.data.booksStartDate)}, when you started using Billforce` : undefined}>
+            <Field
+              label="Amount"
+              hint={info.data ? `Balance on ${formatDate(info.data.booksStartDate)}, when you started using Billforce` : undefined}
+              error={fe.openingBalance}
+            >
               <MoneyInput value={f.openingAmount} onChange={(v) => set('openingAmount', v)} placeholder="0.00" />
             </Field>
             <BoxField label="Type">

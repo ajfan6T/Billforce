@@ -752,3 +752,86 @@ describe('export', () => {
     expect(t.app.db.value<number>("SELECT COUNT(*) FROM activity_log WHERE action = 'report.export'")).toBe(reports.length * 3);
   });
 });
+
+describe('returned items and refunds in the reports', () => {
+  /** Basmati ₹649.50 + Parle-G 3 x ₹10 + Soap 3 x ₹10 less ₹1, ₹10 off the bill, paid in cash (₹698.50 rounded to ₹699). */
+  async function shopWithReturns() {
+    const t = await createTestApp({ openingCash: R(5000) });
+    const bill = await t.call('sales.create', {
+      items: [
+        { itemName: 'Basmati Rice 5kg', qty: 1, rate: R(649.5) },
+        { itemName: 'Parle-G Biscuit', qty: 3, rate: R(10) },
+        { itemName: 'Soap', qty: 3, rate: R(10), discount: R(1) },
+      ],
+      billDiscount: R(10),
+      payments: [{ mode: 'cash', amount: R(699) }],
+    });
+    const [basmati, parle, soap] = bill.items;
+    const back = (items: Array<{ billItemId: number; qty: number }>) => t.call('returns.create', { kind: 'return', billId: bill.id, items, refundMode: 'cash' });
+    await back([{ billItemId: basmati.id, qty: 1 }]);
+    await back([{ billItemId: parle.id, qty: 1 }]);
+    for (let i = 0; i < 3; i++) await back([{ billItemId: soap.id, qty: 1 }]);
+    return { t, bill };
+  }
+
+  it('values returned items like the sale, so an item returned in full nets to zero', async () => {
+    const { t } = await shopWithReturns();
+    const range = { from: '2026-09-01', to: '2026-09-28' };
+    const items = await t.call('reports.salesByItem', range);
+    expect(row(items.report, 'Basmati Rice 5kg').cells).toMatchObject({ qtySold: 1, qtyReturned: 1, netQty: 0, soldAmount: R(649.5), returnedAmount: R(649.5), amount: 0 });
+    expect(row(items.report, 'Parle-G Biscuit').cells).toMatchObject({ qtySold: 3, qtyReturned: 1, netQty: 2, soldAmount: R(30), returnedAmount: R(10), amount: R(20) });
+    // Three part returns of a line with an item discount add up to exactly the line amount.
+    expect(row(items.report, 'Soap').cells).toMatchObject({ qtySold: 3, qtyReturned: 3, netQty: 0, soldAmount: R(29), returnedAmount: R(29), amount: 0 });
+    expect(items.report.columns.map((c) => c.label)).toEqual(['Item', 'Unit', 'Bills', 'Qty sold', 'Qty returned', 'Net qty', 'Sold', 'Returned', 'Net amount', 'Share %']);
+    expect(row(items.report, /^Total \(/).cells).toMatchObject({ soldAmount: R(649.5 + 30 + 29), returnedAmount: R(649.5 + 10 + 29), amount: R(20) });
+    // The dashboard's top items use the same figures: no ₹20.63 for two biscuits.
+    const d = await t.call('dashboard.summary');
+    expect(d.topItems).toEqual([{ name: 'Parle-G Biscuit', itemId: null, qty: 2, unit: null, amount: R(20) }]);
+  });
+
+  it('puts the whole of a cash refund under refunds, including its round off', async () => {
+    const { t } = await shopWithReturns();
+    const refunds = t.app.db.value<number>("SELECT COALESCE(SUM(total), 0) FROM credit_notes WHERE status = 'active'");
+    const roundOff = t.app.db.value<number>(
+      "SELECT COUNT(*) FROM journal_lines l JOIN journal_entries e ON e.id = l.entry_id JOIN accounts a ON a.id = l.account_id WHERE e.source_type = 'credit_note' AND a.system_key = 'ROUND_OFF'",
+    );
+    expect(roundOff).toBeGreaterThan(0); // the refunds were rounded
+    const { figures: f } = cashFlow(t.app.ctx(), { from: '2026-09-01', to: '2026-09-28' });
+    expect(f.lines.refunds).toEqual({ in: 0, out: refunds });
+    expect(f.lines.sales).toEqual({ in: R(699), out: 0 });
+    expect(f.balanced).toBe(true);
+    expect(ledgerProblems(t.app)).toEqual([]);
+  });
+
+  it('splits a payment across activity lines in whole shares, the odd paise going to the biggest', async () => {
+    const t = await createTestApp({ openingCash: R(5000) });
+    const b = new Books(t);
+    // ₹100 out for ₹99.99 of refunds and ₹0.01 of round off, plus ₹50.01 of expenses: two lines, not three.
+    b.post('2026-09-10', 'journal', [
+      { account: 'SALES_RETURNS', debit: 9999 },
+      { account: 'ROUND_OFF', debit: 1 },
+      { account: b.accountId('Rent'), debit: 5001 },
+      { account: 'CASH', credit: 15001 },
+    ]);
+    const { figures: f } = cashFlow(t.app.ctx(), { from: '2026-09-01', to: '2026-09-28' });
+    expect(f.lines.refunds.out + f.lines.expenses.out).toBe(15001);
+    expect(f.lines.refunds.out).toBe(10000);
+    expect(f.lines.sales).toEqual({ in: 0, out: 0 });
+  });
+
+  it('shows a loss as a positive amount next to the word loss, in red, in the tiles as in the statement', async () => {
+    const t = await createTestApp({ openingCash: R(50000) });
+    const b = new Books(t);
+    b.bill({ date: '2026-09-05', lines: [{ item: 'Tea', qty: 10, rate: R(10) }], payments: [{ mode: 'cash', amount: R(100) }] });
+    b.expense('2026-09-06', 'Rent', R(13180), 'cash');
+    const pl = await t.call('reports.profitLoss', { from: '2026-09-01', to: '2026-09-28' });
+    expect(pl.figures.netProfit).toBe(-R(13080));
+    expect(row(pl.report, 'Net loss').cells.amount).toBe(R(13080));
+    expect(pl.report.summary?.find((s) => s.label === 'Net loss')).toEqual({ label: 'Net loss', value: R(13080), type: 'money', tone: 'bad' });
+    expect(pl.report.summary?.find((s) => s.label === 'Gross profit')).toEqual({ label: 'Gross profit', value: R(100), type: 'money' });
+    const bs = await t.call('reports.balanceSheet', { asOf: '2026-09-28' });
+    expect(bs.report.summary?.find((s) => /this year/.test(s.label))).toEqual({ label: 'Loss this year', value: R(13080), type: 'money', tone: 'bad' });
+    const d = await t.call('dashboard.summary');
+    expect(d.profit?.thisFy).toBe(-R(13080));
+  });
+});

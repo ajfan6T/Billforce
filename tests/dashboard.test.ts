@@ -158,4 +158,41 @@ describe('dashboard summary', () => {
     expect(d.trend?.values.every((v) => v === 0)).toBe(true);
     expect(d.profit).toEqual({ thisMonth: 0, thisFy: 0 });
   });
+  it('warns when a cash or bank account is below zero and opens its book', async () => {
+    const t = await createTestApp({ openingCash: R(8000) });
+    let d = await t.call('dashboard.summary');
+    expect(d.alerts.find((a) => a.kind === 'negative_balance')).toBeUndefined();
+    const emp = await t.call('employees.create', { name: 'Raju', salaryType: 'monthly', salaryAmount: R(15000), joinDate: '2026-04-01' } as any);
+    // Salary paid in cash when only ₹8,000 was in hand.
+    const slip = await t.call('salary.process', { employeeId: emp.id, month: '2026-08', payNow: { mode: 'cash', amount: R(12306.45) } });
+    expect(slip.warnings[0]).toMatch(/Cash in Hand will be short by ₹4,306.45/);
+    d = await t.call('dashboard.summary');
+    expect(d.balances?.cash).toBe(-R(4306.45));
+    const cashId = t.app.db.value<number>("SELECT id FROM accounts WHERE system_key = 'CASH'");
+    expect(d.alerts[0]).toEqual({
+      kind: 'negative_balance',
+      tone: 'red',
+      title: 'Cash in Hand is below zero',
+      message:
+        'Cash in Hand -₹4,306.45. More money was paid out than the books show came in: check for a sale, payment received or deposit that was not entered, or a payment entered twice.',
+      path: `/accounts/cash-book?account=${cashId}`,
+      action: 'Open cash book',
+    });
+    // Two accounts below zero: one alert, opening the book of the lowest.
+    await t.call('expenses.create', { accountId: t.app.db.value<number>("SELECT id FROM accounts WHERE name = 'Rent'"), amount: R(5000), mode: 'upi' });
+    d = await t.call('dashboard.summary');
+    const alert = d.alerts.find((a) => a.kind === 'negative_balance')!;
+    expect(alert.title).toBe('2 cash / bank accounts are below zero');
+    expect(alert.message).toMatch(/^UPI Account -₹5,000.00, Cash in Hand -₹4,306.45\./);
+    expect(alert.path).toMatch(/^\/accounts\/bank-book\?account=\d+$/);
+    // A cashier sees no balances, so no alert.
+    await t.loginAs('cashier');
+    expect((await t.call('dashboard.summary')).alerts.find((a) => a.kind === 'negative_balance')).toBeUndefined();
+    // Money received brings it back: the alert goes away.
+    await t.loginOwner();
+    await t.call('accounts.capital', { amount: R(10000), mode: 'cash' } as any);
+    await t.call('accounts.capital', { amount: R(5000), mode: 'upi' } as any);
+    expect((await t.call('dashboard.summary')).alerts.find((a) => a.kind === 'negative_balance')).toBeUndefined();
+    expect(ledgerProblems(t.app)).toEqual([]);
+  });
 });

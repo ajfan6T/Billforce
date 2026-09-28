@@ -528,23 +528,30 @@ describe('statements and outstanding', () => {
     const cancelled = await t.call('receipts.create', { customerId: c.id, date: '2026-08-05', amount: 5000, mode: 'cash' });
     await t.call('receipts.cancel', { id: cancelled.id, reason: 'Entered twice' });
 
-    // Whole year: opening row is zero, the opening entry itself shows as a line.
+    // Whole year from the books start: the opening balance is brought forward (as on the Ledgers page), not a line.
     const full = await t.call('customers.statement', { customerId: c.id, from: '2026-04-01', to: '2026-09-28' });
     expect(full.title).toBe('Statement of account - Anita');
     expect(full.subtitle).toBe('01-04-2026 to 28-09-2026');
     expect(full.notes?.[0]).toBe('Customer: Anita, Ph: 98200 11111');
+    expect(full.rows[0].cells).toMatchObject({ particulars: 'Balance brought forward (incl. opening balance)', balance: 20000 });
     const body = full.rows.slice(1, -1);
-    expect(body.map((r) => r.cells.type)).toEqual(['Opening balance', 'Sales bill', 'Payment received', 'Sales bill', 'Payment received']);
-    expect(body.map((r) => r.cells.balance)).toEqual([20000, 74000, 49000, 59000, 48500]);
-    expect(body[1].cells).toMatchObject({ number: b1.billNo, particulars: 'Rice 5, Dal 2', debit: 54000, credit: null });
-    expect(body[1].link).toEqual({ kind: 'bill', id: b1.id });
-    expect(body[3].cells.particulars).toBe('Oil 1 (bill ₹180.00, paid ₹80.00)');
-    expect(body[4].cells).toMatchObject({ particulars: 'UPI · Ref U-1 · incl. discount ₹5.00', credit: 10500 });
-    expect(body[4].link).toEqual({ kind: 'receipt', id: r2.id });
+    expect(body.map((r) => r.cells.type)).toEqual(['Sales bill', 'Payment received', 'Sales bill', 'Payment received']);
+    expect(body.map((r) => r.cells.balance)).toEqual([74000, 49000, 59000, 48500]);
+    expect(body[0].cells).toMatchObject({ number: b1.billNo, particulars: 'Rice 5, Dal 2', debit: 54000, credit: null });
+    expect(body[0].link).toEqual({ kind: 'bill', id: b1.id });
+    expect(body[2].cells.particulars).toBe('Oil 1 (bill ₹180.00, paid ₹80.00)');
+    expect(body[3].cells).toMatchObject({ particulars: 'UPI · Ref U-1 · incl. discount ₹5.00', credit: 10500 });
+    expect(body[3].link).toEqual({ kind: 'receipt', id: r2.id });
     const closing = full.rows[full.rows.length - 1];
     expect(closing.style).toBe('total');
     expect(closing.cells.balance).toBe(bal(t, c.id));
-    expect(closing.cells).toMatchObject({ debit: 84000, credit: 35500 });
+    expect(closing.cells).toMatchObject({ debit: 64000, credit: 35500 });
+    expect(full.summary?.slice(0, 4).map((x) => [x.label, x.value])).toEqual([
+      ['Brought forward', 20000],
+      ['Billed on credit & other dues', 64000],
+      ['Payments, discounts & returns', 35500],
+      ['Closing balance', 48500],
+    ]);
     expect(full.summary?.find((s) => s.label === 'Status')?.value).toBe('Customer owes you ₹485.00');
 
     // A later period starts from the balance carried forward.
@@ -579,7 +586,7 @@ describe('statements and outstanding', () => {
     expect(rep.summary?.map((s) => s.value)).toEqual([2, 47500, 3000, 44500]);
 
     const earlier = await t.call('customers.outstanding', { asOf: '2026-08-31' });
-    expect(earlier.rows.map((r) => r.cells.name)).toEqual(['Anita', 'Total (1 customers)']);
+    expect(earlier.rows.map((r) => r.cells.name)).toEqual(['Anita', 'Total (1 customer)']);
     expect(earlier.rows[0].cells.due).toBe(50000);
   });
 });
@@ -733,7 +740,8 @@ describe('review fixes: customer page totals and fast duplicate-phone check', ()
 
     // The statement names its totals on the same basis (only the unpaid part of each bill is in the account).
     const st = await t.call('customers.statement', { customerId: c.id, from: '2026-04-01', to: '2026-09-28' });
-    expect(st.summary?.find((s) => s.label === 'Billed on credit & other dues')?.value).toBe(10000 + 30000 + 300);
+    expect(st.summary?.find((s) => s.label === 'Brought forward')?.value).toBe(10000);
+    expect(st.summary?.find((s) => s.label === 'Billed on credit & other dues')?.value).toBe(30000 + 300);
     expect(st.summary?.find((s) => s.label === 'Payments, discounts & returns')?.value).toBe(15500 + 5000);
     expect(st.notes?.some((n) => n.includes('Only the unpaid part of a bill'))).toBe(true);
   });
@@ -772,5 +780,66 @@ describe('review fixes: customer page totals and fast duplicate-phone check', ()
     // Before the fix this took ~12 s (every row read every customer); now it is well under a second on a normal PC.
     expect(ms).toBeLessThan(6000);
     expect((await t.fails('customers.create', { name: 'Dup', phone: '+91 98 1000 3999' })).message).toBe('This phone number already belongs to Customer 3999');
+  });
+});
+
+describe('review round 2: statements agree with the Ledgers page; balances stay hidden', () => {
+  it('brings the opening balance forward like books.ledger, and keeps an opening dated inside the period as a line', async () => {
+    const t = await createTestApp();
+    const c = await t.call('customers.create', { name: 'Ravi', openingBalance: { amount: 250000, direction: 'receivable' } });
+    addBill(t, { customerId: c.id, date: '2026-05-10', items: [{ name: 'Rice', qty: 1, rate: 40000 }] });
+    await t.call('receipts.create', { customerId: c.id, date: '2026-06-01', amount: 90000, mode: 'cash' });
+
+    for (const [from, to] of [
+      ['2026-04-01', '2026-09-28'],
+      ['2026-04-01', '2026-04-01'],
+      ['2026-05-01', '2026-09-28'],
+    ] as const) {
+      const st = await t.call('customers.statement', { customerId: c.id, from, to });
+      const bl = await t.call('books.ledger', { from, to, partyType: 'customer', partyId: c.id });
+      const sum = (label: string) => st.summary?.find((s) => s.label === label)?.value;
+      expect(sum('Brought forward')).toBe(bl.opening);
+      expect(sum('Billed on credit & other dues')).toBe(bl.totalIn);
+      expect(sum('Payments, discounts & returns')).toBe(bl.totalOut);
+      expect(sum('Closing balance')).toBe(bl.closing);
+      expect(st.rows.slice(1, -1).map((r) => r.cells.type)).not.toContain('Opening balance');
+    }
+    const first = await t.call('customers.statement', { customerId: c.id, from: '2026-04-01', to: '2026-09-28' });
+    expect(first.rows[0].cells).toMatchObject({ date: '2026-04-01', particulars: 'Balance brought forward (incl. opening balance)', balance: 250000 });
+    const later = await t.call('customers.statement', { customerId: c.id, from: '2026-05-01', to: '2026-09-28' });
+    expect(later.rows[0].cells).toMatchObject({ particulars: 'Balance brought forward', balance: 250000 });
+
+    // A period that starts before the books start: the opening balance is a line on the day it is dated.
+    const wide = await t.call('customers.statement', { customerId: c.id, from: '2026-03-01', to: '2026-09-28' });
+    expect(wide.rows[0].cells).toMatchObject({ particulars: 'Balance brought forward', balance: 0 });
+    expect(wide.rows[1].cells).toMatchObject({ date: '2026-04-01', type: 'Opening balance', particulars: 'Balance when you started using Billforce', debit: 250000, balance: 250000 });
+    expect(wide.rows[wide.rows.length - 1].cells.balance).toBe(bal(t, c.id));
+    expect(ledgerProblems(t.app)).toEqual([]);
+  });
+
+  it('add / edit / (de)activate send no balance, credit limit or opening balance to users who may not see them', async () => {
+    const t = await createTestApp();
+    const anil = await t.call('customers.create', { name: 'Anil', phone: '90000 00001', creditLimit: 5000000, openingBalance: { amount: 4500000, direction: 'receivable' } });
+    addBill(t, { customerId: anil.id, date: '2026-05-10', items: [{ name: 'Rice', qty: 1, rate: 40000 }] });
+    await t.call('roles.update', { role: 'cashier', permissions: ['billing.create', 'customers.manage'] });
+    await t.loginAs('cashier');
+    expect((await t.fails('customers.get', { id: anil.id })).code).toBe('FORBIDDEN');
+    expect((await t.fails('customers.list', {})).code).toBe('FORBIDDEN');
+
+    const hidden = { balance: 0, creditLimit: null, openingBalance: null, overLimit: false, balanceHidden: true };
+    const u = await t.call('customers.update', { id: anil.id, name: 'Anil K', phone: '90000 00001' });
+    expect(u).toMatchObject({ name: 'Anil K', ...hidden });
+    expect(u.totals).toMatchObject({ billed: 0, paidAtBilling: 0, received: 0, opening: 0, adjustments: 0 });
+    expect(await t.call('customers.setActive', { id: anil.id, active: false })).toMatchObject(hidden);
+    expect(await t.call('customers.setActive', { id: anil.id, active: true })).toMatchObject(hidden);
+    expect(await t.call('customers.create', { name: 'New one' })).toMatchObject({ balanceHidden: true, balance: 0 });
+
+    // The saved figures are untouched and the owner still sees them.
+    await t.loginOwner();
+    const d = await t.call('customers.get', { id: anil.id });
+    expect(d).toMatchObject({ name: 'Anil K', creditLimit: 5000000, openingBalance: { amount: 4500000, direction: 'receivable' }, balance: 4540000 });
+    expect(d.balanceHidden).toBeUndefined();
+    expect((await t.call('customers.list', {})).find((r) => r.id === anil.id)).toMatchObject({ balance: 4540000, creditLimit: 5000000 });
+    expect(ledgerProblems(t.app)).toEqual([]);
   });
 });

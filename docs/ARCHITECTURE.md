@@ -57,6 +57,8 @@ tests/               vitest; helpers.ts gives createTestApp(), ledgerProblems(),
   `recordRevision(ctx, docType, id, 'created'|'edited'|'cancelled', snapshotAfterChange, reason)` — full snapshot after the change.
   Editing/cancelling requires a reason where it matters (bills: cancel reason required, edit reason optional).
 * **Cancel, don't delete** documents: set `status='cancelled'`, `cancelled_by/at/reason`, and `voidEntry()` the journal entry.
+  Call `assertCancelKeepsClosedAccounts(ctx, entryId, 'this bill')` (`modules/accounting/common.ts`) first: an inactive
+  cash / bank account (deactivated only at zero) or a closed loan must never gain a balance from a cancel.
 * **Ledger**: modules never write `journal_*` tables directly. Use `postEntry`, `replaceEntry` (on edit), `voidEntry` (on cancel)
   from `core/accounting/ledger.ts`. Use system keys (`'CASH'`, `'SALES'`, `'AR'`...) or account ids.
   Lines on control accounts need a party: AR→customer, AP→supplier, EMP_ADV/SALARY_PAYABLE→employee.
@@ -81,9 +83,14 @@ tests/               vitest; helpers.ts gives createTestApp(), ledgerProblems(),
   domain pickers from `pickers.tsx`, `useQuery(route, input)` / `useMutation(route)`, `useToast()`, `useDialogs()` (confirm / prompt),
   `useAuth().can(perm)` to hide actions. Keyboard: `useHotkeys` (page shortcuts are off while a dialog is open or the
   screen is locked; shortcuts set up by the component that renders a `<Modal>` work while it is on top).
-  Forms with unsaved changes call `useUnsavedWarning(dirty)`: closing the window asks, and the sidebar, `LinkButton`,
-  "Back" links and F2 ask before leaving (`{ navigation: false }` when the page keeps its own draft).
+  Forms with unsaved changes call `useUnsavedWarning(dirty)`: closing the window asks "Leave without saving?", and every
+  in-app link (`href="#/…"`, caught by `useLinkGuard` in `App`), the sidebar, `LinkButton`, "Back" links and F2 ask before
+  leaving. Cancel / Back buttons navigate with `useGuardedNavigate().go(path | -1)`; after a successful save use the plain
+  `navigate()`. `{ navigation: false }` when the page keeps its own draft: leaving does not ask, and closing the desktop app
+  says the draft will be kept (Close / Stay) instead of "will be lost".
   `files.open` / `files.showInFolder` only accept what Billforce saved (via `platform.saveFile`), the data folder and backups.
+  Platforms write saved files with `writeFileSafely` (core/platform.ts: "<name>.partial", fsync, size check, rename), so a
+  full or pulled-out pen drive never keeps a cut-short file; it throws `SaveFileError` with plain words.
   Module CSS goes in `pages/<module>/<module>.css` imported by its pages.
   Tone: plain English a shop owner understands ("Payment received", "Amount due", "Cancel bill").
 * **Tests**: each module adds `tests/<module>.test.ts` using `createTestApp()`; assert `ledgerProblems(t.app)` is empty after
@@ -123,7 +130,8 @@ Balance sheet as on D: balance-sheet accounts use all entries ≤ D except closi
 | `customers.search` | `{ q, limit? }` | `{ id, name, phone, balance, creditLimit, balanceHidden? }[]` (balance + = owes you; without `customers.view`/`customers.receive`: balance 0, creditLimit null, balanceHidden true) |
 | `customers.quickCreate` | `{ name, phone?, address? }` | same shape |
 | `suppliers.search` / `suppliers.quickCreate` | `{ q, limit? }` / `{ name, phone? }` | `{ id, name, phone, payable }` (+ = you owe) |
-| `accounts.list` | `{ groups?, types?, includeInactive?, withBalances?, asOf? }` | `AccountListItem[]` |
+| `accounts.list` | `{ groups?, types?, includeInactive?, withBalances?, asOf? }` | `AccountListItem[]` (income / expense balances are for asOf's financial year, like the trial balance) |
+| `accounts.paymentCheck` | `{ mode, accountId?, amount, date?, entryId? }` | `{ accountId, accountName, date, balance \| null, warning }` — show the balance next to "Paid from" and ask before saving a payment that takes it below zero (`pages/accounts/PaymentBalance.tsx`) |
 | `accounts.paymentAccounts` | – | `{ cash[], bank[], defaults: { cash, upi, bank } }` |
 | `employees.search` | `{ q?, includeInactive? }` | `{ id, name, phone, designation, isActive }[]` |
 | `sales.create` | `{ date?, customerId?, customerName?, customerPhone?, items: [{ itemId?, itemName, unit?, qty, rate, discount?, discountPct? }], billDiscount?, billDiscountPct?, payments: [{ mode: 'cash'|'upi'|'bank', amount, accountId?, reference? }], remarks? }` — credit part = total − Σpayments | `{ id, billNo, total, ... }` |

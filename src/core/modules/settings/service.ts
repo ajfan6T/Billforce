@@ -374,6 +374,20 @@ export async function testPrint(ctx: Ctx, input: PreviewInput & { printerName?: 
   return { printed: true, message: printerName ? `Test receipt sent to ${printerName}` : 'Test receipt sent to the printer' };
 }
 
+/* ------------------------------ Document numbers ------------------------------ */
+
+/**
+ * The number the next document of each series will get in the current financial year (what
+ * peekDocNumber would give), for "Next number" in Settings > Billing. Takes no number.
+ */
+export function nextNumbers(ctx: Ctx): { fyShort: string; next: Record<SequenceKey, number> } {
+  const fy = fyOf(today(ctx));
+  const rows = ctx.db.all<{ key: string; last_value: number }>('SELECT key, last_value FROM sequences WHERE fy_start = ?', [fy.start]);
+  const last = new Map(rows.map((r) => [r.key, r.last_value]));
+  const next = Object.fromEntries(SEQUENCE_KEYS.map((k) => [k, (last.get(k) ?? 0) + 1])) as Record<SequenceKey, number>;
+  return { fyShort: fy.short, next };
+}
+
 /* ------------------------------ About ------------------------------ */
 
 export function aboutInfo(ctx: Ctx) {

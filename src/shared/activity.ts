@@ -98,6 +98,8 @@ export const ACTIVITY_LABELS: Record<string, string> = {
   'employee.activate': 'Re-activated employee',
   'employee.leave': 'Marked employee as left',
   'attendance.mark': 'Marked attendance',
+  'attendance.markAll': 'Marked attendance for everyone',
+  'attendance.weeklyOff': 'Filled weekly offs',
   'attendance.clear': 'Cleared attendance',
   'salary.process': 'Processed salary',
   'salary.update': 'Edited salary slip',
@@ -219,7 +221,7 @@ const MONEY_WORDS = new Set([
   'amount', 'amounts', 'total', 'subtotal', 'rate', 'paid', 'credit', 'debit', 'balance', 'limit', 'gross', 'net', 'bonus',
   'deduction', 'deductions', 'recovery', 'profit', 'loss', 'drawings', 'due', 'discount', 'price', 'payable', 'receivable',
   'principal', 'interest', 'salary', 'wage', 'wages', 'refund', 'outstanding', 'advance', 'charge', 'charges', 'fee', 'fees',
-  'cash', 'bank', 'upi', 'income', 'expense', 'expenses', 'payment', 'change', 'tendered', 'off',
+  'cash', 'bank', 'upi', 'income', 'expense', 'expenses', 'payment', 'change', 'tendered',
 ]);
 const PERCENT_WORDS = new Set(['pct', 'percent', 'percentage']);
 
@@ -291,6 +293,64 @@ const KEY_LABELS: Record<string, string> = {
   gstin: 'GSTIN',
 };
 
+/** How a number in the details is shown. */
+export type DetailFormat = 'money' | 'count' | 'number' | 'weekday' | 'percent' | 'bytes' | 'mm';
+
+interface FieldSpec {
+  format?: DetailFormat;
+  label?: string;
+}
+
+/** Field formats and labels for every action. Keys are lower-case without separators. */
+const COMMON_FIELDS: Record<string, FieldSpec> = {
+  roundoff: { format: 'money', label: 'Round off' },
+};
+
+/**
+ * Numbers whose field name does not say (or says wrongly) what they are, per action; "employee.*" covers
+ * every action of the module. A format given for an object (e.g. the "counts" of an import) applies to every
+ * number inside it. These come before the rules that go by the field name (MONEY_WORDS).
+ */
+const ACTION_FIELDS: Record<string, Record<string, FieldSpec>> = {
+  // weekly_off is the day of the week (0 = Sunday).
+  'employee.*': { weeklyoff: { format: 'weekday', label: 'Weekly off' }, removedattendance: { format: 'count' } },
+  'attendance.markAll': {
+    marked: { format: 'count', label: 'Employees marked' },
+    weeklyoff: { format: 'count', label: 'On weekly off' },
+    alreadymarked: { format: 'count', label: 'Already marked (left as they were)' },
+    locked: { format: 'count', label: 'Skipped (salary already processed)' },
+    status: { label: 'Marked as' },
+    onlyunmarked: { label: 'Only employees not yet marked' },
+  },
+  'attendance.weeklyOff': {
+    filled: { format: 'count', label: 'Days marked weekly off' },
+    employees: { format: 'count', label: 'Employees' },
+    locked: { format: 'count', label: 'Skipped (salary already processed)' },
+  },
+  // Row counts of an import: { total, create, update, skip, errors }.
+  'import.*': {
+    counts: { format: 'count' },
+    create: { label: 'Added' },
+    update: { label: 'Updated' },
+    skip: { label: 'Already there' },
+    errors: { label: 'With errors' },
+  },
+  'bill.*': { items: { format: 'count' } },
+  'account.*': { entrycount: { format: 'count', label: 'Entries' } },
+  'settings.*': { copies: { format: 'count' }, keepcount: { format: 'count' }, autolockminutes: { format: 'count' } },
+};
+
+type Fields = Record<string, FieldSpec>;
+
+/** The field specs that apply to an action. */
+function fieldsFor(action: string): Fields {
+  const dot = action.indexOf('.');
+  const moduleWide = dot > 0 ? ACTION_FIELDS[`${action.slice(0, dot)}.*`] : undefined;
+  return { ...COMMON_FIELDS, ...moduleWide, ...ACTION_FIELDS[action] };
+}
+
+const WEEKDAYS = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
+
 /** When `before` / `after` are single values, what they are (by action). */
 const ACTION_VALUE_KEYS: Record<string, string> = {
   'item.update': 'rate',
@@ -319,7 +379,9 @@ function isHiddenKey(key: string): boolean {
 }
 
 /** "openingBalance" -> "Opening balance" */
-export function detailLabel(key: string): string {
+export function detailLabel(key: string, fields: Fields = COMMON_FIELDS): string {
+  const own = fields[flatKey(key)]?.label;
+  if (own) return own;
   const known = KEY_LABELS[flatKey(key)];
   if (known) return known;
   const text = keyWords(key)
@@ -344,7 +406,7 @@ function isPercentKey(key: string): boolean {
 }
 
 const PERMISSION_LABELS = new Map<string, string>(PERMISSIONS.map((p) => [p.key, p.label]));
-const ENUM_KEYS = new Set(['mode', 'paymentmode', 'refundmode', 'status', 'direction', 'kind', 'duplicatemode', 'section', 'when', 'role', 'type', 'fontsize', 'upiqr', 'defaultpaymentmode']);
+const ENUM_KEYS = new Set(['mode', 'paymentmode', 'refundmode', 'status', 'direction', 'kind', 'duplicatemode', 'section', 'when', 'role', 'type', 'fontsize', 'upiqr', 'defaultpaymentmode', 'salarytype']);
 
 function humanize(code: string): string {
   const w = code.replace(/[_-]+/g, ' ').trim();
@@ -378,12 +440,36 @@ function formatString(key: string, v: string): string {
 
 const isPlainObject = (v: unknown): v is Record<string, unknown> => !!v && typeof v === 'object' && !Array.isArray(v);
 
-/** One value, formatted for reading. `key` is the field it belongs to (decides money, dates, labels). */
-export function formatDetailValue(key: string, v: unknown): string {
+function formatNumberAs(format: DetailFormat, v: number): string {
+  switch (format) {
+    case 'money':
+      return Number.isInteger(v) ? formatINR(v) : formatQty(v);
+    case 'count':
+      return Number.isInteger(v) ? formatIndianNumber(v, 0) : formatQty(v);
+    case 'weekday':
+      return WEEKDAYS[v] ?? formatQty(v);
+    case 'percent':
+      return `${formatQty(v)}%`;
+    case 'bytes':
+      return formatBytesText(v);
+    case 'mm':
+      return `${v} mm`;
+    default:
+      return formatQty(v);
+  }
+}
+
+/**
+ * One value, formatted for reading. `key` is the field it belongs to (decides money, dates, labels);
+ * `fields` are the formats of the action (see ACTION_FIELDS) and `inherited` the format of the object it is in.
+ */
+export function formatDetailValue(key: string, v: unknown, fields: Fields = COMMON_FIELDS, inherited?: DetailFormat): string {
   if (v === null || v === undefined || v === '') return '—';
   if (typeof v === 'boolean') return v ? 'Yes' : 'No';
+  const format = fields[flatKey(key)]?.format ?? inherited;
   if (typeof v === 'number') {
     if (!Number.isFinite(v)) return String(v);
+    if (format) return formatNumberAs(format, v);
     const fk = flatKey(key);
     if (fk === 'sizebytes' || fk.endsWith('bytes')) return formatBytesText(v);
     if (isPercentKey(key)) return `${formatQty(v)}%`;
@@ -394,9 +480,9 @@ export function formatDetailValue(key: string, v: unknown): string {
   if (typeof v === 'string') return formatString(key, v);
   if (Array.isArray(v)) {
     if (!v.length) return 'None';
-    if (v.every((x) => typeof x === 'number') && !isMoneyKey(key)) return formatIndianNumber(v.length, 0); // lists of ids: how many
-    if (v.every((x) => x === null || typeof x !== 'object')) return v.map((x) => formatDetailValue(key, x)).join(', ');
-    return v.map((x) => formatDetailValue(key, x)).join('\n');
+    if (v.every((x) => typeof x === 'number') && !format && !isMoneyKey(key)) return formatIndianNumber(v.length, 0); // lists of ids: how many
+    if (v.every((x) => x === null || typeof x !== 'object')) return v.map((x) => formatDetailValue(key, x, fields, format)).join(', ');
+    return v.map((x) => formatDetailValue(key, x, fields, format)).join('\n');
   }
   if (isPlainObject(v)) {
     // Opening balance style: { amount, direction }
@@ -409,7 +495,7 @@ export function formatDetailValue(key: string, v: unknown): string {
     }
     const parts = Object.entries(v)
       .filter(([k]) => !isHiddenKey(k))
-      .map(([k, x]) => `${detailLabel(k)}: ${formatDetailValue(k, x)}`);
+      .map(([k, x]) => `${detailLabel(k, fields)}: ${formatDetailValue(k, x, fields, format)}`);
     return parts.length ? parts.join(', ') : '—';
   }
   return String(v);
@@ -421,8 +507,11 @@ const same = (a: unknown, b: unknown) => JSON.stringify(a ?? null) === JSON.stri
 export function describeActivityDetails(action: string, details: unknown): ActivityDetailsView {
   const view: ActivityDetailsView = { changes: [], facts: [] };
   if (details === null || details === undefined || details === '') return view;
+  const fields = fieldsFor(action);
+  const label = (k: string) => detailLabel(k, fields);
+  const value = (k: string, v: unknown) => formatDetailValue(k, v, fields);
   if (!isPlainObject(details)) {
-    view.facts.push({ label: 'Details', value: formatDetailValue('details', details) });
+    view.facts.push({ label: 'Details', value: value('details', details) });
     return view;
   }
   const rest = new Set(Object.keys(details));
@@ -449,24 +538,24 @@ export function describeActivityDetails(action: string, details: unknown): Activ
         if (isPlainObject(b) && isPlainObject(a) && !('amount' in a && 'direction' in a)) {
           for (const sub of Object.keys(a)) {
             if (isHiddenKey(sub) || same(b[sub], a[sub])) continue;
-            view.changes.push({ label: `${detailLabel(k)}: ${detailLabel(sub)}`, before: formatDetailValue(sub, b[sub]), after: formatDetailValue(sub, a[sub]) });
+            view.changes.push({ label: `${label(k)}: ${label(sub)}`, before: value(sub, b[sub]), after: value(sub, a[sub]) });
           }
           continue;
         }
-        view.changes.push({ label: detailLabel(k), before: k in before ? formatDetailValue(k, b) : '—', after: formatDetailValue(k, a) });
+        view.changes.push({ label: label(k), before: k in before ? value(k, b) : '—', after: value(k, a) });
       }
       rest.delete('before');
       rest.delete('after');
     } else if (Array.isArray(before) && Array.isArray(after)) {
       // e.g. a role's permission list: "added" / "removed" (when given) say it better.
       if (!('added' in details) && !('removed' in details) && !same(before, after)) {
-        view.changes.push({ label: 'Value', before: formatDetailValue('value', before), after: formatDetailValue('value', after) });
+        view.changes.push({ label: 'Value', before: value('value', before), after: value('value', after) });
       }
       rest.delete('before');
       rest.delete('after');
     } else if (!isPlainObject(before) && !isPlainObject(after) && !Array.isArray(before) && !Array.isArray(after)) {
       const key = ACTION_VALUE_KEYS[action] ?? 'value';
-      if (!same(before, after)) view.changes.push({ label: detailLabel(key), before: formatDetailValue(key, before), after: formatDetailValue(key, after) });
+      if (!same(before, after)) view.changes.push({ label: label(key), before: value(key, before), after: value(key, after) });
       rest.delete('before');
       rest.delete('after');
     }
@@ -476,7 +565,7 @@ export function describeActivityDetails(action: string, details: unknown): Activ
     if (isHiddenKey(k) && flatKey(k) !== 'printcount') continue;
     const v = details[k];
     if (v === null || v === undefined || v === '') continue;
-    view.facts.push({ label: detailLabel(k), value: formatDetailValue(k, v) });
+    view.facts.push({ label: label(k), value: value(k, v) });
   }
   return view;
 }

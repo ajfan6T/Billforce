@@ -14,7 +14,8 @@ import { formatINR } from '../../../shared/money';
 import { describeRange } from '../../../shared/dates';
 import { PAYMENT_MODE_LABELS, type PaymentMode } from '../../../shared/constants';
 import { CancelledBadge, fmtMode, listReport, ModeBadge, useRange } from './common';
-import { emptyExpense, expensePayload, expenseProblem, ExpenseFields, type ExpenseDraft } from './ExpenseFields';
+import { emptyExpense, expensePayload, expensePayment, expenseProblem, ExpenseFields, type ExpenseDraft } from './ExpenseFields';
+import { useShortfallConfirm } from './PaymentBalance';
 
 type Row = ApiOutput<'expenses.list'>['rows'][number];
 
@@ -36,14 +37,18 @@ export function ExpensesPage() {
   const list = useQuery('expenses.list', { from: range.from, to: range.to, accountId: head, mode: mode || null, q: dq || null });
   const summary = useQuery('expenses.summary', tab === 'summary' ? { from: range.from, to: range.to } : null);
   const problem = expenseProblem(draft);
+  const confirmShortfall = useShortfallConfirm();
   const t = list.data?.totals;
 
   const save = async () => {
     if (problem || create.loading) return;
+    // Ask before cash / bank goes below zero (the same warning would otherwise come only after saving).
+    const accepted = await confirmShortfall(expensePayment(draft));
+    if (!accepted) return;
     try {
       const x = await create.run(expensePayload(draft));
       toast.success(`Saved ${x.expenseNo}: ${x.accountName} ${formatINR(x.amount)}`, { label: 'Open', onClick: () => navigate(`/accounts/expenses/${x.id}`) });
-      for (const w of x.warnings) toast.warning(w);
+      for (const w of x.warnings) if (!accepted.includes(w)) toast.warning(w);
       setLastMode(draft.pay.mode);
       // Keep the date and payment mode for the next entry.
       setDraft({ ...emptyExpense(draft.pay.mode), date: draft.date, pay: draft.pay });

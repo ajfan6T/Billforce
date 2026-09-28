@@ -172,16 +172,29 @@ export function billPaymentLabel(mode: BillPaymentMode, credit = 0): string {
 
 /**
  * What the customer actually paid for each line of a bill: the line amount
- * (after its line discount) less its share of the bill discount and of the
- * bill's round off. The shares are exact, so the result adds up to the bill
- * total to the paisa.
+ * (after its line discount) less its share of the bill discount and of a
+ * rounding down. A rounding up is not spread over the lines (a line is never
+ * refunded above its billed amount); it comes back through the return's own
+ * round off, or when everything is returned (see returnNoteTotal).
  */
 export function netLineAmounts(amounts: number[], total: number): number[] {
   const base = amounts.map((a) => Math.max(a, 0));
   const diff = base.reduce((s, a) => s + a, 0) - total; // bill discount - round off
-  if (diff === 0) return base;
-  const shares = shareDiscount(base, Math.abs(diff));
-  return base.map((a, i) => (diff > 0 ? a - shares[i] : a + shares[i]));
+  if (diff <= 0) return base;
+  const shares = shareDiscount(base, diff);
+  return base.map((a, i) => a - shares[i]);
+}
+
+/**
+ * The rate paid per unit, in whole paise, rounded down so that qty x rate is
+ * never more than what was paid for the line. Refund lines use it, so their
+ * rate always multiplies to their amount.
+ */
+export function paidRate(netAmount: number, qty: number): number {
+  if (!(qty > 0) || netAmount <= 0) return 0;
+  let rate = Math.floor(netAmount / qty + 1e-9);
+  while (rate > 0 && lineAmount(qty, rate) > netAmount) rate--;
+  return rate;
 }
 
 /** A bill line as far as returns are concerned (see returns.billReturnable). */
@@ -189,7 +202,7 @@ export interface ReturnLineState {
   qtyBilled: number;
   /** Quantity that can still be returned. */
   returnable: number;
-  /** Per unit paid by the customer (rounded to the paisa); the highest refund rate allowed. */
+  /** Per unit paid by the customer (paidRate); the highest refund rate allowed. */
   netRate: number;
   /** What the customer paid for the whole line. */
   netAmount: number;
@@ -198,15 +211,34 @@ export interface ReturnLineState {
 }
 
 /**
- * Refund value of returning `qty` of a bill line at `rate` per unit. Never more
- * than what is left of the line; returning all that is left at the paid rate
- * refunds exactly what is left, so per-unit rounding never leaves stray paise.
+ * Refund value of returning `qty` of a bill line at `rate` per unit: qty x rate,
+ * never more than what is left of the line. Paise that per-unit rates leave out
+ * are refunded when the whole bill comes back (see returnNoteTotal `settles`).
  */
 export function returnLineAmount(line: ReturnLineState, qty: number, rate: number): number {
   const left = Math.max(0, line.netAmount - line.returnedAmount);
-  let amount = lineAmount(qty, rate);
-  if (roundQty(qty) >= line.returnable && rate === line.netRate && Math.abs(left - amount) <= Math.ceil(line.qtyBilled) + 1) amount = left;
-  return Math.min(amount, left);
+  return Math.min(lineAmount(qty, rate), left);
+}
+
+/**
+ * True when this return takes back everything still returnable on the bill, at
+ * the rate paid, and every earlier return on the bill was at the rate paid too:
+ * the return then settles the bill exactly (see returnNoteTotal).
+ */
+export function returnSettlesBill(
+  r: { allAtPaidRate: boolean; lines: Array<{ billItemId: number; returnable: number; refundable: number; netRate: number }> },
+  items: Array<{ billItemId: number; qty: number | null; rate: number | null }>,
+): boolean {
+  if (!r.allAtPaidRate) return false;
+  let any = false;
+  for (const l of r.lines) {
+    // Nothing left to refund on the line (free items, or already returned): not needed.
+    if (l.returnable <= 0 || l.refundable <= 0) continue;
+    const it = items.find((i) => i.billItemId === l.billItemId);
+    if (!it || it.qty === null || roundQty(it.qty) < roundQty(l.returnable) || it.rate !== l.netRate) return false;
+    any = true;
+  }
+  return any;
 }
 
 export interface ReturnTotalInput {
@@ -219,6 +251,8 @@ export interface ReturnTotalInput {
   value: number;
   /** Round to the nearest rupee (settings.billing.roundOff). */
   roundOff: boolean;
+  /** The return takes back everything left at the rate paid (returnSettlesBill). */
+  settles?: boolean;
 }
 
 /**
@@ -228,6 +262,7 @@ export interface ReturnTotalInput {
  * refunds exactly what is left of the bill.
  */
 export function returnNoteTotal(r: ReturnTotalInput): number {
+  if (r.settles) return r.billTotal - r.returnedTotal;
   const cumulative = r.returnedValue + r.value;
   let target = cumulative;
   if (r.roundOff && cumulative < r.billTotal) target = cumulative + roundOffAdjustment(cumulative);

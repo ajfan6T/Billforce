@@ -4,11 +4,12 @@ import { FileMinus2, Printer, Save, Search, X } from 'lucide-react';
 import { call, errorMessage, type ApiOutput } from '../../api';
 import { useHotkeys, useQuery } from '../../hooks';
 import { useAuth } from '../../auth';
-import { useToast, useUnsavedWarning } from '../../feedback';
+import { useDialogs, useToast, useUnsavedWarning } from '../../feedback';
+import { confirmLeave, useGuardedNavigate } from '../../guards';
 import { Alert, Button, Card, ErrorBox, Loading, Page, PageHeader, Tabs } from '../../components/ui';
 import { Combobox, DateInput, Field, MoneyInput, NumberInput, TextInput } from '../../components/forms';
 import { CustomerPicker, PaymentModePicker, type CustomerOption, type PaymentChoice } from '../../components/pickers';
-import { returnLineAmount, returnNoteTotal } from '../../../shared/billing';
+import { returnLineAmount, returnNoteTotal, returnSettlesBill } from '../../../shared/billing';
 import { formatINR, formatQty } from '../../../shared/money';
 import { formatDate } from '../../../shared/dates';
 import { ModeBadge, qtyUnit, usePrintDoc } from './common';
@@ -59,10 +60,21 @@ function useSaveKeys(save: (print: boolean) => void) {
   useHotkeys({ F9: () => save(true), F10: () => save(false), 'ctrl+s': () => save(false) });
 }
 
+/** Cancel: back to where the user came from, asking first when something was entered. */
+function useGuardedBack() {
+  const navigate = useNavigate();
+  return async () => {
+    if (await confirmLeave()) navigate(-1);
+  };
+}
+
 function GoodsReturn({ cfg, initialBillId }: { cfg: ApiOutput<'sales.posConfig'>; initialBillId: number | null }) {
   const navigate = useNavigate();
   const toast = useToast();
   const printDoc = usePrintDoc();
+  const dialogs = useDialogs();
+  const { onLinkClick } = useGuardedNavigate();
+  const goBack = useGuardedBack();
   const { can } = useAuth();
   const [billId, setBillId] = useState<number | null>(initialBillId);
   const [search, setSearch] = useState('');
@@ -87,11 +99,13 @@ function GoodsReturn({ cfg, initialBillId }: { cfg: ApiOutput<'sales.posConfig'>
     () => (data ? data.lines.filter((l) => picks[l.billItemId]?.on).map((l) => ({ l, p: picks[l.billItemId] })) : []),
     [data, picks],
   );
-  // Exactly what the server will save: capped at what was paid, rounded on the bill's running total.
+  // Exactly what the server will save: capped at what was paid, rounded on the bill's running total,
+  // and settling the bill exactly when everything left comes back at the rate paid.
   const subtotal = chosen.reduce((s, { l, p }) => s + (p.qty && p.rate !== null ? returnLineAmount(l, p.qty, p.rate) : 0), 0);
+  const settles = !!data && returnSettlesBill(data, chosen.map(({ l, p }) => ({ billItemId: l.billItemId, qty: p.qty, rate: p.rate })));
   const total =
     data && subtotal > 0
-      ? returnNoteTotal({ billTotal: data.bill.total, returnedTotal: data.returnedTotal, returnedValue: data.returnedValue, value: subtotal, roundOff: data.roundOff })
+      ? returnNoteTotal({ billTotal: data.bill.total, returnedTotal: data.returnedTotal, returnedValue: data.returnedValue, value: subtotal, roundOff: data.roundOff, settles })
       : 0;
   const roundOff = subtotal > 0 ? total - subtotal : 0;
   const moneyMode = refund.mode !== 'credit';
@@ -181,7 +195,8 @@ function GoodsReturn({ cfg, initialBillId }: { cfg: ApiOutput<'sales.posConfig'>
             />
           </div>
           <p className="muted small">
-            Tip: open the bill from <Link to="/sales/bills">Bills</Link> and click “Sales return”. For a price correction without goods, use the “Credit note” tab.
+            Tip: open the bill from <Link to="/sales/bills">Bills</Link> and click “Sales return”.
+            {can('returns.adjust') ? ' For a price correction without goods, use the “Credit note” tab.' : ''}
           </p>
         </div>
       </Card>
@@ -197,7 +212,15 @@ function GoodsReturn({ cfg, initialBillId }: { cfg: ApiOutput<'sales.posConfig'>
       <div className="stack">
         <Card>
           <div className="sl-bill-pick-card">
-            <span className="sl-bp-no">{can('billing.view') || b.date === cfg.today ? <Link to={`/sales/bills/${b.id}`}>{b.billNo}</Link> : b.billNo}</span>
+            <span className="sl-bp-no">
+              {can('billing.view') || b.date === cfg.today ? (
+                <Link to={`/sales/bills/${b.id}`} onClick={onLinkClick(`/sales/bills/${b.id}`)}>
+                  {b.billNo}
+                </Link>
+              ) : (
+                b.billNo
+              )}
+            </span>
             <span className="muted">{formatDate(b.date)}</span>
             <span>{b.customerName ?? <span className="faint">Walk-in</span>}</span>
             <ModeBadge mode={b.paymentMode} credit={b.credit} />
@@ -206,7 +229,16 @@ function GoodsReturn({ cfg, initialBillId }: { cfg: ApiOutput<'sales.posConfig'>
               Bill total <b className="money">{formatINR(b.total)}</b>
             </span>
             {data.returnedTotal > 0 && <span className="muted">Returned so far {formatINR(data.returnedTotal)}</span>}
-            <Button size="sm" variant="ghost" icon={<X size={14} />} onClick={() => (setBillId(null), setSearch(''))}>
+            <Button
+              size="sm"
+              variant="ghost"
+              icon={<X size={14} />}
+              onClick={async () => {
+                if (chosen.length && !(await dialogs.confirm({ title: 'Choose another bill?', message: 'The items ticked on this bill will be cleared.', confirmText: 'Change bill' }))) return;
+                setBillId(null);
+                setSearch('');
+              }}
+            >
               Change bill
             </Button>
           </div>
@@ -239,7 +271,7 @@ function GoodsReturn({ cfg, initialBillId }: { cfg: ApiOutput<'sales.posConfig'>
                     <td>
                       <span className="sl-cell-main">{l.itemName}</span>
                       <span className="sl-cell-sub">Billed at {formatINR(l.rate)}</span>
-                      {l.netRate !== l.rate && <span className="sl-cell-sub">Customer paid {formatINR(l.netRate)} each</span>}
+                      {l.netRate !== l.rate && <span className="sl-cell-sub">Rate paid {formatINR(l.netRate)} each</span>}
                       {l.returnedAmount > 0 && l.returnable > 0 && <span className="sl-cell-sub">{formatINR(l.refundable)} of it left to refund</span>}
                     </td>
                     <td style={{ textAlign: 'right' }} className="nowrap">
@@ -287,8 +319,14 @@ function GoodsReturn({ cfg, initialBillId }: { cfg: ApiOutput<'sales.posConfig'>
             <div className="sl-refund-limits small" aria-label="Refund limits">
               <div className="tr">
                 <span className="muted">Received on this bill</span>
-                <span className="money">{formatINR(b.paid)}</span>
+                <span className="money">{formatINR(b.paid + data.paidLater)}</span>
               </div>
+              {data.paidLater > 0 && (
+                <div className="tr small">
+                  <span className="faint">{b.paid > 0 ? `${formatINR(b.paid)} at billing, ${formatINR(data.paidLater)}` : 'All of it'} paid later</span>
+                  <span />
+                </div>
+              )}
               {data.returnedTotal > 0 && (
                 <div className="tr">
                   <span className="muted">Already returned</span>
@@ -314,7 +352,7 @@ function GoodsReturn({ cfg, initialBillId }: { cfg: ApiOutput<'sales.posConfig'>
             </Field>
             {refund.mode === 'credit' && <div className="small muted">The amount will be taken off {b.customerName}'s balance.</div>}
             {b.customerId && data.moneyRefundable <= 0 && (
-              <div className="small muted">{b.paid > 0 ? 'What was paid on this bill has already been paid back' : 'Nothing was paid on this bill'}, so the return is adjusted in the account.</div>
+              <div className="small muted">{b.paid + data.paidLater > 0 ? 'What was paid on this bill has already been paid back' : 'Nothing has been paid on this bill yet'}, so the return is adjusted in the account.</div>
             )}
             {!b.customerId && <div className="small faint">Walk-in bill: the refund is paid back in money, up to what was paid.</div>}
             {overMoney && b.customerId && (
@@ -372,7 +410,7 @@ function GoodsReturn({ cfg, initialBillId }: { cfg: ApiOutput<'sales.posConfig'>
               <Button icon={<Save size={16} />} kbd="F10" disabled={saving || b.status !== 'active' || fullyReturned} onClick={() => void save(false)}>
                 Save
               </Button>
-              <Button variant="ghost" onClick={() => navigate(-1)}>
+              <Button variant="ghost" onClick={() => void goBack()}>
                 Cancel
               </Button>
             </div>
@@ -387,6 +425,7 @@ function CreditNoteForm({ cfg }: { cfg: ApiOutput<'sales.posConfig'> }) {
   const navigate = useNavigate();
   const toast = useToast();
   const printDoc = usePrintDoc();
+  const goBack = useGuardedBack();
   const { can } = useAuth();
   const [customer, setCustomer] = useState<CustomerOption | null>(null);
   const [amount, setAmount] = useState<number | null>(null);
@@ -465,7 +504,7 @@ function CreditNoteForm({ cfg }: { cfg: ApiOutput<'sales.posConfig'> }) {
             <div className="small muted">
               {refund.mode === 'credit' ? (customer ? `Reduces what ${customer.name} owes you.` : "Reduces the customer's balance.") : 'Money is paid back to the customer now.'}
             </div>
-            {customer && refund.mode === 'credit' && amount ? (
+            {customer && !customer.balanceHidden && refund.mode === 'credit' && amount ? (
               <div className="small">
                 Balance after: <b className="money">{formatINR(customer.balance - amount)}</b>
                 {customer.balance - amount < 0 ? ' (advance)' : ''}
@@ -487,7 +526,7 @@ function CreditNoteForm({ cfg }: { cfg: ApiOutput<'sales.posConfig'> }) {
               <Button icon={<Save size={16} />} kbd="F10" disabled={saving} onClick={() => void save(false)}>
                 Save
               </Button>
-              <Button variant="ghost" onClick={() => navigate(-1)}>
+              <Button variant="ghost" onClick={() => void goBack()}>
                 Cancel
               </Button>
             </div>

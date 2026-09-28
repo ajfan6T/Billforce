@@ -27,6 +27,7 @@ import type { ReceiptSettings } from '../../../shared/settings';
 import { amountInWords, formatINR, formatIndianNumber } from '../../../shared/money';
 import { datesBetween, endOfMonth, formatDate, monthKey, monthLabel } from '../../../shared/dates';
 import { PAYMENT_MODE_LABELS, type AttendanceStatus, type SettlementMode } from '../../../shared/constants';
+import { assertCancelKeepsClosedAccounts } from '../accounting/common';
 import {
   activeSlipFor,
   emptyCounts,
@@ -928,6 +929,7 @@ export function cancelSalaryPayment(ctx: Ctx, paymentId: number, reason: string)
   if (p.status === 'cancelled') throw fail.validation('This payment is already cancelled.');
   const slip = getRow(ctx, p.salary_id);
   if (slip.status === 'cancelled') throw fail.validation(`Salary slip ${slip.salary_no} is cancelled.`);
+  assertCancelKeepsClosedAccounts(ctx, p.journal_entry_id, 'this payment');
   if (p.journal_entry_id) voidEntry(ctx, p.journal_entry_id, `Salary payment cancelled: ${why}`);
   ctx.db.update('salary_payments', p.id, { status: 'cancelled', cancelled_by: currentUserId(ctx), cancelled_at: now(ctx), cancel_reason: why });
   const paid = slip.paid - p.amount;
@@ -955,6 +957,7 @@ export function cancelSalary(ctx: Ctx, salaryId: number, reason: string): Salary
     [slip.id],
   );
   for (const p of payments) {
+    assertCancelKeepsClosedAccounts(ctx, p.journal_entry_id, 'this salary slip');
     if (p.journal_entry_id) voidEntry(ctx, p.journal_entry_id, `Salary slip ${slip.salary_no} cancelled: ${why}`);
     ctx.db.update('salary_payments', p.id, { status: 'cancelled', cancelled_by: user, cancelled_at: stamp, cancel_reason: `Salary slip cancelled: ${why}` });
   }

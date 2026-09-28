@@ -26,6 +26,7 @@ import { Db } from '../../db/database';
 import { LATEST_SCHEMA_VERSION, migrate } from '../../db/migrate';
 import { seedReferenceData } from '../../seed';
 import { toTimestamp } from '../../../shared/dates';
+import { SaveFileError } from '../../platform';
 
 export type BackupKind = 'auto' | 'manual' | 'safety';
 
@@ -804,6 +805,38 @@ export async function manualBackup(ctx: Ctx, note?: string | null): Promise<Back
 }
 
 /** Take a fresh backup and let the user save it anywhere (e.g. a pen drive). */
+/**
+ * Plain words for a backup copy that could not be saved. The desktop app saves through "<name>.partial" and
+ * removes it on failure (writeFileSafely -> SaveFileError), so nothing that looks like a backup is left on the
+ * pen drive; any other failure may have left a piece of a file behind, and the user is told to delete it.
+ */
+function backupCopyError(e: unknown): AppError {
+  const cleaned = e instanceof SaveFileError;
+  // Already plain words (a SaveFileError without a known reason says what went wrong and that nothing was left).
+  if (e instanceof SaveFileError ? e.reason === 'other' || e.reason === 'in-use' : e instanceof AppError) return e as AppError;
+  const code = (e as NodeJS.ErrnoException)?.code ?? '';
+  const reason =
+    e instanceof SaveFileError
+      ? e.reason
+      : code === 'ENOSPC' || code === 'EDQUOT' || code === 'EFBIG'
+        ? 'full'
+        : code === 'EACCES' || code === 'EPERM' || code === 'EROFS'
+          ? 'read-only'
+          : 'other';
+  const why =
+    reason === 'full'
+      ? 'The pen drive or disk you chose is full, so the copy could not be saved.'
+      : reason === 'read-only'
+        ? 'Billforce is not allowed to save files there (it may be read-only), so the copy could not be saved.'
+        : reason === 'unavailable'
+          ? 'The pen drive or folder you chose is not available (was the pen drive removed?), so the copy could not be saved.'
+          : reason === 'incomplete'
+            ? 'The copy could not be written completely (the pen drive may be full or faulty).'
+            : `The copy could not be saved (${(e as Error)?.message ?? e}).`;
+  const left = cleaned ? 'Nothing was left there.' : 'If a file was created there, delete it: it is not a complete backup.';
+  return new AppError('VALIDATION', `${why} ${left} ${reason === 'full' ? 'Free some space or choose another place' : 'Choose another place'} and try again.`);
+}
+
 export async function saveBackupCopy(ctx: Ctx): Promise<{ path: string | null; sizeBytes: number }> {
   const at = now(ctx);
   const dir = await fsp.mkdtemp(path.join(os.tmpdir(), 'billforce-copy-'));
@@ -825,15 +858,7 @@ export async function saveBackupCopy(ctx: Ctx): Promise<{ path: string | null; s
         filters: [{ name: 'Billforce backup', extensions: [BACKUP_EXTENSION] }],
       });
     } catch (e) {
-      if (e instanceof AppError) throw e;
-      const code = (e as NodeJS.ErrnoException)?.code ?? '';
-      const why =
-        code === 'ENOSPC' || code === 'EDQUOT' || code === 'EFBIG'
-          ? 'The pen drive or disk you chose is full, so the copy could not be saved.'
-          : code === 'EACCES' || code === 'EPERM' || code === 'EROFS'
-            ? 'Billforce is not allowed to save files there (it may be read-only), so the copy could not be saved.'
-            : `The copy could not be saved (${(e as Error)?.message ?? e}).`;
-      throw new AppError('VALIDATION', `${why} If a file was created there, delete it: it is not a complete backup. Choose another place and try again.`);
+      throw backupCopyError(e);
     }
     if (!saved) return { path: null, sizeBytes };
     // The copy must be exactly the backup (a pen drive can be full or pulled out while writing).

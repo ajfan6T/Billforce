@@ -170,16 +170,23 @@ function isolate(keep: HTMLElement): () => void {
  * (useHotkeys checks the lock) and focus stays inside this card.
  */
 export function LockScreen() {
-  const { session, unlock, logout, refresh } = useAuth();
+  const { session, unlock, logout, refresh, lockReturnFocus } = useAuth();
   const [password, setPassword] = useState('');
   const m = useMutation('auth.login');
   const overlayRef = useRef<HTMLDivElement>(null);
   const pwRef = useRef<HTMLInputElement>(null);
+  // Where the user was when the screen locked. Read while rendering: by the time effects run, the password
+  // box has taken the focus (autoFocus) and the page underneath has been made inert.
+  const [before] = useState(() => {
+    const given = lockReturnFocus();
+    if (given?.isConnected) return given;
+    const active = document.activeElement;
+    return active instanceof HTMLElement && active !== document.body ? active : null;
+  });
 
   useEffect(() => {
     const overlay = overlayRef.current;
     if (!overlay) return;
-    const before = document.activeElement as HTMLElement | null;
     const restore = isolate(overlay);
     const focusables = () => Array.from(overlay.querySelectorAll<HTMLElement>('input, button, [tabindex]:not([tabindex="-1"])')).filter((el) => !(el as HTMLButtonElement).disabled);
     pwRef.current?.focus();
@@ -220,7 +227,7 @@ export function LockScreen() {
       // Back to where the user was before the lock (after the page is no longer inert).
       setTimeout(() => before?.isConnected && before.focus?.(), 0);
     };
-  }, []);
+  }, [before]);
 
   if (!session) return null;
   const submit = async () => {

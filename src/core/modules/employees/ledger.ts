@@ -80,11 +80,11 @@ function describe(ctx: Ctx, e: LedgerEntry): { type: string; number: string; par
 export function employeeLedger(ctx: Ctx, employeeId: number, from: string, to: string): ReportData {
   const emp = getEmployeeRow(ctx, employeeId);
   const before = addDays(from, -1);
-  const advOpening = partyBalance(ctx, 'employee', emp.id, { account: 'EMP_ADV', to: before });
-  const dueOpening = 0 - partyBalance(ctx, 'employee', emp.id, { account: 'SALARY_PAYABLE', to: before });
+  let advOpening = partyBalance(ctx, 'employee', emp.id, { account: 'EMP_ADV', to: before });
+  let dueOpening = 0 - partyBalance(ctx, 'employee', emp.id, { account: 'SALARY_PAYABLE', to: before });
   const advId = systemAccountId(ctx, 'EMP_ADV');
   const payId = systemAccountId(ctx, 'SALARY_PAYABLE');
-  const entries = ctx.db.all<LedgerEntry>(
+  const all = ctx.db.all<LedgerEntry>(
     `SELECT e.id, e.date, e.voucher_type, e.voucher_no, e.source_type, e.source_id, e.narration,
             SUM(CASE WHEN l.account_id = :adv THEN l.debit ELSE 0 END) AS adv_dr,
             SUM(CASE WHEN l.account_id = :adv THEN l.credit ELSE 0 END) AS adv_cr,
@@ -97,10 +97,29 @@ export function employeeLedger(ctx: Ctx, employeeId: number, from: string, to: s
       ORDER BY e.date, e.id`,
     { adv: advId, pay: payId, emp: emp.id, from, to },
   );
+  // The opening advance (dated the books start) is part of the balance brought forward when the
+  // period starts on that day, as on the Ledgers page; opening vouchers dated inside the period stay as lines.
+  const isOpening = (e: LedgerEntry) => e.voucher_type === 'opening' && e.date <= from;
+  const openingEntries = all.filter(isOpening);
+  const entries = all.filter((e) => !isOpening(e));
+  for (const e of openingEntries) {
+    advOpening += e.adv_dr - e.adv_cr;
+    dueOpening += e.pay_cr - e.pay_dr;
+  }
 
   const rows: ReportRow[] = [
     {
-      cells: { date: from, number: '', particulars: 'Balance brought forward', given: null, recovered: null, advBalance: advOpening, earned: null, paid: null, due: dueOpening },
+      cells: {
+        date: from,
+        number: '',
+        particulars: openingEntries.length ? 'Balance brought forward (incl. opening advance)' : 'Balance brought forward',
+        given: null,
+        recovered: null,
+        advBalance: advOpening,
+        earned: null,
+        paid: null,
+        due: dueOpening,
+      },
       style: 'subtotal',
     },
   ];

@@ -7,7 +7,7 @@
  *   salary due          = Salary Payable (employee) credit balance
  */
 import type { Ctx } from '../../context';
-import { can, now, today } from '../../context';
+import { assertCan, can, now, today } from '../../context';
 import { fail } from '../../errors';
 import { logActivity } from '../../audit';
 import { getSection } from '../../settings';
@@ -508,10 +508,14 @@ function setOpeningAdvance(ctx: Ctx, emp: EmployeeRow, name: string, amount: num
   if (entryId !== emp.opening_entry_id) ctx.db.update('employees', emp.id, { opening_entry_id: entryId });
 }
 
+/** The opening advance is an accounting entry (Employee Advances against the opening balance adjustment). */
+const OPENING_ADVANCE_DENIED = 'You are not allowed to set or change the advance given before your books started. Ask the owner or manager.';
+
 export function createEmployee(ctx: Ctx, input: EmployeeInput): EmployeeDetail {
   const v = normalize(ctx, input);
   const opening = input.openingAdvance ?? 0;
   if (opening < 0) throw fail.validation('The opening advance cannot be negative', { openingAdvance: 'Cannot be negative' });
+  if (opening > 0) assertCan(ctx, 'employees.salary', OPENING_ADVANCE_DENIED);
   const id = ctx.db.insert('employees', { ...v, is_active: 1, created_at: now(ctx) });
   if (opening > 0) setOpeningAdvance(ctx, getEmployeeRow(ctx, id), v.name, opening);
   logActivity(
@@ -530,9 +534,13 @@ export function updateEmployee(ctx: Ctx, id: number, input: EmployeeInput): Empl
     throw fail.validation(`The joining date cannot be after the leaving date (${formatDate(before.leave_date)}).`, { joinDate: 'After the leaving date' });
   }
   if (v.join_date !== before.join_date) assertSlipsInside(ctx, before, v.join_date, null);
+  const openingBefore = openingAdvanceOf(ctx, before);
+  // Sending the saved opening advance back unchanged is fine; changing it needs "Salary & advances".
+  if (input.openingAdvance !== undefined && input.openingAdvance !== null && input.openingAdvance !== openingBefore) {
+    assertCan(ctx, 'employees.salary', OPENING_ADVANCE_DENIED);
+  }
   ctx.db.update('employees', id, { ...v, updated_at: now(ctx) });
   const removed = v.join_date !== before.join_date ? removeAttendanceOutside(ctx, { id, join_date: v.join_date, leave_date: before.leave_date }) : 0;
-  const openingBefore = openingAdvanceOf(ctx, before);
   if (input.openingAdvance !== undefined && input.openingAdvance !== null && input.openingAdvance !== openingBefore) {
     if (input.openingAdvance < 0) throw fail.validation('The opening advance cannot be negative', { openingAdvance: 'Cannot be negative' });
     setOpeningAdvance(ctx, getEmployeeRow(ctx, id), v.name, input.openingAdvance);

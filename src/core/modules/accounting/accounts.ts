@@ -1,7 +1,9 @@
 import type { Ctx } from '../../context';
 import type { AccountType, PartyType } from '../../../shared/constants';
+import { today } from '../../context';
 import { getSection } from '../../settings';
 import { paymentAccountId } from '../../accounting/ledger';
+import { fyOf } from '../../../shared/dates';
 
 /*
  * CONTRACT functions used by other modules and the shared UI pickers.
@@ -19,7 +21,11 @@ export interface AccountListItem {
   partyType: PartyType | null;
   isActive: boolean;
   description: string | null;
-  /** Net balance (debit - credit) in paise, only when withBalances is set. */
+  /**
+   * Net balance (debit - credit) in paise, only when withBalances is set. Income and expense
+   * accounts start every financial year at zero (like the trial balance and ledgers): theirs is
+   * for the financial year of `asOf` (today when not given), without its year-end closing entry.
+   */
   balance?: number;
 }
 
@@ -53,26 +59,8 @@ export function listAccounts(ctx: Ctx, opts: ListAccountsOptions = {}): AccountL
   );
   let balances: Map<number, number> | null = null;
   if (opts.withBalances && rows.length) {
-    const bp: unknown[] = [];
-    let filter = '';
-    // Only the listed accounts' lines when the list is a subset (e.g. just the cash accounts).
-    if (opts.groups?.length || opts.types?.length) {
-      filter += ` AND l.account_id IN (${rows.map(() => '?').join(', ')})`;
-      bp.push(...rows.map((r) => r.id));
-    }
-    if (opts.asOf) {
-      filter += ' AND e.date <= ?';
-      bp.push(opts.asOf);
-    }
-    balances = new Map(
-      ctx.db
-        .all<{ account_id: number; bal: number }>(
-          `SELECT l.account_id, SUM(l.debit - l.credit) AS bal FROM journal_lines l CROSS JOIN journal_entries e ON e.id = l.entry_id
-            WHERE e.is_void = 0${filter} GROUP BY l.account_id`,
-          bp,
-        )
-        .map((r) => [r.account_id, r.bal]),
-    );
+    const sums = accountBalanceSums(ctx, opts.asOf, opts.groups?.length || opts.types?.length ? rows.map((r) => r.id) : null);
+    balances = new Map(rows.map((r) => [r.id, plType(r.type) ? (sums.get(r.id)?.year ?? 0) : (sums.get(r.id)?.all ?? 0)]));
   } else if (opts.withBalances) {
     balances = new Map();
   }
@@ -89,6 +77,42 @@ export function listAccounts(ctx: Ctx, opts: ListAccountsOptions = {}): AccountL
     description: r.description,
     ...(balances ? { balance: balances.get(r.id) ?? 0 } : {}),
   }));
+}
+
+function plType(type: AccountType): boolean {
+  return type === 'income' || type === 'expense';
+}
+
+/**
+ * Per account, in one pass over the lines: `all` = balance of every entry up to `asOf`, and
+ * `year` = only the entries of asOf's financial year. The year-end closing entry of that year is
+ * left out of both (as in the trial balance and balance sheet), so income and expense accounts
+ * still show the year's figures and capital does not count the year's result twice.
+ * `ids` limits the lines read to those accounts (null = all accounts).
+ */
+export function accountBalanceSums(ctx: Ctx, asOf: string | null | undefined, ids: number[] | null): Map<number, { all: number; year: number }> {
+  const fyStart = fyOf(asOf || today(ctx)).start;
+  const bp: unknown[] = [fyStart, fyStart];
+  let filter = '';
+  if (ids) {
+    if (!ids.length) return new Map();
+    filter += ` AND l.account_id IN (${ids.map(() => '?').join(', ')})`;
+    bp.push(...ids);
+  }
+  if (asOf) {
+    filter += ' AND e.date <= ?';
+    bp.push(asOf);
+  }
+  return new Map(
+    ctx.db
+      .all<{ account_id: number; bal: number; fy: number }>(
+        `SELECT l.account_id, SUM(l.debit - l.credit) AS bal, SUM(CASE WHEN e.date >= ? THEN l.debit - l.credit ELSE 0 END) AS fy
+           FROM journal_lines l CROSS JOIN journal_entries e ON e.id = l.entry_id
+          WHERE e.is_void = 0 AND (e.voucher_type <> 'closing' OR e.date < ?)${filter} GROUP BY l.account_id`,
+        bp,
+      )
+      .map((r) => [r.account_id, { all: r.bal, year: r.fy }]),
+  );
 }
 
 export interface PaymentAccounts {

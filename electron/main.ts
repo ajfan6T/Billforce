@@ -4,6 +4,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { BillforceApp } from '../src/core/app';
 import { ElectronPlatform } from './platform';
+import { closeQuestion, readCloseWarning, type CloseWarning } from './close-warning';
 import { startBackupScheduler, type BackupScheduler } from '../src/core/modules/data/scheduler';
 import { BACKUP_FILE_FILTERS } from '../src/core/modules/data/backup';
 import { backupFolderFromDamagedFile, describeOpenFailure, findBackups, RecoveryError, restoreDamagedDatabase } from '../src/core/recovery';
@@ -16,6 +17,9 @@ let core: BillforceApp | null = null;
 let scheduler: BackupScheduler | null = null;
 /** Set while the window reloads after a restore: the "unsaved changes" question is skipped then. */
 let reloadingAfterRestore = false;
+
+/** What the page says closing the window would do (sent by the renderer's guards.ts whenever it changes). */
+let closeWarning: CloseWarning | null = null;
 
 // Indian locale: dd/mm/yyyy in date pickers, en-IN number formatting.
 app.commandLine.appendSwitch('lang', 'en-IN');
@@ -128,19 +132,15 @@ function createWindow(): void {
       return;
     }
     const win = mainWindow;
-    const opts: Electron.MessageBoxSyncOptions = {
-      type: 'question',
-      title: 'Unsaved changes',
-      message: 'You have unsaved changes. Leave without saving?',
-      detail: 'If you leave now, the changes you have not saved will be lost.',
-      buttons: ['Leave', 'Stay'],
-      defaultId: 1,
-      cancelId: 1,
-      noLink: true,
-    };
+    // A bill in progress on the billing screen is kept as a draft: say so instead of "will be lost".
+    const opts = closeQuestion(closeWarning);
     const choice = win && !win.isDestroyed() ? dialog.showMessageBoxSync(win, opts) : dialog.showMessageBoxSync(opts);
     // preventDefault() here means "ignore the page's beforeunload and leave".
     if (choice === 0) e.preventDefault();
+  });
+  // A new page (reload) starts with nothing to warn about; it tells us again when something is entered.
+  mainWindow.webContents.on('did-navigate', () => {
+    closeWarning = null;
   });
   mainWindow.webContents.on('did-finish-load', () => {
     reloadingAfterRestore = false;
@@ -255,6 +255,9 @@ if (smokeArg) {
         return;
       }
       mainWindow?.webContents.send('bf:event', event);
+    });
+    ipcMain.on('bf:close-warning', (e, warning: unknown) => {
+      if (mainWindow && e.sender === mainWindow.webContents) closeWarning = readCloseWarning(warning);
     });
     ipcMain.handle('bf:invoke', (_e, name: string, input: unknown) =>
       core ? core.invoke(name, input) : { ok: false, error: { code: 'INTERNAL', message: 'Billforce is closing.' } },

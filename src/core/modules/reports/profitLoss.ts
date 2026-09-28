@@ -228,9 +228,10 @@ export function profitLoss(ctx: Ctx, input: { from: string; to: string; compare?
       rows,
       summary: [
         { label: 'Net sales', value: f.netSales, type: 'money' },
-        { label: f.grossProfit >= 0 ? 'Gross profit' : 'Gross loss', value: f.grossProfit, type: 'money' },
+        // A loss is shown as a positive amount next to the word "loss", in red, as in the statement.
+        { label: f.grossProfit >= 0 ? 'Gross profit' : 'Gross loss', value: Math.abs(f.grossProfit), type: 'money', ...(f.grossProfit < 0 ? { tone: 'bad' as const } : {}) },
         { label: 'Purchases & expenses', value: f.totalExpenses, type: 'money' },
-        { label: f.netProfit >= 0 ? 'Net profit' : 'Net loss', value: f.netProfit, type: 'money' },
+        { label: f.netProfit >= 0 ? 'Net profit' : 'Net loss', value: Math.abs(f.netProfit), type: 'money', ...(f.netProfit < 0 ? { tone: 'bad' as const } : {}) },
         { label: 'Net margin', value: f.netMargin ?? '-', type: f.netMargin === null ? 'text' : 'percent' },
       ],
       notes,

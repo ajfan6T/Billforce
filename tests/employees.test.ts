@@ -683,17 +683,19 @@ describe('advances and employee ledger', () => {
 
     const full = await t.call('employees.ledger', { employeeId: e.id, from: '2026-04-01', to: '2026-09-28' });
     const cells = full.rows.map((r) => r.cells);
-    expect(cells[0]).toMatchObject({ particulars: 'Balance brought forward', advBalance: 0, due: 0 });
+    // The opening advance (dated the books start) is brought forward, as on the Ledgers page, not given in the period.
+    expect(cells[0]).toMatchObject({ particulars: 'Balance brought forward (incl. opening advance)', advBalance: RS(1000), due: 0 });
     const body = cells.slice(1, -1);
-    expect(body.map((c) => String(c.particulars).split(':')[0])).toEqual(['Opening balance', 'Advance', 'Salary slip', 'Salary paid', 'Salary slip', 'Salary paid']);
-    expect(body[2].particulars).toBe('Salary slip: July 2026 · 31 paid days · gross ₹15,000.00');
-    expect(body[2].number).toBe(jul.salaryNo);
-    expect(body.map((c) => c.advBalance)).toEqual([RS(1000), RS(5000), RS(3000), RS(3000), RS(2000), RS(2000)]);
-    expect(body.map((c) => c.due)).toEqual([0, 0, RS(13000), RS(3000), RS(17000), RS(3000)]);
-    expect(cells[cells.length - 1]).toMatchObject({ given: RS(5000), recovered: RS(3000), advBalance: RS(2000), earned: RS(27000), paid: RS(24000), due: RS(3000) });
-    expect(full.rows[2].link).toMatchObject({ kind: 'advance' });
+    expect(body.map((c) => String(c.particulars).split(':')[0])).toEqual(['Advance', 'Salary slip', 'Salary paid', 'Salary slip', 'Salary paid']);
+    expect(body[1].particulars).toBe('Salary slip: July 2026 · 31 paid days · gross ₹15,000.00');
+    expect(body[1].number).toBe(jul.salaryNo);
+    expect(body.map((c) => c.advBalance)).toEqual([RS(5000), RS(3000), RS(3000), RS(2000), RS(2000)]);
+    expect(body.map((c) => c.due)).toEqual([0, RS(13000), RS(3000), RS(17000), RS(3000)]);
+    expect(cells[cells.length - 1]).toMatchObject({ given: RS(4000), recovered: RS(3000), advBalance: RS(2000), earned: RS(27000), paid: RS(24000), due: RS(3000) });
+    expect(full.summary?.find((s) => s.label === 'Advances given')?.value).toBe(RS(4000));
+    expect(full.rows[1].link).toMatchObject({ kind: 'advance' });
+    expect(full.rows[2].link).toEqual({ kind: 'salary', id: jul.id });
     expect(full.rows[3].link).toEqual({ kind: 'salary', id: jul.id });
-    expect(full.rows[4].link).toEqual({ kind: 'salary', id: jul.id });
 
     // a later window starts from the brought-forward balances
     const aug = await t.call('employees.ledger', { employeeId: e.id, from: '2026-08-01', to: '2026-08-31' });
@@ -975,5 +977,59 @@ describe('permissions', () => {
     expect((await t.fails('salary.preview', { employeeId: e.id, month: '2026-09' })).code).toBe('FORBIDDEN');
     expect((await t.fails('employees.update', { id: e.id, name: 'X', salaryType: 'monthly', salaryAmount: 1 })).code).toBe('FORBIDDEN');
     expect((await t.fails('advances.list', {})).code).toBe('FORBIDDEN');
+  });
+});
+
+describe('review round 2: opening advance', () => {
+  it('setting or changing the advance given before the books start needs "Salary & advances"', async () => {
+    t = await createTestApp();
+    const e = await addEmployee({ openingAdvance: RS(3000) });
+    await t.call('roles.update', { role: 'cashier', permissions: ['billing.create', 'employees.view', 'employees.manage'] });
+    await t.loginAs('cashier');
+    const base = { name: 'Ramesh Kumar', salaryType: 'monthly' as const, salaryAmount: RS(15000) };
+    for (const openingAdvance of [0, RS(100), RS(30000)]) {
+      const err = await t.fails('employees.update', { id: e.id, ...base, openingAdvance });
+      expect(err.code).toBe('FORBIDDEN');
+      expect(err.message).toContain('not allowed to set or change the advance given before your books started');
+    }
+    expect(advBalance(e.id)).toBe(RS(3000));
+    expect((await t.fails('employees.create', { ...base, name: 'Suresh', openingAdvance: RS(20000) })).code).toBe('FORBIDDEN');
+    expect(t.app.db.value("SELECT COUNT(*) FROM employees WHERE name = 'Suresh'")).toBe(0);
+    expect(systemBalance(t.app, 'EMP_ADV')).toBe(RS(3000));
+
+    // Ordinary edits still work: leaving it out, or sending the saved amount back.
+    expect(await t.call('employees.update', { id: e.id, ...base, designation: 'Helper' })).toMatchObject({ designation: 'Helper', openingAdvance: RS(3000) });
+    expect(await t.call('employees.update', { id: e.id, ...base, openingAdvance: RS(3000) })).toMatchObject({ openingAdvance: RS(3000) });
+    expect(await t.call('employees.create', { ...base, name: 'Suresh', openingAdvance: 0 })).toMatchObject({ name: 'Suresh', openingAdvance: 0 });
+
+    await t.loginAs('manager');
+    expect(await t.call('employees.update', { id: e.id, ...base, openingAdvance: RS(1000) })).toMatchObject({ openingAdvance: RS(1000) });
+    expect(ledgerProblems(t.app)).toEqual([]);
+  });
+
+  it('the employee ledger brings the opening advance forward like books.ledger', async () => {
+    t = await createTestApp({ openingCash: RS(10000) });
+    const e = await addEmployee({ openingAdvance: RS(3000) });
+    await t.call('advances.create', { employeeId: e.id, amount: RS(500), mode: 'cash', date: '2026-06-10' });
+    for (const [from, to] of [
+      ['2026-04-01', '2026-09-28'],
+      ['2026-07-01', '2026-09-28'],
+    ] as const) {
+      const led = await t.call('employees.ledger', { employeeId: e.id, from, to });
+      const bl = await t.call('books.ledger', { from, to, partyType: 'employee', partyId: e.id });
+      expect(led.rows[0].cells.advBalance).toBe(bl.opening);
+      expect(led.summary?.find((s) => s.label === 'Advances given')?.value).toBe(bl.totalIn);
+      expect(led.rows[led.rows.length - 1].cells.advBalance).toBe(bl.closing);
+    }
+    const led = await t.call('employees.ledger', { employeeId: e.id, from: '2026-04-01', to: '2026-09-28' });
+    expect(led.rows.map((r) => r.cells.particulars)).toEqual([
+      'Balance brought forward (incl. opening advance)',
+      expect.stringMatching(/^Advance: given by Cash/),
+      'Closing balance',
+    ]);
+    // A period starting before the books start shows the opening advance as a line on its date.
+    const wide = await t.call('employees.ledger', { employeeId: e.id, from: '2026-03-01', to: '2026-09-28' });
+    expect(wide.rows[0].cells).toMatchObject({ particulars: 'Balance brought forward', advBalance: 0 });
+    expect(wide.rows[1].cells).toMatchObject({ date: '2026-04-01', particulars: 'Opening balance: advance given before you started using Billforce', given: RS(3000) });
   });
 });

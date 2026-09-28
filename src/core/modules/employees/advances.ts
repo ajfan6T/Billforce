@@ -11,6 +11,7 @@ import { getEntryLines, negativeBalanceWarning, partyBalances, paymentAccountId,
 import { formatINR } from '../../../shared/money';
 import { formatDate } from '../../../shared/dates';
 import { PAYMENT_MODE_LABELS, type SettlementMode } from '../../../shared/constants';
+import { assertCancelKeepsClosedAccounts } from '../accounting/common';
 import { getEmployeeRow, outstandingAdvance, recoverableAdvance, salaryDue } from './service';
 
 interface AdvanceRow {
@@ -190,6 +191,7 @@ export function cancelAdvance(ctx: Ctx, id: number, reason: string): AdvanceDeta
       `${formatINR(recovered)} of this advance has already been recovered from ${r.employee_name}'s salary. Cancel that salary slip first, then cancel the advance.`,
     );
   }
+  assertCancelKeepsClosedAccounts(ctx, r.journal_entry_id, 'this advance');
   if (r.journal_entry_id) voidEntry(ctx, r.journal_entry_id, `Advance ${r.advance_no} cancelled: ${why}`);
   ctx.db.update('employee_advances', id, { status: 'cancelled', cancelled_by: currentUserId(ctx), cancelled_at: now(ctx), cancel_reason: why });
   recordRevision(ctx, 'advance', id, 'cancelled', toAdvance(getRow(ctx, id)), why);

@@ -408,6 +408,47 @@ describe('refund limits (never more than the customer paid)', () => {
     expect(ledgerProblems(t.app)).toEqual([]);
   });
 
+  it('pays money back for a credit bill the customer has paid since by receipts', async () => {
+    const t = await createTestApp({ openingCash: 1000000 });
+    const c = await customer(t, 'Rahul');
+    const bill = await t.call('sales.create', { customerId: c.id, items: [{ itemName: 'Rice', unit: 'kg', qty: 5, rate: 10000 }], payments: [] });
+    // Still owed: money refunds are refused (the original protection).
+    let r = await t.call('returns.billReturnable', { billId: bill.id });
+    expect(r).toMatchObject({ paidLater: 0, moneyRefundable: 0, suggestedRefundMode: 'credit' });
+    // Part paid later: ₹200 of the ₹500 credit.
+    await t.call('receipts.create', { customerId: c.id, amount: 20000, mode: 'cash' });
+    r = await t.call('returns.billReturnable', { billId: bill.id });
+    expect(r).toMatchObject({ paidLater: 20000, moneyRefundable: 20000, suggestedRefundMode: 'credit' });
+    let e = await t.fails('returns.create', { kind: 'return', billId: bill.id, items: [{ billItemId: bill.items[0].id, qty: 3 }], refundMode: 'cash' });
+    expect(e.message).toMatch(/^Only ₹200\.00 was received on bill INV\/26-27\/0001, so at most ₹200\.00 can be refunded in money\. Choose "Adjust"/);
+    // Fully paid: the customer owes nothing, so the return may be paid back in cash.
+    await t.call('receipts.create', { customerId: c.id, amount: 30000, mode: 'cash' });
+    expect(partyBalance(t.app.ctx(), 'customer', c.id)).toBe(0);
+    r = await t.call('returns.billReturnable', { billId: bill.id });
+    expect(r).toMatchObject({ paidLater: 50000, moneyRefundable: 50000, suggestedRefundMode: 'cash' });
+    await t.loginAs('cashier');
+    const cash = await t.call('returns.create', { kind: 'return', billId: bill.id, items: [{ billItemId: bill.items[0].id, qty: 1 }], refundMode: 'cash', reason: 'damaged' });
+    expect(cash).toMatchObject({ total: 10000, refundMode: 'cash' });
+    expect(partyBalance(t.app.ctx(), 'customer', c.id)).toBe(0);
+    r = await t.call('returns.billReturnable', { billId: bill.id });
+    expect(r).toMatchObject({ moneyRefunded: 10000, moneyRefundable: 40000 });
+    expect(systemBalance(t.app, 'CASH')).toBe(1000000 + 50000 - 10000);
+
+    // Returns adjusted in the account are not payments: they do not open up money refunds.
+    await t.loginOwner();
+    const b2 = await t.call('sales.create', { customerId: c.id, items: [{ itemName: 'Dal', qty: 5, rate: 10000 }], payments: [] });
+    await t.call('returns.create', { kind: 'return', billId: b2.id, items: [{ billItemId: b2.items[0].id, qty: 1 }], refundMode: 'credit' });
+    r = await t.call('returns.billReturnable', { billId: b2.id });
+    expect(r).toMatchObject({ paidLater: 0, moneyRefundable: 0 });
+    e = await t.fails('returns.create', { kind: 'return', billId: b2.id, items: [{ billItemId: b2.items[0].id, qty: 1 }], refundMode: 'cash' });
+    expect(e.message).toMatch(/^Nothing was paid on bill INV\/26-27\/0002 \(it was sold on credit\)/);
+    // The customer's dues count against the bill first: paying ₹100 of the ₹400 left opens up ₹100.
+    await t.call('receipts.create', { customerId: c.id, amount: 10000, mode: 'upi' });
+    r = await t.call('returns.billReturnable', { billId: b2.id });
+    expect(r).toMatchObject({ paidLater: 10000, moneyRefundable: 10000 });
+    expect(ledgerProblems(t.app)).toEqual([]);
+  });
+
   it('credit notes without goods need "returns.adjust" (cashiers do not have it)', async () => {
     const t = await createTestApp({ openingCash: 5000 });
     const c = await customer(t, 'Fatima Begum');
@@ -433,12 +474,87 @@ describe('refund limits (never more than the customer paid)', () => {
   });
 });
 
+describe('refund rates on the note multiply to the amount', () => {
+  it('shows the rate paid in whole paise, and refunds the paise left over when the whole bill comes back', async () => {
+    const t = await createTestApp({ openingCash: 100000 });
+    updateSection(t.app.ctx(), 'billing', { roundOff: false });
+    // Toor Dal 2 × ₹166.00 + Soap 1 × ₹40.00 with ₹2.05 off the bill: the dal was paid ₹330.17 (not a whole paisa per packet).
+    const bill = await t.call('sales.create', {
+      items: [
+        { itemName: 'Toor Dal 1kg', qty: 2, rate: 16600 },
+        { itemName: 'Soap', qty: 1, rate: 4000 },
+      ],
+      billDiscount: 205,
+      payments: [{ mode: 'cash', amount: 36995 }],
+    });
+    const r = await t.call('returns.billReturnable', { billId: bill.id });
+    expect(r.lines[0]).toMatchObject({ netAmount: 33017, netRate: 16508 });
+    expect(r.allAtPaidRate).toBe(true);
+    const dal = await t.call('returns.create', { kind: 'return', billId: bill.id, items: [{ billItemId: bill.items[0].id, qty: 2 }], refundMode: 'cash' });
+    // Rate × qty = amount on the note and its receipt; never more than was paid.
+    expect(dal.items[0]).toMatchObject({ qty: 2, rate: 16508, amount: 33016 });
+    expect(dal).toMatchObject({ subtotal: 33016, roundOff: 0, total: 33016 });
+    const html = (await t.call('returns.receiptHtml', { id: dal.id })).html;
+    expect(html).toContain('165.08');
+    expect(html).toContain('330.16');
+    // The rest of the bill settles it exactly: the paisa left over comes back as round off.
+    const rest = await t.call('returns.create', { kind: 'return', billId: bill.id, items: [{ billItemId: bill.items[1].id, qty: 1 }], refundMode: 'cash' });
+    expect(rest.items[0].amount).toBe(rest.items[0].rate * rest.items[0].qty);
+    expect(dal.total + rest.total).toBe(bill.total);
+    expect(rest.roundOff).toBe(rest.total - rest.subtotal);
+    expect(systemBalance(t.app, 'CASH')).toBe(100000);
+    expect(ledgerProblems(t.app)).toEqual([]);
+  });
+
+  it('never refunds a line above its billed price when the bill was rounded up', async () => {
+    const t = await createTestApp({ openingCash: 100000 });
+    // ₹649.50 + ₹10.00 = ₹659.50, rounded up to ₹660.00.
+    const bill = await t.call('sales.create', {
+      items: [
+        { itemName: 'Basmati Rice 5kg', qty: 1, rate: 64950 },
+        { itemName: 'Pen', qty: 1, rate: 1000 },
+      ],
+      payments: [{ mode: 'cash', amount: 66000 }],
+    });
+    expect(bill).toMatchObject({ roundOff: 50, total: 66000 });
+    const r = await t.call('returns.billReturnable', { billId: bill.id });
+    expect(r.lines.map((l) => [l.rate, l.netRate, l.netAmount])).toEqual([
+      [64950, 64950, 64950],
+      [1000, 1000, 1000],
+    ]);
+    expect((await t.fails('returns.create', { kind: 'return', billId: bill.id, items: [{ billItemId: bill.items[0].id, qty: 1, rate: 65000 }], refundMode: 'cash' })).code).toBe('VALIDATION');
+    const rice = await t.call('returns.create', { kind: 'return', billId: bill.id, items: [{ billItemId: bill.items[0].id, qty: 1 }], refundMode: 'cash' });
+    // The line is at its billed price; the rupee rounding is the note's own round off.
+    expect(rice.items[0]).toMatchObject({ rate: 64950, amount: 64950 });
+    expect(rice).toMatchObject({ subtotal: 64950, roundOff: 50, total: 65000 });
+    const pen = await t.call('returns.create', { kind: 'return', billId: bill.id, items: [{ billItemId: bill.items[1].id, qty: 1 }], refundMode: 'cash' });
+    expect(rice.total + pen.total).toBe(66000);
+    expect(ledgerProblems(t.app)).toEqual([]);
+  });
+
+  it('does not settle the bill when an earlier return was at a lower rate', async () => {
+    const t = await createTestApp({ openingCash: 100000 });
+    updateSection(t.app.ctx(), 'billing', { roundOff: false });
+    // 3 × ₹1.00 with ₹0.01 off: ₹2.99, paid rate ₹0.99 each.
+    const bill = await t.call('sales.create', { items: [{ itemName: 'Toffee', qty: 3, rate: 100 }], billDiscount: 1, payments: [{ mode: 'cash', amount: 299 }] });
+    const r = await t.call('returns.billReturnable', { billId: bill.id });
+    expect(r.lines[0]).toMatchObject({ netAmount: 299, netRate: 99 });
+    const low = await t.call('returns.create', { kind: 'return', billId: bill.id, items: [{ billItemId: bill.items[0].id, qty: 1, rate: 50 }], refundMode: 'cash' });
+    expect(low.total).toBe(50);
+    expect((await t.call('returns.billReturnable', { billId: bill.id })).allAtPaidRate).toBe(false);
+    const rest = await t.call('returns.create', { kind: 'return', billId: bill.id, items: [{ billItemId: bill.items[0].id, qty: 2 }], refundMode: 'cash' });
+    expect(rest).toMatchObject({ subtotal: 198, total: 198 });
+    expect(ledgerProblems(t.app)).toEqual([]);
+  });
+});
+
 describe('return arithmetic shared with the returns screen', () => {
   it('matches what the server saves for random partial returns', async () => {
     const { netLineAmounts, returnNoteTotal } = await import('../src/shared/billing');
     expect(netLineAmounts([16200, 9000], 24000)).toEqual([16200 - 771, 9000 - 429]);
     expect(netLineAmounts([560, 560], 1100)).toEqual([550, 550]);
-    expect(netLineAmounts([450], 500)).toEqual([500]);
+    // A rounding up is not spread over the lines: no line is refunded above its billed amount.
+    expect(netLineAmounts([450], 500)).toEqual([450]);
     expect(netLineAmounts([100000, 0], 100000)).toEqual([100000, 0]);
     // The note that returns the rest settles exactly; partial ones never go past the bill total.
     expect(returnNoteTotal({ billTotal: 500, returnedTotal: 300, returnedValue: 334, value: 166, roundOff: true })).toBe(200);

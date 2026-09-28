@@ -8,6 +8,7 @@ import { useToast } from '../../feedback';
 import type { ApiOutput } from '../../api';
 import { formatINR } from '../../../shared/money';
 import { GroupField } from './common';
+import { PaymentBalanceHint, useShortfallConfirm } from '../accounts/PaymentBalance';
 import { todayISO } from '../../../shared/dates';
 import type { SettlementMode } from '../../../shared/constants';
 
@@ -49,15 +50,19 @@ export function AdvanceModal({
   }, [open, fixedEmployee]);
 
   const problem = !employeeId ? 'Choose the employee' : !amount ? 'Enter the amount' : null;
+  const payment = { mode: pay.mode, accountId: pay.accountId, amount, date };
+  const confirmShortfall = useShortfallConfirm();
 
   const save = async (e?: FormEvent) => {
     e?.preventDefault();
     if (problem || m.loading) return;
+    // Ask before cash / bank goes below zero, not only after the advance is saved.
+    const accepted = await confirmShortfall(payment);
+    if (!accepted) return;
     try {
       const a = await m.run({ employeeId: employeeId!, amount: amount!, date, mode: pay.mode, accountId: pay.accountId, remarks: remarks.trim() || null });
       toast.success(`Advance ${a.advanceNo} of ${formatINR(a.amount)} given to ${a.employeeName}`);
-      // e.g. cash going below zero: the advance is saved, but the owner should check the books.
-      for (const w of a.warnings) toast.warning(w);
+      for (const w of a.warnings) if (!accepted.includes(w)) toast.warning(w);
       onSaved(a);
     } catch {
       /* shown below */
@@ -103,6 +108,7 @@ export function AdvanceModal({
         </Field>
         <GroupField label="Paid by">
           <SettlementPicker value={pay} onChange={setPay} />
+          <PaymentBalanceHint payment={payment} />
         </GroupField>
         <div className="form-grid cols-2">
           <Field label="Date" error={m.fields.date}>

@@ -292,6 +292,51 @@ describe('sales.create', () => {
     expect(partyBalance(t.app.ctx(), 'customer', c.id)).toBe(110000);
   });
 
+  it('keeps the limit and dues out of the credit-limit message for users who may not see balances', async () => {
+    const t = await createTestApp();
+    const c = await customer(t);
+    t.app.db.run('UPDATE customers SET credit_limit = 100000 WHERE id = ?', [c.id]);
+    await t.call('sales.create', { customerId: c.id, items: [{ itemName: 'Rice', qty: 1, rate: 80000 }], payments: [] });
+    removePermission(t, 'cashier', 'customers.view');
+    removePermission(t, 'cashier', 'customers.receive');
+    await t.loginAs('cashier');
+    const warned = await t.call('sales.create', { customerId: c.id, items: [{ itemName: 'Dal', qty: 1, rate: 30000 }], payments: [] });
+    expect(warned.warnings).toEqual(['Anita Desai would go over their credit limit with this bill.']);
+    updateSection(t.app.ctx(), 'billing', { enforceCreditLimit: true });
+    const e = await t.fails('sales.create', { customerId: c.id, items: [{ itemName: 'Dal', qty: 1, rate: 30000 }], payments: [] });
+    expect(e.message).toBe('Anita Desai would go over their credit limit with this bill. Take a payment now or ask the owner to raise the limit.');
+    expect(e.message).not.toMatch(/₹/);
+  });
+
+  it('with limits enforced, gives no credit to a customer without a limit unless the user may set limits', async () => {
+    const t = await createTestApp();
+    updateSection(t.app.ctx(), 'billing', { enforceCreditLimit: true });
+    const anil = await customer(t, 'Anil', '90000 00001');
+    t.app.db.run('UPDATE customers SET credit_limit = 100000 WHERE id = ?', [anil.id]);
+    await t.loginAs('cashier');
+    // Anil is at his limit ...
+    await t.call('sales.create', { customerId: anil.id, items: [{ itemName: 'Rice', qty: 1, rate: 100000 }], payments: [] });
+    expect((await t.fails('sales.create', { customerId: anil.id, items: [{ itemName: 'Dal', qty: 1, rate: 1000 }], payments: [] })).fields).toEqual({ customerId: 'Credit limit exceeded' });
+    // ... and the same person added again (no phone, so no duplicate check) has no limit: no credit either.
+    const dup = await t.call('customers.quickCreate', { name: 'Anil K' });
+    const e = await t.fails('sales.create', { customerId: dup.id, items: [{ itemName: 'TV', qty: 1, rate: 15000000 }], payments: [] });
+    expect(e).toMatchObject({
+      code: 'VALIDATION',
+      message: 'Anil K has no credit limit set. Ask the owner to set a credit limit for this customer first, or take the full payment now.',
+      fields: { customerId: 'No credit limit set' },
+    });
+    // Paying in full is fine, and the owner (who sets limits) may still give credit.
+    await t.call('sales.create', { customerId: dup.id, items: [{ itemName: 'Pen', qty: 1, rate: 1000 }], payments: [{ mode: 'cash', amount: 1000 }] });
+    await t.loginOwner();
+    await t.call('sales.create', { customerId: dup.id, items: [{ itemName: 'Pen', qty: 1, rate: 1000 }], payments: [] });
+    // Without enforcement nothing changes.
+    updateSection(t.app.ctx(), 'billing', { enforceCreditLimit: false });
+    await t.loginAs('cashier');
+    await t.call('sales.create', { customerId: dup.id, items: [{ itemName: 'Pen', qty: 1, rate: 1000 }], payments: [] });
+    expect(partyBalance(t.app.ctx(), 'customer', dup.id)).toBe(2000);
+    expect(ledgerProblems(t.app)).toEqual([]);
+  });
+
   it('accepts the smoke-test call shape', async () => {
     const t = await createTestApp();
     const bill = await t.call('sales.create', {
@@ -752,7 +797,7 @@ describe('items (price list)', () => {
 });
 
 describe('changing item rates needs "billing.rate"', () => {
-  it('refuses a changed rate on a catalogue item, but not on one-time items or items without a list rate', async () => {
+  it('refuses a changed rate on a catalogue item, and one-time items, but not items without a list rate', async () => {
     const t = await createTestApp();
     const rice = await item(t, 'Rice 25kg', 150000, 'bag');
     const loose = await item(t, 'Loose tea', 0, 'kg');
@@ -766,15 +811,80 @@ describe('changing item rates needs "billing.rate"', () => {
       fields: { 'items.0.rate': 'Rate changes need permission' },
     });
     expect((await t.fails('sales.create', { items: [{ itemId: rice.id, itemName: 'Rice 25kg', qty: 1, rate: 160000 }], payments: [] })).code).toBe('FORBIDDEN');
+    // A one-time (free-text) line sets its own price: not allowed without "Change rates", not even
+    // under the name of a catalogue item.
+    for (const name of ['Carry bag', 'Rice 25kg', 'rice 25KG']) {
+      const one = await t.fails('sales.create', { items: [{ itemName: name, qty: 1, rate: 100 }], payments: [{ mode: 'cash', amount: 100 }] });
+      expect(one).toMatchObject({
+        code: 'FORBIDDEN',
+        message: `"${name}" is not in the item list. Choose the item from the item list — your role cannot set prices.`,
+        fields: { 'items.0.itemName': 'Choose an item from the list' },
+      });
+    }
     const ok = await t.call('sales.create', {
       items: [
         { itemId: rice.id, itemName: 'Rice 25kg', qty: 1, rate: 150000 },
         { itemId: loose.id, itemName: 'Loose tea', qty: 0.5, rate: 40000 },
+      ],
+      payments: [{ mode: 'cash', amount: 170000 }],
+    });
+    expect(ok.total).toBe(170000);
+    expect(t.app.db.value('SELECT COUNT(*) FROM bills')).toBe(1);
+    expect(ledgerProblems(t.app)).toEqual([]);
+  });
+
+  it('allows one-time items with "billing.rate" (cashiers by default) and logs their rates', async () => {
+    const t = await createTestApp();
+    await t.loginAs('cashier');
+    const bill = await t.call('sales.create', { items: [{ itemName: 'Carry bag', qty: 2, rate: 500 }], payments: [{ mode: 'cash', amount: 1000 }] });
+    expect(bill.items[0]).toMatchObject({ itemId: null, itemName: 'Carry bag', rate: 500 });
+    const row = t.app.db.get<{ details: string }>("SELECT details FROM activity_log WHERE action = 'bill.create' ORDER BY id DESC LIMIT 1")!;
+    expect(JSON.parse(row.details).oneTimeLines).toEqual([{ itemName: 'Carry bag', qty: 2, rate: 500 }]);
+  });
+
+  it('does not let an edit without "billing.rate" turn a catalogue line into a one-time line', async () => {
+    const t = await createTestApp();
+    const rice = await item(t, 'Rice 25kg', 150000, 'bag');
+    const bill = await t.call('sales.create', {
+      items: [
+        { itemId: rice.id, itemName: 'Rice 25kg', qty: 1, rate: 150000 },
         { itemName: 'Carry bag', qty: 1, rate: 500 },
       ],
-      payments: [{ mode: 'cash', amount: 170500 }],
+      payments: [{ mode: 'cash', amount: 150500 }],
     });
-    expect(ok.total).toBe(170500);
+    removePermission(t, 'manager', 'billing.rate');
+    await t.loginAs('manager');
+    // The catalogue line sent without its item, at ₹1: refused.
+    const e = await t.fails('sales.update', {
+      id: bill.id,
+      items: [
+        { itemName: 'Rice 25kg', qty: 1, rate: 100 },
+        { itemName: 'Carry bag', qty: 1, rate: 500 },
+      ],
+      payments: [{ mode: 'cash', amount: 600 }],
+    });
+    expect(e).toMatchObject({ code: 'FORBIDDEN', fields: { 'items.0.itemName': 'Choose an item from the list' } });
+    // The one-time line already on the bill may stay at its saved rate (its quantity may change) ...
+    const kept = await t.call('sales.update', {
+      id: bill.id,
+      items: [
+        { itemId: rice.id, itemName: 'Rice 25kg', qty: 1, rate: 150000 },
+        { itemName: 'Carry bag', qty: 2, rate: 500 },
+      ],
+      payments: [{ mode: 'cash', amount: 151000 }],
+    });
+    expect(kept.total).toBe(151000);
+    // ... but not at a new rate.
+    const e2 = await t.fails('sales.update', {
+      id: bill.id,
+      items: [
+        { itemId: rice.id, itemName: 'Rice 25kg', qty: 1, rate: 150000 },
+        { itemName: 'Carry bag', qty: 2, rate: 100 },
+      ],
+      payments: [{ mode: 'cash', amount: 150200 }],
+    });
+    expect(e2.code).toBe('FORBIDDEN');
+    expect(t.app.db.value('SELECT total FROM bills WHERE id = ?', [bill.id])).toBe(151000);
     expect(ledgerProblems(t.app)).toEqual([]);
   });
 
@@ -844,6 +954,28 @@ describe('bill receipts and labels', () => {
     const { html } = await t.call('sales.receiptHtml', { id: bill.id });
     expect(html).toContain('Advance with us: ₹800.00 (as on 28-09-2026)');
     expect(html).not.toContain('Total due from you: -');
+  });
+
+  it('prints the real balance on the receipt even when the user printing it may not see balances', async () => {
+    const t = await createTestApp();
+    const c = await customer(t);
+    await t.call('sales.create', { customerId: c.id, items: [{ itemName: 'Rice', qty: 3, rate: 10000 }], payments: [] });
+    removePermission(t, 'cashier', 'customers.view');
+    removePermission(t, 'cashier', 'customers.receive');
+    await t.loginAs('cashier');
+    const bill = await t.call('sales.create', { customerId: c.id, items: [{ itemName: 'Oil', qty: 1, rate: 10000 }], payments: [{ mode: 'cash', amount: 5000 }] });
+    // On screen the balance stays hidden ...
+    expect(bill.customer).toMatchObject({ balance: 0, balanceHidden: true });
+    // ... but the slip the customer takes home shows what they owe, never a false "Nothing due".
+    const { html } = await t.call('sales.receiptHtml', { id: bill.id });
+    expect(html).toContain('Total due from you: ₹350.00 (as on 28-09-2026)');
+    expect(html).not.toContain('Nothing due');
+    // A credit-mode return printed by the same cashier.
+    const cn = await t.call('returns.create', { kind: 'return', billId: bill.id, items: [{ billItemId: bill.items[0].id, qty: 1 }], refundMode: 'credit' });
+    expect(cn.customer).toMatchObject({ balance: 0, balanceHidden: true });
+    const note = await t.call('returns.receiptHtml', { id: cn.id });
+    expect(note.html).toContain('Total due from you: ₹250.00 (as on 28-09-2026)');
+    expect(note.html).not.toContain('Nothing due');
   });
 
   it('calls a bill with a credit part "Part paid", not "Split"', async () => {

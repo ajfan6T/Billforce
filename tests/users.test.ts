@@ -1,7 +1,9 @@
+import fs from 'node:fs';
+import path from 'node:path';
 import { describe, expect, it } from 'vitest';
 import { createTestApp, ledgerProblems, OWNER, type TestApp } from './helpers';
 import { seedReferenceData } from '../src/core/seed';
-import { activityLabel, describeActivityDetails } from '../src/shared/activity';
+import { ACTIVITY_LABELS, activityLabel, describeActivityDetails } from '../src/shared/activity';
 import { DEFAULT_ROLE_PERMISSIONS } from '../src/shared/permissions';
 
 async function addUser(t: TestApp, role: 'owner' | 'manager' | 'cashier', username: string, opts: { mustChangePassword?: boolean } = {}) {
@@ -364,6 +366,72 @@ describe('activity log', () => {
       facts: [{ label: 'Section', value: 'Billing' }],
     });
     expect(describeActivityDetails('x.y', null)).toEqual({ changes: [], facts: [] });
+  });
+
+  it('never shows numbers that are not money as rupees (weekly off day, attendance and import counts)', async () => {
+    const t = await createTestApp();
+    const last = async (action: string) => {
+      const id = t.app.db.value<number>('SELECT MAX(id) FROM activity_log WHERE action = ?', [action]);
+      return (await t.call('activity.get', { id })).view;
+    };
+    const all = (v: { changes: Array<{ before: string; after: string }>; facts: Array<{ value: string }> }) => JSON.stringify(v);
+    // Weekly off is a weekday (0 = Sunday), salary type a code.
+    const e = await t.call('employees.create', { name: 'Ramesh Kumar', joinDate: '2026-04-01', salaryType: 'monthly', salaryAmount: 1500000, weeklyOff: 1 } as any);
+    const created = await last('employee.create');
+    expect(created.facts).toEqual(expect.arrayContaining([{ label: 'Weekly off', value: 'Monday' }, { label: 'Salary type', value: 'Monthly' }, { label: 'Salary amount', value: '₹15,000.00' }]));
+    await t.call('employees.update', { id: e.id, name: 'Ramesh Kumar', joinDate: '2026-04-01', salaryType: 'monthly', salaryAmount: 1500000, weeklyOff: 2 } as any);
+    expect((await last('employee.update')).changes).toEqual([{ label: 'Weekly off', before: 'Monday', after: 'Tuesday' }]);
+    await t.call('employees.update', { id: e.id, name: 'Ramesh Kumar', joinDate: '2026-04-01', salaryType: 'monthly', salaryAmount: 1500000, weeklyOff: 0 } as any);
+    expect((await last('employee.update')).changes).toEqual([{ label: 'Weekly off', before: 'Tuesday', after: 'Sunday' }]);
+
+    // Mark all present on a Monday: one employee is on weekly off (a count of people, not money).
+    await t.call('employees.create', { name: 'Suresh Patil', joinDate: '2026-04-01', salaryType: 'monthly', salaryAmount: 1200000, weeklyOff: 1 } as any);
+    await t.call('attendance.markAll', { date: '2026-09-28', status: 'P', onlyUnmarked: true });
+    expect(activityLabel('attendance.markAll')).toBe('Marked attendance for everyone');
+    const marked = await last('attendance.markAll');
+    expect(marked.facts).toEqual(
+      expect.arrayContaining([
+        { label: 'Employees marked', value: '1' },
+        { label: 'On weekly off', value: '1' },
+        { label: 'Marked as', value: 'Present' },
+      ]),
+    );
+    expect(all(marked)).not.toMatch(/₹/);
+    expect(activityLabel('attendance.weeklyOff')).toBe('Filled weekly offs');
+    expect(all(describeActivityDetails('attendance.weeklyOff', { month: '2026-09', filled: 7, employees: 2, locked: 0 }))).not.toMatch(/₹/);
+
+    // Import row counts.
+    const imp = describeActivityDetails('import.items', { fileName: 'items.xlsx', mapping: { name: 0, rate: 1 }, counts: { total: 7, create: 3, update: 1, skip: 0, errors: 3 } });
+    expect(imp.facts).toContainEqual({ label: 'Rows', value: 'Total: 7, Added: 3, Updated: 1, Already there: 0, With errors: 3' });
+    expect(all(imp)).not.toMatch(/₹/);
+
+    // Round off is still money; other "off" words are not.
+    expect(describeActivityDetails('purchase.update', { before: { roundOff: 0 }, after: { roundOff: 50 } }).changes).toEqual([{ label: 'Round off', before: '₹0.00', after: '₹0.50' }]);
+    expect(describeActivityDetails('x.update', { before: { cutOff: 3 }, after: { cutOff: 4 } }).changes).toEqual([{ label: 'Cut off', before: '3', after: '4' }]);
+  });
+
+  it('has a plain-English label for every action the core logs', () => {
+    const root = path.resolve(__dirname, '../src/core');
+    const files: string[] = [];
+    const walk = (d: string) => {
+      for (const f of fs.readdirSync(d, { withFileTypes: true })) {
+        if (f.isDirectory()) walk(path.join(d, f.name));
+        else if (f.name.endsWith('.ts')) files.push(path.join(d, f.name));
+      }
+    };
+    walk(root);
+    const actions = new Set<string>();
+    for (const f of files) {
+      const src = fs.readFileSync(f, 'utf8');
+      for (const m of src.matchAll(/logActivity\(\s*\w+,\s*([^,]+),/g)) {
+        for (const a of m[1].matchAll(/'([a-z_]+\.[a-zA-Z_]+)'/g)) actions.add(a[1]);
+      }
+      // Actions picked from a table first (e.g. journals: { action: 'capital.add', ... }).
+      for (const m of src.matchAll(/\baction:\s*'([a-z_]+\.[a-zA-Z_]+)'/g)) actions.add(m[1]);
+    }
+    expect(actions.size).toBeGreaterThan(60);
+    const unlabelled = [...actions].filter((a) => !(a in ACTIVITY_LABELS));
+    expect(unlabelled).toEqual([]);
   });
 
   it('labels actions in plain English, with a readable fallback', () => {

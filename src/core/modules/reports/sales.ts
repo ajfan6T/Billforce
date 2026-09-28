@@ -295,13 +295,26 @@ export function itemSales(ctx: Ctx, r: SalesRange): ItemSales[] {
       GROUP BY CASE WHEN i.item_id IS NULL THEN 'n:' || LOWER(TRIM(i.item_name)) ELSE 'i:' || i.item_id END`,
     [r.from, r.to],
   );
-  const back = ctx.db.all<{ item_id: number | null; name: string; unit: string | null; qty: number; amount: number }>(
-    `SELECT i.item_id, COALESCE(it.name, i.item_name) AS name, MAX(i.unit) AS unit, SUM(i.qty) AS qty, SUM(i.amount) AS amount
-       FROM credit_note_items i JOIN credit_notes n ON n.id = i.credit_note_id LEFT JOIN items it ON it.id = i.item_id
-      WHERE n.status = 'active' AND n.date >= ? AND n.date <= ?
-      GROUP BY CASE WHEN i.item_id IS NULL THEN 'n:' || LOWER(TRIM(i.item_name)) ELSE 'i:' || i.item_id END`,
-    [r.from, r.to],
-  );
+  // Returns are valued like the sales: at the bill line's own amount (qty x rate less item discount) for the
+  // quantity returned, not at the refund (which also carries a share of the bill discount and round off). So an
+  // item sold and returned in full nets to zero. Each return takes the part of the line not valued by earlier
+  // returns of it, so several part returns add up to exactly the line amount.
+  const back = ctx.db
+    .all<{ item_id: number | null; name: string; unit: string | null; qty: number; amount: number; line_qty: number | null; line_amount: number | null; before_qty: number }>(
+      `SELECT i.item_id, COALESCE(it.name, i.item_name) AS name, i.unit, i.qty, i.amount, bi.qty AS line_qty, bi.amount AS line_amount,
+              CASE WHEN bi.id IS NULL THEN 0 ELSE (SELECT COALESCE(SUM(p.qty), 0) FROM credit_note_items p JOIN credit_notes pn ON pn.id = p.credit_note_id
+                 WHERE p.bill_item_id = i.bill_item_id AND pn.status = 'active' AND p.id < i.id) END AS before_qty
+         FROM credit_note_items i JOIN credit_notes n ON n.id = i.credit_note_id
+         LEFT JOIN bill_items bi ON bi.id = i.bill_item_id
+         LEFT JOIN items it ON it.id = i.item_id
+        WHERE n.status = 'active' AND n.date >= ? AND n.date <= ?`,
+      [r.from, r.to],
+    )
+    .map((x) => {
+      if (!x.line_qty || x.line_amount === null) return { ...x, value: x.amount };
+      const valueOf = (q: number) => Math.round((x.line_amount! * Math.min(q, x.line_qty!)) / x.line_qty!);
+      return { ...x, value: valueOf(x.before_qty + x.qty) - valueOf(x.before_qty) };
+    });
   const keyOf = (id: number | null, name: string) => (id ? `i:${id}` : `n:${name.trim().toLowerCase()}`);
   const map = new Map<string, ItemSales>();
   const get = (id: number | null, name: string, unit: string | null) => {
@@ -322,7 +335,7 @@ export function itemSales(ctx: Ctx, r: SalesRange): ItemSales[] {
   for (const s of back) {
     const v = get(s.item_id, s.name, s.unit);
     v.qtyReturned += s.qty;
-    v.returnedAmount += s.amount;
+    v.returnedAmount += s.value;
   }
   const round3 = (n: number) => Math.round(n * 1000) / 1000;
   const list = [...map.values()].map((v) => ({ ...v, qtySold: round3(v.qtySold), qtyReturned: round3(v.qtyReturned), amount: v.soldAmount - v.returnedAmount }));
@@ -342,11 +355,20 @@ export function salesByItem(ctx: Ctx, r: SalesRange): SalesInsight {
       qtySold: v.qtySold,
       qtyReturned: v.qtyReturned || null,
       netQty: Math.round((v.qtySold - v.qtyReturned) * 1000) / 1000,
+      soldAmount: v.soldAmount,
+      returnedAmount: v.returnedAmount || null,
       amount: v.amount,
       share: pct(v.amount, totalAmount),
     },
   }));
-  if (rows.length) rows.push({ cells: { item: `Total (${list.length} items)`, amount: totalAmount, share: totalAmount ? 100 : null }, style: 'total' });
+  const totalSold = list.reduce((s, v) => s + v.soldAmount, 0);
+  const totalReturned = list.reduce((s, v) => s + v.returnedAmount, 0);
+  if (rows.length) {
+    rows.push({
+      cells: { item: `Total (${list.length} items)`, soldAmount: totalSold, returnedAmount: totalReturned || null, amount: totalAmount, share: totalAmount ? 100 : null },
+      style: 'total',
+    });
+  }
   const top = list.slice(0, 10);
   const s = salesSummary(ctx, r);
   return {
@@ -360,7 +382,9 @@ export function salesByItem(ctx: Ctx, r: SalesRange): SalesInsight {
         { key: 'qtySold', label: 'Qty sold', type: 'qty', width: 10 },
         { key: 'qtyReturned', label: 'Qty returned', type: 'qty', width: 11 },
         { key: 'netQty', label: 'Net qty', type: 'qty', width: 10 },
-        { key: 'amount', label: 'Amount', type: 'money', width: 15 },
+        { key: 'soldAmount', label: 'Sold', type: 'money', width: 14 },
+        { key: 'returnedAmount', label: 'Returned', type: 'money', width: 13 },
+        { key: 'amount', label: 'Net amount', type: 'money', width: 15 },
         { key: 'share', label: 'Share %', type: 'percent', width: 9 },
       ],
       rows,
@@ -370,7 +394,8 @@ export function salesByItem(ctx: Ctx, r: SalesRange): SalesInsight {
         { label: `${NET_SALES_LABEL} (all bills)`, value: s.netSales, type: 'money' },
       ],
       notes: [
-        'Amount = quantity x rate less item discounts, less items returned. Discounts on the whole bill and round off are not split across items, so the total of items can differ a little from net sales after discounts.',
+        'Sold = quantity x rate less item discounts. Returned = the same value for the quantity returned (at the rate and item discount of the bill it came from). Net amount = sold less returned, so an item returned in full shows zero.',
+        'Discounts on the whole bill and round off are not split across items (refunds do include their share), so the total of items can differ a little from net sales after discounts.',
         'Credit notes without items (price adjustments) are not in this list but are included in net sales after discounts.',
       ],
       landscape: true,

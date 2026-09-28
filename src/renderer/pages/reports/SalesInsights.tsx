@@ -62,6 +62,9 @@ export function SalesInsightsPage() {
     setStoredTab(t as Tab);
     const next = new URLSearchParams(params);
     next.set('tab', t);
+    // A period in the address (a dashboard drill-down) belongs to the tab it opened: the Month tab keeps its own
+    // period (the financial year) and the other tabs share one, so moving between the two drops the linked period.
+    if ((t === 'month') !== (tab === 'month')) for (const k of ['from', 'to', 'preset']) next.delete(k);
     setParams(next, { replace: true });
   };
 

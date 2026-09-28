@@ -7,6 +7,23 @@ import { nextDocNumber } from '../src/core/numbering';
 import { DEFAULT_ROLE_PERMISSIONS } from '../src/shared/permissions';
 
 describe('settings', () => {
+  it('shows the real next number of each series in Settings > Billing (not always 0001)', async () => {
+    const t = await createTestApp();
+    const before = await t.call('settings.nextNumbers');
+    expect(before.fyShort).toBe('26-27');
+    expect(before.next).toMatchObject({ bill: 1, credit_note: 1, receipt: 1 });
+    for (let i = 0; i < 6; i++) await t.call('sales.create', { items: [{ itemName: 'Tea', qty: 1, rate: 1000 }], payments: [{ mode: 'cash', amount: 1000 }] });
+    const after = await t.call('settings.nextNumbers');
+    expect(after.next.bill).toBe(7);
+    expect(after.next.receipt).toBe(1);
+    // The same number the next bill really gets, and asking takes no number.
+    expect(await t.call('settings.nextNumbers')).toEqual(after);
+    const bill = await t.call('sales.create', { items: [{ itemName: 'Tea', qty: 1, rate: 1000 }], payments: [{ mode: 'cash', amount: 1000 }] });
+    expect(bill.billNo).toBe('INV/26-27/0007');
+    await t.loginAs('cashier');
+    expect((await t.fails('settings.nextNumbers')).code).toBe('FORBIDDEN');
+  });
+
   it('returns all settings with defaults to any logged-in user', async () => {
     const t = await createTestApp();
     await t.loginAs('cashier');

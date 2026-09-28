@@ -15,7 +15,7 @@ import { profitLossFigures } from '../reports/profitLoss';
 import { dailyNetSales, itemSales, salesSummary } from '../reports/sales';
 
 export interface DashboardAlert {
-  kind: 'backup' | 'credit_limit';
+  kind: 'backup' | 'credit_limit' | 'negative_balance';
   tone: 'amber' | 'red';
   title: string;
   message: string;
@@ -63,15 +63,40 @@ export interface DashboardSummary {
   alerts: DashboardAlert[];
 }
 
-function balancesFor(ctx: Ctx, asOf: string) {
+/** Balance of every cash and bank / UPI account as on a date. */
+function cashAccountBalances(ctx: Ctx, asOf: string): Array<{ id: number; name: string; groupCode: 'cash' | 'bank'; balance: number }> {
   const nets = accountNets(ctx, { to: asOf, types: ['asset'] });
+  return accountsMeta(ctx)
+    .filter((a) => a.groupCode === 'cash' || a.groupCode === 'bank')
+    .map((a) => ({ id: a.id, name: a.name, groupCode: a.groupCode as 'cash' | 'bank', balance: nets.get(a.id) ?? 0 }));
+}
+
+function balancesFor(accounts: ReturnType<typeof cashAccountBalances>) {
   let cash = 0;
   let bank = 0;
-  for (const a of accountsMeta(ctx)) {
-    if (a.groupCode === 'cash') cash += nets.get(a.id) ?? 0;
-    else if (a.groupCode === 'bank') bank += nets.get(a.id) ?? 0;
+  for (const a of accounts) {
+    if (a.groupCode === 'cash') cash += a.balance;
+    else bank += a.balance;
   }
   return { cash, bank };
+}
+
+/** "Cash in Hand is below zero": money was paid out that the books say was not there. */
+function negativeBalanceAlert(ctx: Ctx, accounts: ReturnType<typeof cashAccountBalances>): DashboardAlert | null {
+  const below = accounts.filter((a) => a.balance < 0).sort((a, b) => a.balance - b.balance);
+  if (!below.length) return null;
+  const worst = below[0];
+  const book = worst.groupCode === 'cash' ? '/accounts/cash-book' : '/accounts/bank-book';
+  const canOpenBook = can(ctx, 'accounts.view');
+  const list = below.map((a) => `${a.name} ${formatINR(a.balance)}`).join(', ');
+  return {
+    kind: 'negative_balance',
+    tone: 'red',
+    title: below.length === 1 ? `${worst.name} is below zero` : `${below.length} cash / bank accounts are below zero`,
+    message: `${list}. More money was paid out than the books show came in: check for a sale, payment received or deposit that was not entered, or a payment entered twice.`,
+    path: canOpenBook ? `${book}?account=${worst.id}` : '/reports/balance-sheet',
+    action: canOpenBook ? (worst.groupCode === 'cash' ? 'Open cash book' : 'Open bank book') : 'Open balance sheet',
+  };
 }
 
 function duesFor(ctx: Ctx, asOf: string) {
@@ -119,8 +144,10 @@ function recentBills(ctx: Ctx, todayOnly: boolean, t: string): DashboardBill[] {
     }));
 }
 
-function alertsFor(ctx: Ctx, t: string): DashboardAlert[] {
+function alertsFor(ctx: Ctx, t: string, cashAccounts: ReturnType<typeof cashAccountBalances> | null): DashboardAlert[] {
   const alerts: DashboardAlert[] = [];
+  const negative = cashAccounts ? negativeBalanceAlert(ctx, cashAccounts) : null;
+  if (negative) alerts.push(negative);
   if (can(ctx, 'data.backup')) {
     const last = getSection(ctx, 'backup').lastBackupAt;
     const days = last ? diffDays(last.slice(0, 10), t) : null;
@@ -217,19 +244,22 @@ export function dashboardSummary(ctx: Ctx): DashboardSummary {
     ? { thisMonth: profitLossFigures(ctx, monthStart, t).netProfit, thisFy: profitLossFigures(ctx, fy.start, t).netProfit }
     : null;
 
+  // Cash and bank balances (and the alert when one is below zero) for users who may see the books.
+  const cashAccounts = books ? cashAccountBalances(ctx, t) : null;
+
   return {
     today: t,
     fyName: fy.name,
     user: { name: session.fullName, role: session.role },
     todaySales,
     month,
-    balances: books ? balancesFor(ctx, t) : null,
+    balances: cashAccounts ? balancesFor(cashAccounts) : null,
     dues: books ? duesFor(ctx, t) : null,
     expensesThisMonth: books ? expensesBetween(ctx, monthStart, t) : null,
     profit,
     trend,
     topItems,
     recentBills: seesBills ? { bills: recentBills(ctx, !can(ctx, 'billing.view'), t), todayOnly: !can(ctx, 'billing.view') } : null,
-    alerts: alertsFor(ctx, t),
+    alerts: alertsFor(ctx, t, cashAccounts),
   };
 }

@@ -8,6 +8,7 @@ import { useToast } from '../../feedback';
 import type { ApiOutput } from '../../api';
 import { formatINR } from '../../../shared/money';
 import { GroupField } from './common';
+import { PaymentBalanceHint, useShortfallConfirm } from '../accounts/PaymentBalance';
 import { formatDate, todayISO } from '../../../shared/dates';
 import type { SettlementMode } from '../../../shared/constants';
 
@@ -43,13 +44,19 @@ export function PaySalaryModal({ open, slip, onClose, onSaved }: { open: boolean
 
   const problem = !slip ? 'Loading' : !amount ? 'Enter the amount' : amount > slip.balance ? `At most ${formatINR(slip.balance)}` : null;
 
+  const payment = { mode: pay.mode, accountId: pay.accountId, amount, date };
+  const confirmShortfall = useShortfallConfirm();
+
   const save = async (e?: FormEvent) => {
     e?.preventDefault();
     if (!slip || problem || m.loading) return;
+    // Ask before cash / bank goes below zero, not only after the payment is saved.
+    const accepted = await confirmShortfall(payment);
+    if (!accepted) return;
     try {
       const res = await m.run({ salaryId: slip.id, amount: amount!, date, mode: pay.mode, accountId: pay.accountId, remarks: remarks.trim() || null });
       toast.success(`Paid ${formatINR(amount!)} to ${slip.employeeName}${res.balance > 0 ? ` · ${formatINR(res.balance)} still due` : ''}`);
-      for (const w of res.warnings) toast.warning(w);
+      for (const w of res.warnings) if (!accepted.includes(w)) toast.warning(w);
       onSaved(res);
     } catch {
       /* shown below */
@@ -84,6 +91,7 @@ export function PaySalaryModal({ open, slip, onClose, onSaved }: { open: boolean
           </Field>
           <GroupField label="Paid by">
             <SettlementPicker value={pay} onChange={setPay} />
+            <PaymentBalanceHint payment={payment} />
           </GroupField>
           <div className="form-grid cols-2">
             <Field label="Date" error={m.fields.date} hint={`On or after ${formatDate(slip.date)}`}>
