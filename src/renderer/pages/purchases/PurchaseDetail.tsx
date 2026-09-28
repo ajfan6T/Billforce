@@ -188,7 +188,7 @@ export function PurchaseDetailPage() {
             <KeyValues
               columns={3}
               items={[
-                ['Paid by', <ModeBadge mode={p.paymentMode} />],
+                ['Paid by', <ModeBadge mode={p.paymentMode} credit={p.credit} />],
                 ['Paid now', formatINR(p.paid)],
                 ['On credit', p.credit ? <span className="bal-due money">{formatINR(p.credit)}</span> : formatINR(0)],
               ]}

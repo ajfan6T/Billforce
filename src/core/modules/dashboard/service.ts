@@ -31,6 +31,8 @@ export interface DashboardBill {
   createdAt: string;
   customerName: string | null;
   total: number;
+  /** Amount left on the customer's account. */
+  credit: number;
   paymentMode: string;
   status: 'active' | 'cancelled';
 }
@@ -99,8 +101,8 @@ function expensesBetween(ctx: Ctx, from: string, to: string): number {
 
 function recentBills(ctx: Ctx, todayOnly: boolean, t: string): DashboardBill[] {
   return ctx.db
-    .all<{ id: number; bill_no: string; date: string; created_at: string; customer_name: string | null; total: number; payment_mode: string; status: 'active' | 'cancelled' }>(
-      `SELECT id, bill_no, date, created_at, customer_name, total, payment_mode, status FROM bills
+    .all<{ id: number; bill_no: string; date: string; created_at: string; customer_name: string | null; total: number; credit: number; payment_mode: string; status: 'active' | 'cancelled' }>(
+      `SELECT id, bill_no, date, created_at, customer_name, total, credit, payment_mode, status FROM bills
         ${todayOnly ? 'WHERE date = ?' : ''} ORDER BY date DESC, id DESC LIMIT 8`,
       todayOnly ? [t] : [],
     )
@@ -111,6 +113,7 @@ function recentBills(ctx: Ctx, todayOnly: boolean, t: string): DashboardBill[] {
       createdAt: b.created_at,
       customerName: b.customer_name,
       total: b.total,
+      credit: b.credit,
       paymentMode: b.payment_mode,
       status: b.status,
     }));

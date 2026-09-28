@@ -21,13 +21,14 @@ type Row = ApiOutput<'expenses.list'>['rows'][number];
 export function ExpensesPage() {
   const navigate = useNavigate();
   const toast = useToast();
-  const openLink = useOpenLink();
   const [lastMode, setLastMode] = useStoredState<PaymentMode>('accounts.expense.mode', 'cash');
   const [draft, setDraft] = useState<ExpenseDraft>(() => emptyExpense(lastMode));
   const [formKey, setFormKey] = useState(0);
   const create = useMutation('expenses.create');
   const [tab, setTab] = useState<'list' | 'summary'>('list');
   const [range, setRange] = useRange('expenses.range', 'this_month');
+  // Opening an expense head's ledger keeps this page's period.
+  const openLink = useOpenLink(range);
   const [head, setHead] = useState<number | null>(null);
   const [mode, setMode] = useState<PaymentMode | ''>('');
   const [q, setQ] = useState('');

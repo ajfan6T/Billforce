@@ -51,7 +51,7 @@ export function PurchasesListPage() {
         </div>
       ),
     },
-    { key: 'paymentMode', label: 'Paid by', render: (r) => (r.status === 'cancelled' ? <CancelledBadge /> : <ModeBadge mode={r.paymentMode} />) },
+    { key: 'paymentMode', label: 'Paid by', render: (r) => (r.status === 'cancelled' ? <CancelledBadge /> : <ModeBadge mode={r.paymentMode} credit={r.credit} />) },
     { key: 'total', label: 'Total', type: 'money' },
     { key: 'credit', label: 'On credit', type: 'money', render: (r) => (r.credit ? <span className="money">{formatINR(r.credit)}</span> : '') },
   ];
@@ -68,7 +68,7 @@ export function PurchasesListPage() {
           { key: 'billNo', label: 'Their bill no', width: 14, get: (r) => r.supplierBillNo },
           { key: 'items', label: 'Items', width: 30, get: (r) => r.items },
           { key: 'account', label: 'Account', width: 16, get: (r) => r.accountName },
-          { key: 'mode', label: 'Paid by', width: 9, get: (r) => (r.status === 'cancelled' ? 'Cancelled' : fmtMode(r.paymentMode)) },
+          { key: 'mode', label: 'Paid by', width: 9, get: (r) => (r.status === 'cancelled' ? 'Cancelled' : fmtMode(r.paymentMode, r.credit)) },
           { key: 'total', label: 'Total', type: 'money', width: 13, get: (r) => (r.status === 'cancelled' ? null : r.total) },
           { key: 'paid', label: 'Paid', type: 'money', width: 13, get: (r) => (r.status === 'cancelled' ? null : r.paid) },
           { key: 'credit', label: 'On credit', type: 'money', width: 13, get: (r) => (r.status === 'cancelled' ? null : r.credit) },

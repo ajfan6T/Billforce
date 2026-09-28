@@ -104,6 +104,8 @@ export const ACTIVITY_LABELS: Record<string, string> = {
   'salary.cancel': 'Cancelled salary slip',
   'salary.pay': 'Paid salary',
   'salary.payment_cancel': 'Cancelled salary payment',
+  'salary.paymentCancel': 'Cancelled salary payment',
+  'salary.processAll': 'Processed salaries for the month',
   'salary.print': 'Printed salary slip',
   'advance.create': 'Gave advance',
   'advance.cancel': 'Cancelled advance',

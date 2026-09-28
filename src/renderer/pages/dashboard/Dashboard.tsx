@@ -195,7 +195,7 @@ function BillsCard({ recent, today }: { recent: NonNullable<Summary['recentBills
       key: 'paymentMode',
       label: 'Paid by',
       render: (b) =>
-        b.status === 'cancelled' ? <Badge tone="red">Cancelled</Badge> : <Badge tone={MODE_TONE[b.paymentMode] ?? 'neutral'}>{MODE_LABEL[b.paymentMode] ?? b.paymentMode}</Badge>,
+        b.status === 'cancelled' ? <Badge tone="red">Cancelled</Badge> : <Badge tone={MODE_TONE[b.paymentMode] ?? 'neutral'}>{b.paymentMode === 'split' && b.credit > 0 ? 'Part paid' : (MODE_LABEL[b.paymentMode] ?? b.paymentMode)}</Badge>,
     },
     { key: 'total', label: 'Amount', type: 'money' },
   ];

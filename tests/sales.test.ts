@@ -858,3 +858,19 @@ describe('bill receipts and labels', () => {
     expect(billPaymentLabel('cash')).toBe('Cash');
   });
 });
+
+describe('customer balances on the billing screen', () => {
+  it('hides the balance and credit limit from users who may not see customer balances', async () => {
+    const t = await createTestApp();
+    const c = await customer(t);
+    await t.call('sales.create', { customerId: c.id, items: [{ itemName: 'Rice', qty: 1, rate: 10000 }], payments: [] });
+    const owner = await t.call('sales.customer', { id: c.id });
+    expect(owner.balance).toBe(10000);
+    expect(owner.balanceHidden).toBeUndefined();
+    removePermission(t, 'cashier', 'customers.view');
+    removePermission(t, 'cashier', 'customers.receive');
+    await t.loginAs('cashier');
+    const hidden = await t.call('sales.customer', { id: c.id });
+    expect(hidden).toMatchObject({ id: c.id, balance: 0, creditLimit: null, balanceHidden: true });
+  });
+});

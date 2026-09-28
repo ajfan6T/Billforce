@@ -9,6 +9,7 @@
  *   Cr SALES gross (sum of qty x rate)
  */
 import type { Ctx } from '../../context';
+import { canSeeCustomerBalances } from '../customers/service';
 import { assertCan, can, currentUserId, now, requireSession, today } from '../../context';
 import { AppError, fail } from '../../errors';
 import { listRevisions, logActivity, recordRevision } from '../../audit';
@@ -140,6 +141,8 @@ export interface BillCustomer {
   balance: number;
   creditLimit: number | null;
   isActive: boolean;
+  /** The user may not see customer balances: balance is 0 and creditLimit null. */
+  balanceHidden?: boolean;
 }
 
 export interface BillCreditNoteRef {
@@ -231,6 +234,10 @@ function customerRow(ctx: Ctx, id: number): CustomerRow | undefined {
 export function customerSummary(ctx: Ctx, id: number): BillCustomer {
   const c = customerRow(ctx, id);
   if (!c) throw fail.notFound('Customer');
+  // Same rule as customers.search: balances only for users who may see them.
+  if (!canSeeCustomerBalances(ctx)) {
+    return { id: c.id, name: c.name, phone: c.phone, balance: 0, creditLimit: null, isActive: !!c.is_active, balanceHidden: true };
+  }
   return {
     id: c.id,
     name: c.name,

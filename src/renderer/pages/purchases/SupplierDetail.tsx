@@ -56,7 +56,7 @@ export function SupplierDetailPage() {
     { key: 'purchaseNo', label: 'Purchase no', render: (r) => <span className="bold">{r.purchaseNo}</span> },
     { key: 'supplierBillNo', label: 'Their bill no', render: (r) => r.supplierBillNo ?? <span className="faint">—</span> },
     { key: 'items', label: 'Items', render: (r) => <span className="cell-sub" style={{ color: 'inherit' }}>{r.items}</span> },
-    { key: 'paymentMode', label: 'Mode', render: (r) => (r.status === 'cancelled' ? <CancelledBadge /> : <ModeBadge mode={r.paymentMode} />) },
+    { key: 'paymentMode', label: 'Mode', render: (r) => (r.status === 'cancelled' ? <CancelledBadge /> : <ModeBadge mode={r.paymentMode} credit={r.credit} />) },
     { key: 'total', label: 'Total', type: 'money' },
     { key: 'credit', label: 'On credit', type: 'money' },
   ];

@@ -53,7 +53,7 @@ export function CustomerDetailPage() {
     { key: 'date', label: 'Date', type: 'date', width: 110 },
     { key: 'billNo', label: 'Bill no', render: (r) => <span className="bold">{r.billNo}</span> },
     { key: 'items', label: 'Items', render: (r) => <span className="cell-sub" style={{ color: 'inherit' }}>{r.items}</span> },
-    { key: 'paymentMode', label: 'Mode', render: (r) => (r.status === 'cancelled' ? <CancelledBadge /> : <ModeBadge mode={r.paymentMode} />) },
+    { key: 'paymentMode', label: 'Mode', render: (r) => (r.status === 'cancelled' ? <CancelledBadge /> : <ModeBadge mode={r.paymentMode} credit={r.credit} />) },
     { key: 'total', label: 'Total', type: 'money' },
     { key: 'paid', label: 'Paid', type: 'money' },
     { key: 'credit', label: 'On credit', type: 'money' },

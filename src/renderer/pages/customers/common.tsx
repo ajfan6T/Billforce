@@ -24,9 +24,10 @@ export function PayableText({ value, zero = 'Nothing payable' }: { value: number
   return <span className="bal-nil">{zero}</span>;
 }
 
-export function ModeBadge({ mode }: { mode: string }) {
+/** Payment mode badge. Pass `credit` for bills: a 'split' bill with an amount left on credit reads "Part paid". */
+export function ModeBadge({ mode, credit = 0 }: { mode: string; credit?: number }) {
   const tone = mode === 'cash' ? 'green' : mode === 'upi' ? 'purple' : mode === 'bank' ? 'blue' : mode === 'credit' ? 'amber' : 'neutral';
-  const label = mode === 'split' ? 'Split' : (PAYMENT_MODE_LABELS as Record<string, string>)[mode] ?? mode;
+  const label = mode === 'split' ? (credit > 0 ? 'Part paid' : 'Split') : (PAYMENT_MODE_LABELS as Record<string, string>)[mode] ?? mode;
   return <Badge tone={tone}>{label}</Badge>;
 }
 
@@ -98,7 +99,7 @@ export interface DiffField {
 export const fmtMoney = (v: any) => formatINR(Number(v ?? 0));
 export const fmtDate = (v: any) => (v ? formatDate(String(v)) : '—');
 export const fmtText = (v: any) => (v === null || v === undefined || v === '' ? '—' : String(v));
-export const fmtMode = (v: any) => (v === 'split' ? 'Split' : ((PAYMENT_MODE_LABELS as Record<string, string>)[v] ?? String(v)));
+export const fmtMode = (v: any, credit = 0) => (v === 'split' ? (credit > 0 ? 'Part paid' : 'Split') : ((PAYMENT_MODE_LABELS as Record<string, string>)[v] ?? String(v)));
 
 function changes(prev: any, next: any, fields: DiffField[]): string[] {
   if (!prev || !next) return [];
