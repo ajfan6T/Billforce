@@ -1,0 +1,232 @@
+/**
+ * The home screen: key figures for today and this month, balances, a 30-day
+ * sales trend, top items, recent bills and alerts. Every part is included only
+ * when the user may see it, so a cashier gets today's sales and recent bills but
+ * never profit or balances.
+ */
+import type { Ctx } from '../../context';
+import { can, requireSession, today } from '../../context';
+import { getSection } from '../../settings';
+import { addDays, addMonths, diffDays, endOfMonth, formatDate, fyOf, startOfMonth } from '../../../shared/dates';
+import type { PaymentMode, Role } from '../../../shared/constants';
+import { formatINR } from '../../../shared/money';
+import { accountNets, accountsMeta, partyNets, systemId } from '../reports/common';
+import { profitLossFigures } from '../reports/profitLoss';
+import { dailyNetSales, itemSales, salesSummary } from '../reports/sales';
+
+export interface DashboardAlert {
+  kind: 'backup' | 'credit_limit';
+  tone: 'amber' | 'red';
+  title: string;
+  message: string;
+  /** App path the alert's button opens. */
+  path: string;
+  action: string;
+}
+
+export interface DashboardBill {
+  id: number;
+  billNo: string;
+  date: string;
+  createdAt: string;
+  customerName: string | null;
+  total: number;
+  paymentMode: string;
+  status: 'active' | 'cancelled';
+}
+
+export interface DashboardSummary {
+  today: string;
+  fyName: string;
+  user: { name: string; role: Role };
+  /** Today's sales (users who make or view bills). */
+  todaySales: { bills: number; netSales: number; billed: number; returns: number; byMode: Record<PaymentMode, number> } | null;
+  /** This month vs last month (sales reports). */
+  month: { thisMonth: number; bills: number; lastMonth: number; lastMonthToDate: number; changePct: number | null } | null;
+  /** Cash and bank / UPI balances (books or financial reports). */
+  balances: { cash: number; bank: number } | null;
+  /** Customers owe you / you owe suppliers. */
+  dues: { receivables: number; receivableCustomers: number; payables: number; payableSuppliers: number } | null;
+  expensesThisMonth: number | null;
+  /** Net profit (financial reports only). */
+  profit: { thisMonth: number; thisFy: number } | null;
+  /** Net sales per day for the last 30 days. */
+  trend: { dates: string[]; values: number[] } | null;
+  topItems: Array<{ name: string; itemId: number | null; qty: number; unit: string | null; amount: number }> | null;
+  recentBills: { bills: DashboardBill[]; todayOnly: boolean } | null;
+  alerts: DashboardAlert[];
+}
+
+function balancesFor(ctx: Ctx, asOf: string) {
+  const nets = accountNets(ctx, { to: asOf, types: ['asset'] });
+  let cash = 0;
+  let bank = 0;
+  for (const a of accountsMeta(ctx)) {
+    if (a.groupCode === 'cash') cash += nets.get(a.id) ?? 0;
+    else if (a.groupCode === 'bank') bank += nets.get(a.id) ?? 0;
+  }
+  return { cash, bank };
+}
+
+function duesFor(ctx: Ctx, asOf: string) {
+  let receivables = 0;
+  let receivableCustomers = 0;
+  for (const bal of partyNets(ctx, systemId(ctx, 'AR'), { to: asOf }).values()) {
+    if (bal > 0) {
+      receivables += bal;
+      receivableCustomers++;
+    }
+  }
+  let payables = 0;
+  let payableSuppliers = 0;
+  for (const bal of partyNets(ctx, systemId(ctx, 'AP'), { to: asOf }).values()) {
+    if (bal < 0) {
+      payables += -bal;
+      payableSuppliers++;
+    }
+  }
+  return { receivables, receivableCustomers, payables, payableSuppliers };
+}
+
+function expensesBetween(ctx: Ctx, from: string, to: string): number {
+  const nets = accountNets(ctx, { from, to, excludeClosing: true, types: ['expense'] });
+  let total = 0;
+  for (const a of accountsMeta(ctx)) {
+    if (a.groupCode === 'direct_expenses' || a.groupCode === 'indirect_expenses') total += nets.get(a.id) ?? 0;
+  }
+  return total;
+}
+
+function recentBills(ctx: Ctx, todayOnly: boolean, t: string): DashboardBill[] {
+  return ctx.db
+    .all<{ id: number; bill_no: string; date: string; created_at: string; customer_name: string | null; total: number; payment_mode: string; status: 'active' | 'cancelled' }>(
+      `SELECT id, bill_no, date, created_at, customer_name, total, payment_mode, status FROM bills
+        ${todayOnly ? 'WHERE date = ?' : ''} ORDER BY date DESC, id DESC LIMIT 8`,
+      todayOnly ? [t] : [],
+    )
+    .map((b) => ({
+      id: b.id,
+      billNo: b.bill_no,
+      date: b.date,
+      createdAt: b.created_at,
+      customerName: b.customer_name,
+      total: b.total,
+      paymentMode: b.payment_mode,
+      status: b.status,
+    }));
+}
+
+function alertsFor(ctx: Ctx, t: string): DashboardAlert[] {
+  const alerts: DashboardAlert[] = [];
+  if (can(ctx, 'data.backup')) {
+    const last = getSection(ctx, 'backup').lastBackupAt;
+    const days = last ? diffDays(last.slice(0, 10), t) : null;
+    if (days === null) {
+      alerts.push({
+        kind: 'backup',
+        tone: 'amber',
+        title: 'No backup yet',
+        message: 'Your data has never been backed up. Take a backup now and keep a copy on a pen drive.',
+        path: '/settings/backup',
+        action: 'Back up now',
+      });
+    } else if (days > 2) {
+      alerts.push({
+        kind: 'backup',
+        tone: days > 7 ? 'red' : 'amber',
+        title: `Last backup was ${days} days ago`,
+        message: `The last backup was taken on ${formatDate(last!.slice(0, 10))}. Take a backup so you do not lose recent bills.`,
+        path: '/settings/backup',
+        action: 'Back up now',
+      });
+    }
+  }
+  if (can(ctx, 'customers.view')) {
+    const limits = ctx.db.all<{ id: number; name: string; credit_limit: number }>(
+      'SELECT id, name, credit_limit FROM customers WHERE credit_limit IS NOT NULL AND credit_limit > 0',
+    );
+    if (limits.length) {
+      const bal = partyNets(ctx, systemId(ctx, 'AR'), { to: t });
+      const over = limits
+        .map((c) => ({ ...c, balance: bal.get(c.id) ?? 0 }))
+        .filter((c) => c.balance > c.credit_limit)
+        .sort((a, b) => b.balance - b.credit_limit - (a.balance - a.credit_limit));
+      if (over.length) {
+        const names = over
+          .slice(0, 3)
+          .map((c) => `${c.name} (owes ${formatINR(c.balance)}, limit ${formatINR(c.credit_limit)})`)
+          .join(', ');
+        alerts.push({
+          kind: 'credit_limit',
+          tone: 'amber',
+          title: over.length === 1 ? '1 customer is over their credit limit' : `${over.length} customers are over their credit limit`,
+          message: `${names}${over.length > 3 ? ` and ${over.length - 3} more` : ''}.`,
+          path: over.length === 1 ? `/customers/${over[0].id}` : '/customers/outstanding',
+          action: over.length === 1 ? 'Open customer' : 'See outstanding',
+        });
+      }
+    }
+  }
+  return alerts;
+}
+
+export function dashboardSummary(ctx: Ctx): DashboardSummary {
+  const session = requireSession(ctx);
+  const t = today(ctx);
+  const fy = fyOf(t);
+  const monthStart = startOfMonth(t);
+  const seesBills = can(ctx, 'billing.create') || can(ctx, 'billing.view');
+  const sales = can(ctx, 'reports.sales');
+  const books = can(ctx, 'reports.financial') || can(ctx, 'accounts.view');
+  const financial = can(ctx, 'reports.financial');
+
+  let todaySales: DashboardSummary['todaySales'] = null;
+  if (seesBills || sales) {
+    const s = salesSummary(ctx, { from: t, to: t });
+    todaySales = { bills: s.bills, netSales: s.netSales, billed: s.billed, returns: s.returns, byMode: { ...s.byMode } };
+  }
+
+  let month: DashboardSummary['month'] = null;
+  let trend: DashboardSummary['trend'] = null;
+  let topItems: DashboardSummary['topItems'] = null;
+  if (sales) {
+    const cur = salesSummary(ctx, { from: monthStart, to: t });
+    const lastStart = addMonths(monthStart, -1);
+    const last = salesSummary(ctx, { from: lastStart, to: endOfMonth(lastStart) });
+    const sameDay = addMonths(t, -1);
+    const lastToDate = salesSummary(ctx, { from: lastStart, to: sameDay < lastStart ? lastStart : sameDay });
+    month = {
+      thisMonth: cur.netSales,
+      bills: cur.bills,
+      lastMonth: last.netSales,
+      lastMonthToDate: lastToDate.netSales,
+      changePct: lastToDate.netSales ? Math.round(((cur.netSales - lastToDate.netSales) / Math.abs(lastToDate.netSales)) * 1000) / 10 : null,
+    };
+    const daily = dailyNetSales(ctx, { from: addDays(t, -29), to: t });
+    trend = { dates: [...daily.keys()], values: [...daily.values()].map((a) => a.billed - a.returns) };
+    topItems = itemSales(ctx, { from: monthStart, to: t })
+      .filter((i) => i.amount > 0)
+      .slice(0, 5)
+      .map((i) => ({ name: i.name, itemId: i.itemId, qty: Math.round((i.qtySold - i.qtyReturned) * 1000) / 1000, unit: i.unit, amount: i.amount }));
+  }
+
+  const profit = financial
+    ? { thisMonth: profitLossFigures(ctx, monthStart, t).netProfit, thisFy: profitLossFigures(ctx, fy.start, t).netProfit }
+    : null;
+
+  return {
+    today: t,
+    fyName: fy.name,
+    user: { name: session.fullName, role: session.role },
+    todaySales,
+    month,
+    balances: books ? balancesFor(ctx, t) : null,
+    dues: books ? duesFor(ctx, t) : null,
+    expensesThisMonth: books ? expensesBetween(ctx, monthStart, t) : null,
+    profit,
+    trend,
+    topItems,
+    recentBills: seesBills ? { bills: recentBills(ctx, !can(ctx, 'billing.view'), t), todayOnly: !can(ctx, 'billing.view') } : null,
+    alerts: alertsFor(ctx, t),
+  };
+}

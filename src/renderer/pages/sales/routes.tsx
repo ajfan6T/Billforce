@@ -1,9 +1,19 @@
 import type { AppRoute } from '../../routing';
-import { Placeholder } from '../Placeholder';
+import { BillingScreen } from './BillingScreen';
+import { BillsList } from './BillsList';
+import { BillDetail } from './BillDetail';
+import { ReturnsList } from './ReturnsList';
+import { ReturnNew } from './ReturnNew';
+import { ReturnDetail } from './ReturnDetail';
+import { ItemsPage } from './ItemsPage';
 
 export const salesPages: AppRoute[] = [
-  { path: '/billing/new', element: <Placeholder title="New bill" />, perm: 'billing.create', fullBleed: true },
-  { path: '/sales/bills', element: <Placeholder title="Bills" />, perm: ['billing.create', 'billing.view'] },
-  { path: '/sales/returns', element: <Placeholder title="Returns & credit notes" />, perm: 'returns.create' },
-  { path: '/sales/items', element: <Placeholder title="Items & rates" />, perm: ['items.manage', 'billing.create'] },
+  { path: '/billing/new', element: <BillingScreen />, perm: 'billing.create', fullBleed: true },
+  { path: '/sales/bills', element: <BillsList />, perm: ['billing.create', 'billing.view'] },
+  { path: '/sales/bills/:id', element: <BillDetail />, perm: ['billing.create', 'billing.view'] },
+  { path: '/sales/bills/:id/edit', element: <BillingScreen />, perm: 'billing.edit', fullBleed: true },
+  { path: '/sales/returns', element: <ReturnsList />, perm: ['returns.create', 'returns.cancel', 'billing.view'] },
+  { path: '/sales/returns/new', element: <ReturnNew />, perm: 'returns.create' },
+  { path: '/sales/returns/:id', element: <ReturnDetail />, perm: ['returns.create', 'returns.cancel', 'billing.view'] },
+  { path: '/sales/items', element: <ItemsPage />, perm: ['items.manage', 'billing.create', 'billing.view'] },
 ];

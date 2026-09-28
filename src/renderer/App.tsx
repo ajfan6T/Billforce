@@ -7,6 +7,7 @@ import { Shell } from './layout/Shell';
 import { APP_ROUTES } from './routes';
 import { SetupWizard } from './pages/auth/Setup';
 import { LockScreen, LoginScreen } from './pages/auth/Login';
+import { ForcePasswordChange } from './pages/admin/ForcePasswordChange';
 import { EmptyState, Loading, Page } from './components/ui';
 import type { AppRoute } from './routing';
 
@@ -33,6 +34,7 @@ function Root() {
   if (!status) return <Loading label="Starting Billforce…" />;
   if (!status.setupDone) return <SetupWizard />;
   if (!session) return <LoginScreen />;
+  if (session.mustChangePassword) return <ForcePasswordChange />;
   return (
     <>
       <Routes>

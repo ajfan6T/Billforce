@@ -1,16 +1,33 @@
 import type { AppRoute } from '../../routing';
-import { Placeholder } from '../Placeholder';
+import { ExpensesPage } from './Expenses';
+import { ExpenseDetailPage } from './ExpenseDetail';
+import { BankBookPage, CashBookPage, DayBookPage } from './Books';
+import { LedgerPage } from './Ledger';
+import { JournalsListPage } from './JournalsList';
+import { JournalFormPage } from './JournalForm';
+import { JournalViewPage } from './JournalView';
+import { CapitalPage } from './Capital';
+import { LoansPage } from './Loans';
+import { LoanDetailPage } from './LoanDetail';
+import { TransfersPage } from './Transfers';
+import { ChartOfAccountsPage } from './ChartOfAccounts';
+import { YearEndPage } from './YearEnd';
 
 export const accountsPages: AppRoute[] = [
-  { path: '/accounts/expenses', element: <Placeholder title="Expenses" />, perm: 'expenses.manage' },
-  { path: '/accounts/cash-book', element: <Placeholder title="Cash book" />, perm: 'accounts.view' },
-  { path: '/accounts/bank-book', element: <Placeholder title="Bank & UPI book" />, perm: 'accounts.view' },
-  { path: '/accounts/day-book', element: <Placeholder title="Day book" />, perm: 'accounts.view' },
-  { path: '/accounts/ledger', element: <Placeholder title="Ledgers" />, perm: 'accounts.view' },
-  { path: '/accounts/journals', element: <Placeholder title="Journal entries" />, perm: ['accounts.view', 'accounts.manage'] },
-  { path: '/accounts/capital', element: <Placeholder title="Capital & drawings" />, perm: 'accounts.manage' },
-  { path: '/accounts/loans', element: <Placeholder title="Loans" />, perm: ['accounts.view', 'accounts.manage'] },
-  { path: '/accounts/transfers', element: <Placeholder title="Cash & bank transfer" />, perm: 'accounts.manage' },
-  { path: '/accounts/chart', element: <Placeholder title="Chart of accounts" />, perm: ['accounts.view', 'accounts.chart'] },
-  { path: '/accounts/year-end', element: <Placeholder title="Year-end closing" />, perm: 'accounts.close_year' },
+  { path: '/accounts/expenses', element: <ExpensesPage />, perm: 'expenses.manage' },
+  { path: '/accounts/expenses/:id', element: <ExpenseDetailPage />, perm: ['expenses.manage', 'accounts.view'] },
+  { path: '/accounts/cash-book', element: <CashBookPage />, perm: 'accounts.view' },
+  { path: '/accounts/bank-book', element: <BankBookPage />, perm: 'accounts.view' },
+  { path: '/accounts/day-book', element: <DayBookPage />, perm: 'accounts.view' },
+  { path: '/accounts/ledger', element: <LedgerPage />, perm: 'accounts.view' },
+  { path: '/accounts/journals', element: <JournalsListPage />, perm: ['accounts.view', 'accounts.manage'] },
+  { path: '/accounts/journals/new', element: <JournalFormPage />, perm: 'accounts.manage' },
+  { path: '/accounts/journals/:id', element: <JournalViewPage />, perm: ['accounts.view', 'accounts.manage'] },
+  { path: '/accounts/journals/:id/edit', element: <JournalFormPage />, perm: 'accounts.manage' },
+  { path: '/accounts/capital', element: <CapitalPage />, perm: 'accounts.manage' },
+  { path: '/accounts/loans', element: <LoansPage />, perm: ['accounts.view', 'accounts.manage'] },
+  { path: '/accounts/loans/:id', element: <LoanDetailPage />, perm: ['accounts.view', 'accounts.manage'] },
+  { path: '/accounts/transfers', element: <TransfersPage />, perm: 'accounts.manage' },
+  { path: '/accounts/chart', element: <ChartOfAccountsPage />, perm: ['accounts.view', 'accounts.chart'] },
+  { path: '/accounts/year-end', element: <YearEndPage />, perm: 'accounts.close_year' },
 ];

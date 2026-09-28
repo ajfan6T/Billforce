@@ -21,7 +21,7 @@ import { renderReceiptHtml, upiLink, type ReceiptDoc, type ReceiptTotal } from '
 import { BILL_PAYMENT_MODE_LABELS, billPaymentMode, calcBill, roundQty, type BillPaymentMode } from '../../../shared/billing';
 import { amountInWords, formatAmount, formatINR, formatQty } from '../../../shared/money';
 import { formatDate, formatTime, fyOf, isValidISODate } from '../../../shared/dates';
-import { PAYMENT_MODE_LABELS, type SettlementMode } from '../../../shared/constants';
+import { PAYMENT_MODE_LABELS, type PaymentMode, type SettlementMode } from '../../../shared/constants';
 
 /* ------------------------------------------------------------------ */
 /* Types                                                               */
@@ -148,7 +148,7 @@ export interface BillCreditNoteRef {
   date: string;
   kind: 'return' | 'adjustment';
   total: number;
-  refundMode: string;
+  refundMode: PaymentMode;
   status: 'active' | 'cancelled';
 }
 
@@ -273,7 +273,7 @@ function getBillPayments(ctx: Ctx, billId: number): BillPayment[] {
 
 export function creditNotesForBill(ctx: Ctx, billId: number): BillCreditNoteRef[] {
   return ctx.db
-    .all<{ id: number; cn_no: string; date: string; kind: 'return' | 'adjustment'; total: number; refund_mode: string; status: 'active' | 'cancelled' }>(
+    .all<{ id: number; cn_no: string; date: string; kind: 'return' | 'adjustment'; total: number; refund_mode: PaymentMode; status: 'active' | 'cancelled' }>(
       'SELECT id, cn_no, date, kind, total, refund_mode, status FROM credit_notes WHERE bill_id = ? ORDER BY date, id',
       [billId],
     )
@@ -1151,6 +1151,14 @@ export function posConfig(ctx: Ctx) {
 /* Receipts & printing                                                 */
 /* ------------------------------------------------------------------ */
 
+/** "Items: 3" plus the total quantity when every line has the same unit (adding kg to cups means nothing). */
+export function itemCountLine(items: Array<{ qty: number; unit: string | null }>): string {
+  const units = new Set(items.map((i) => (i.unit ?? '').toLowerCase()));
+  if (units.size !== 1) return `Items: ${items.length}`;
+  const unit = items[0]?.unit;
+  return `Items: ${items.length}    Qty: ${formatQty(roundQty(items.reduce((s, i) => s + i.qty, 0)))}${unit ? ' ' + unit : ''}`;
+}
+
 export function billReceiptDoc(ctx: Ctx, b: BillDetail, opts: { duplicate?: boolean } = {}): ReceiptDoc {
   const receipt = getSection(ctx, 'receipt');
   const business = getSection(ctx, 'business');
@@ -1180,8 +1188,7 @@ export function billReceiptDoc(ctx: Ctx, b: BillDetail, opts: { duplicate?: bool
   if (b.credit > 0) totals.push({ label: 'Balance on credit', value: formatINR(b.credit), bold: true });
 
   const lines: string[] = [];
-  const totalQty = roundQty(b.items.reduce((s, i) => s + i.qty, 0));
-  lines.push(`Items: ${b.items.length}    Qty: ${formatQty(totalQty)}`);
+  lines.push(itemCountLine(b.items));
   if (b.itemDiscount + b.billDiscount > 0) lines.push(`You saved ${formatINR(b.itemDiscount + b.billDiscount)} on this bill`);
   if (receipt.showAmountInWords) lines.push(amountInWords(b.total));
   if (b.credit > 0 && b.customer && b.status === 'active') {

@@ -1,4 +1,4 @@
 import type { AppRoute } from '../../routing';
-import { Placeholder } from '../Placeholder';
+import { DashboardPage } from './Dashboard';
 
-export const dashboardPages: AppRoute[] = [{ path: '/', element: <Placeholder title="Dashboard" /> }];
+export const dashboardPages: AppRoute[] = [{ path: '/', element: <DashboardPage /> }];

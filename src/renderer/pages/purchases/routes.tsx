@@ -1,9 +1,21 @@
 import type { AppRoute } from '../../routing';
-import { Placeholder } from '../Placeholder';
+import { SuppliersListPage } from './SuppliersList';
+import { SupplierDetailPage } from './SupplierDetail';
+import { PayablesPage } from './Payables';
+import { PurchasesListPage } from './PurchasesList';
+import { PurchaseFormPage } from './PurchaseForm';
+import { PurchaseDetailPage } from './PurchaseDetail';
+import { SupplierPaymentsListPage } from './SupplierPaymentsList';
+import { SupplierPaymentDetailPage } from './SupplierPaymentDetail';
 
 export const purchasesPages: AppRoute[] = [
-  { path: '/suppliers', element: <Placeholder title="Suppliers" />, perm: 'suppliers.view' },
-  { path: '/suppliers/payables', element: <Placeholder title="Payables" />, perm: 'suppliers.view' },
-  { path: '/purchases', element: <Placeholder title="Purchase bills" />, perm: ['suppliers.view', 'purchases.manage'] },
-  { path: '/purchases/payments', element: <Placeholder title="Payments made" />, perm: ['suppliers.view', 'suppliers.pay'] },
+  { path: '/suppliers', element: <SuppliersListPage />, perm: 'suppliers.view' },
+  { path: '/suppliers/payables', element: <PayablesPage />, perm: 'suppliers.view' },
+  { path: '/suppliers/:id', element: <SupplierDetailPage />, perm: 'suppliers.view' },
+  { path: '/purchases', element: <PurchasesListPage />, perm: ['suppliers.view', 'purchases.manage'] },
+  { path: '/purchases/new', element: <PurchaseFormPage />, perm: 'purchases.manage' },
+  { path: '/purchases/payments', element: <SupplierPaymentsListPage />, perm: ['suppliers.view', 'suppliers.pay'] },
+  { path: '/purchases/payments/:id', element: <SupplierPaymentDetailPage />, perm: ['suppliers.view', 'suppliers.pay'] },
+  { path: '/purchases/:id', element: <PurchaseDetailPage />, perm: ['suppliers.view', 'purchases.manage'] },
+  { path: '/purchases/:id/edit', element: <PurchaseFormPage />, perm: 'purchases.manage' },
 ];

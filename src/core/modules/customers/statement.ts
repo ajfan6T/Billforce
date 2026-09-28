@@ -131,7 +131,7 @@ export function describeEntrySource(ctx: Ctx, e: Pick<StatementEntry, 'voucher_t
       break;
     }
     case 'opening':
-      particulars = 'Opening balance';
+      particulars = 'Balance when you started using Billforce';
       break;
   }
   return { type, number, particulars: particulars || type };
@@ -161,7 +161,7 @@ export function partyStatement(ctx: Ctx, opts: StatementOptions): ReportData {
   );
 
   const rows: ReportRow[] = [
-    { cells: { date: from, type: '', number: '', particulars: 'Opening balance', debit: null, credit: null, balance: opening }, style: 'subtotal' },
+    { cells: { date: from, type: '', number: '', particulars: 'Balance brought forward', debit: null, credit: null, balance: opening }, style: 'subtotal' },
   ];
   let running = opening;
   let totalDr = 0;
@@ -192,7 +192,7 @@ export function partyStatement(ctx: Ctx, opts: StatementOptions): ReportData {
   const isCustomer = partyType === 'customer';
   return {
     title: `Statement of account - ${opts.partyName}`,
-    subtitle: [opts.partyPhone ? `Ph: ${opts.partyPhone}` : '', describeRange({ from, to })].filter(Boolean).join(' · '),
+    subtitle: describeRange({ from, to }),
     columns: [
       { key: 'date', label: 'Date', type: 'date', width: 11 },
       { key: 'type', label: 'Type', width: 16 },
@@ -204,13 +204,14 @@ export function partyStatement(ctx: Ctx, opts: StatementOptions): ReportData {
     ],
     rows,
     summary: [
-      { label: 'Opening balance', value: opening, type: 'drcr' },
-      { label: isCustomer ? 'Bills & charges' : 'Payments & returns', value: totalDr, type: 'money' },
-      { label: isCustomer ? 'Payments & returns' : 'Purchases & charges', value: totalCr, type: 'money' },
+      { label: 'Brought forward', value: opening, type: 'drcr' },
+      { label: isCustomer ? 'Bills & charges' : 'Paid (incl. discounts)', value: totalDr, type: 'money' },
+      { label: isCustomer ? 'Payments & returns' : 'Purchase bills', value: totalCr, type: 'money' },
       { label: 'Closing balance', value: running, type: 'drcr' },
       { label: 'Status', value: balanceText(running, partyType), type: 'text' },
     ],
     notes: [
+      `${isCustomer ? 'Customer' : 'Supplier'}: ${opts.partyName}${opts.partyPhone ? `, Ph: ${opts.partyPhone}` : ''}`,
       isCustomer
         ? 'Dr = amount the customer owes you. Cr = advance paid by the customer.'
         : 'Cr = amount you owe the supplier. Dr = advance paid to the supplier.',

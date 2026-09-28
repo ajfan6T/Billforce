@@ -1,0 +1,628 @@
+/* Accounts module: chart of accounts, vouchers, books, loans, year-end. Classes are prefixed "ac-". */
+
+.ac-sub {
+  display: block;
+  font-size: 12px;
+  color: var(--text-2);
+  max-width: 420px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.ac-strong {
+  font-weight: 650;
+}
+.ac-mono {
+  font-variant-numeric: tabular-nums;
+  color: var(--text-2);
+  font-size: 12.5px;
+}
+
+/* Main column + side column */
+.ac-split {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 340px;
+  gap: 16px;
+  align-items: start;
+}
+.ac-split > .stack {
+  min-width: 0;
+}
+@media (max-width: 1180px) {
+  .ac-split {
+    grid-template-columns: minmax(0, 1fr) 300px;
+  }
+}
+.ac-split-even {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 16px;
+  align-items: start;
+  margin-bottom: 16px;
+}
+
+/* Filter bar at the top of list cards */
+.ac-filters {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+  padding: 12px 16px;
+  border-bottom: 1px solid var(--border);
+}
+.ac-filters .toolbar {
+  margin-bottom: 0;
+}
+.ac-filters select.input {
+  width: auto;
+  min-width: 150px;
+}
+.ac-filters .spacer {
+  flex: 1;
+}
+.ac-list-card .table tfoot td {
+  background: var(--surface-2);
+}
+.ac-note {
+  padding: 8px 16px;
+  font-size: 12.5px;
+  color: var(--text-2);
+  border-top: 1px solid var(--border);
+  background: var(--surface-2);
+}
+
+/* Chart of accounts tree */
+.ac-tree {
+  width: 100%;
+  border-collapse: separate;
+  border-spacing: 0;
+  font-size: 13.5px;
+}
+.ac-tree td {
+  padding: 7px 12px;
+  border-bottom: 1px solid var(--border);
+  vertical-align: middle;
+}
+.ac-tree tr:last-child td {
+  border-bottom: 0;
+}
+.ac-tree .ac-group td {
+  background: var(--surface-2);
+  font-weight: 650;
+}
+.ac-tree .ac-group .ac-sub {
+  font-weight: 400;
+}
+.ac-tree .ac-acct {
+  cursor: pointer;
+}
+.ac-tree .ac-acct:hover td {
+  background: #f5f8ff;
+}
+.ac-tree .ac-acct.inactive td {
+  color: var(--text-3);
+}
+.ac-tree .ac-code {
+  width: 70px;
+  color: var(--text-2);
+  font-variant-numeric: tabular-nums;
+}
+.ac-tree .ac-name {
+  padding-left: 12px;
+}
+.ac-tree .ac-acct .ac-name {
+  padding-left: 30px;
+}
+.ac-tree .ac-bal {
+  width: 170px;
+  text-align: right;
+}
+.ac-tree .ac-actions {
+  width: 116px;
+  text-align: right;
+  white-space: nowrap;
+}
+.ac-tree .ac-actions .icon-btn {
+  width: 28px;
+  height: 28px;
+}
+.ac-tree .ac-acct .ac-actions .icon-btn {
+  opacity: 0.55;
+}
+.ac-tree .ac-acct:hover .ac-actions .icon-btn {
+  opacity: 1;
+}
+.ac-tree .ac-empty td {
+  color: var(--text-3);
+  font-style: italic;
+  padding-left: 30px;
+}
+.ac-badges {
+  display: inline-flex;
+  gap: 4px;
+  margin-left: 8px;
+  vertical-align: 1px;
+}
+.ac-type-total {
+  font-size: 14px;
+  font-weight: 650;
+  font-variant-numeric: tabular-nums;
+}
+
+/* Journal line grid */
+.ac-lines {
+  padding: 4px 12px 0;
+}
+.ac-line {
+  display: grid;
+  grid-template-columns: 26px minmax(180px, 1.2fr) minmax(170px, 1fr) 130px 130px minmax(110px, 0.7fr) 30px;
+  gap: 6px;
+  align-items: center;
+  padding: 3px 0;
+}
+.ac-line-head {
+  font-size: 11.5px;
+  font-weight: 650;
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+  color: var(--text-2);
+  padding: 6px 0;
+  border-bottom: 1px solid var(--border);
+  margin-bottom: 4px;
+}
+.ac-line-head .r {
+  text-align: right;
+}
+.ac-line-no {
+  text-align: center;
+  color: var(--text-3);
+  font-size: 12.5px;
+}
+.ac-line .ac-no-party {
+  color: var(--text-3);
+  font-size: 12.5px;
+  padding-left: 4px;
+}
+.ac-line .picked {
+  min-height: 34px;
+}
+.ac-line .input {
+  height: 34px;
+}
+.ac-line-foot {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  flex-wrap: wrap;
+  padding: 10px 12px 12px;
+  border-top: 1px solid var(--border);
+  margin-top: 8px;
+}
+.ac-totals {
+  display: flex;
+  gap: 18px;
+  align-items: center;
+  font-variant-numeric: tabular-nums;
+  flex-wrap: wrap;
+}
+.ac-totals .lbl {
+  color: var(--text-2);
+  font-size: 12.5px;
+  margin-right: 6px;
+}
+.ac-diff {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-weight: 650;
+  padding: 4px 10px;
+  border-radius: 999px;
+  font-size: 13px;
+}
+.ac-diff.ok {
+  background: var(--success-soft);
+  color: var(--success);
+}
+.ac-diff.bad {
+  background: var(--danger-soft);
+  color: var(--danger);
+}
+.ac-diff.none {
+  background: var(--surface-3);
+  color: var(--text-2);
+}
+
+/* Posting table (how an entry is recorded) */
+.ac-posting {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 13.5px;
+}
+.ac-posting th {
+  text-align: left;
+  font-size: 11.5px;
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+  color: var(--text-2);
+  font-weight: 650;
+  padding: 6px 8px;
+  border-bottom: 1px solid var(--border);
+}
+.ac-posting td {
+  padding: 7px 8px;
+  border-bottom: 1px solid var(--border);
+  vertical-align: top;
+}
+.ac-posting .num {
+  text-align: right;
+  white-space: nowrap;
+  width: 130px;
+}
+.ac-posting tfoot td {
+  font-weight: 700;
+  border-bottom: 0;
+  border-top: 1px solid var(--border-strong);
+}
+.ac-posting.void td {
+  color: var(--text-3);
+  text-decoration: line-through;
+}
+.ac-posting .ac-party {
+  color: var(--text-2);
+  font-size: 12.5px;
+}
+.ac-posting .ac-memo {
+  display: block;
+  color: var(--text-3);
+  font-size: 12px;
+}
+
+/* Revision history */
+.ac-revs {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+.ac-rev {
+  position: relative;
+  padding: 0 0 14px 22px;
+}
+.ac-rev::before {
+  content: '';
+  position: absolute;
+  left: 5px;
+  top: 16px;
+  bottom: 0;
+  width: 2px;
+  background: var(--border);
+}
+.ac-rev:last-child {
+  padding-bottom: 0;
+}
+.ac-rev:last-child::before {
+  display: none;
+}
+.ac-rev-dot {
+  position: absolute;
+  left: 0;
+  top: 5px;
+  width: 12px;
+  height: 12px;
+  border-radius: 50%;
+  background: var(--primary);
+  border: 2px solid var(--primary-soft);
+}
+.ac-rev-dot.edited {
+  background: var(--warning);
+  border-color: var(--warning-soft);
+}
+.ac-rev-dot.cancelled {
+  background: var(--danger);
+  border-color: var(--danger-soft);
+}
+.ac-rev-title {
+  font-weight: 650;
+}
+.ac-rev-meta {
+  font-size: 12.5px;
+  color: var(--text-2);
+}
+.ac-rev-reason {
+  font-size: 13px;
+  margin-top: 3px;
+}
+.ac-rev-changes {
+  margin: 4px 0 0;
+  padding-left: 16px;
+  font-size: 12.5px;
+  color: var(--text-2);
+}
+
+/* Quick entry (expenses) */
+.ac-quick {
+  margin-bottom: 16px;
+}
+.ac-quick-grid {
+  display: grid;
+  grid-template-columns: 160px minmax(0, 1.4fr) 170px;
+  gap: 12px 14px;
+  align-items: start;
+}
+.ac-quick-row2 {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  gap: 12px 14px;
+  align-items: start;
+  margin-top: 12px;
+}
+.ac-quick-row3 {
+  display: grid;
+  grid-template-columns: 160px minmax(0, 1fr) auto;
+  gap: 12px 14px;
+  align-items: end;
+  margin-top: 12px;
+}
+.ac-quick-row3 .ac-quick-actions {
+  margin-top: 0;
+}
+.ac-quick-actions {
+  display: flex;
+  justify-content: flex-end;
+  align-items: center;
+  gap: 10px;
+  margin-top: 12px;
+}
+.ac-head-field {
+  display: flex;
+  gap: 6px;
+  align-items: center;
+}
+.ac-head-field select {
+  flex: 1;
+  min-width: 0;
+}
+.ac-inline-link {
+  border: 0;
+  background: none;
+  color: var(--primary);
+  font: inherit;
+  font-size: 12.5px;
+  font-weight: 600;
+  cursor: pointer;
+  padding: 0 2px;
+  white-space: nowrap;
+}
+.ac-inline-link:hover {
+  text-decoration: underline;
+}
+
+/* Books */
+.ac-book-accounts {
+  display: flex;
+  gap: 10px;
+  flex-wrap: wrap;
+  margin-bottom: 14px;
+}
+.ac-book-account {
+  border: 1px solid var(--border);
+  background: var(--surface);
+  border-radius: var(--radius);
+  padding: 8px 12px;
+  min-width: 170px;
+  cursor: pointer;
+  font: inherit;
+  text-align: left;
+  color: inherit;
+}
+.ac-book-account:hover {
+  border-color: #b8c8ea;
+}
+.ac-book-account.active {
+  border-color: var(--primary);
+  background: var(--primary-soft);
+}
+.ac-book-account .n {
+  font-size: 12.5px;
+  font-weight: 600;
+  color: var(--text-2);
+}
+.ac-book-account .v {
+  font-size: 16px;
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+}
+.ac-report-card .report-summary {
+  padding-top: 14px;
+}
+
+/* Ledger picker */
+.ac-ledger-pick {
+  display: flex;
+  gap: 10px;
+  align-items: center;
+  flex-wrap: wrap;
+}
+.ac-ledger-pick > .ac-pick-box {
+  width: 340px;
+}
+.ac-quick-accounts {
+  display: flex;
+  gap: 6px;
+  flex-wrap: wrap;
+  justify-content: center;
+  margin-top: 12px;
+}
+
+/* Year-end */
+.ac-steps {
+  display: flex;
+  gap: 8px;
+  margin-bottom: 14px;
+}
+.ac-step {
+  flex: 1;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text-3);
+  padding-bottom: 10px;
+  border-bottom: 2px solid var(--border);
+}
+.ac-step.active {
+  color: var(--primary);
+  border-color: var(--primary);
+}
+.ac-step.done {
+  color: var(--success);
+  border-color: var(--success);
+}
+.ac-step-dot {
+  width: 22px;
+  height: 22px;
+  border-radius: 50%;
+  display: grid;
+  place-items: center;
+  background: var(--surface-3);
+  font-size: 12px;
+}
+.ac-figures {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 10px;
+  margin-bottom: 14px;
+}
+.ac-figure {
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 8px 12px;
+  background: var(--surface-2);
+}
+.ac-figure .n {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text-2);
+}
+.ac-figure .v {
+  font-size: 17px;
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+}
+.ac-checklist {
+  margin: 0;
+  padding-left: 18px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  color: var(--text);
+}
+.ac-scroll {
+  max-height: 300px;
+  overflow: auto;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+}
+
+/* Loans */
+.ac-loan-total {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 10px 12px;
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  font-weight: 650;
+}
+.ac-loan-total .money {
+  font-size: 16px;
+}
+
+/* Transfers */
+.ac-presets {
+  display: flex;
+  gap: 6px;
+  flex-wrap: wrap;
+  margin-bottom: 12px;
+}
+.ac-transfer-grid {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 36px minmax(0, 1fr);
+  gap: 10px;
+  align-items: end;
+}
+.ac-transfer-arrow {
+  display: grid;
+  place-items: center;
+  height: 36px;
+  color: var(--text-3);
+}
+.ac-bal-hint {
+  font-size: 12px;
+  color: var(--text-2);
+}
+
+.ac-form-error {
+  margin-top: 10px;
+}
+.ac-tree .ac-actions .icon-btn:disabled {
+  opacity: 0.2 !important;
+  cursor: not-allowed;
+  background: transparent;
+}
+.ac-jv-head {
+  display: grid;
+  grid-template-columns: 180px minmax(0, 1fr);
+  gap: 14px 16px;
+}
+.ac-jv-head.with-reason {
+  grid-template-columns: 180px minmax(0, 1.4fr) minmax(0, 1fr);
+}
+.ac-line-head span:nth-child(6) {
+  padding-left: 10px;
+}
+.ac-quick-pair {
+  display: grid;
+  grid-template-columns: 130px minmax(0, 1fr);
+  gap: 12px;
+}
+.ac-filters .input-adorn.search {
+  flex: 1 1 260px;
+}
+.ac-filters .ac-fixed select.input {
+  width: 100%;
+  min-width: 0;
+}
+.ac-report-card .report-table td:first-child,
+.ac-list-card .report-table td:first-child {
+  white-space: nowrap;
+}
+.ac-loan-form {
+  display: grid;
+  grid-template-columns: 160px 170px 170px minmax(0, 1fr);
+  gap: 12px 14px;
+  align-items: start;
+}
+.ac-loan-form.no-interest {
+  grid-template-columns: 160px 170px minmax(0, 1fr);
+}
+.ac-loan-foot {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto auto;
+  gap: 12px 14px;
+  align-items: end;
+  margin-top: 12px;
+}
+.ac-loan-foot .ac-loan-total {
+  gap: 14px;
+  height: 36px;
+  padding: 0 12px;
+}
+/* Keep dates, voucher types and numbers on one line in books; particulars wrap. */
+.ac-book .report-table td:nth-child(-n + 3),
+.ac-stmt .report-table td:nth-child(1),
+.ac-stmt .report-table td:nth-child(3) {
+  white-space: nowrap;
+}

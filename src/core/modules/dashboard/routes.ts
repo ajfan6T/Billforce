@@ -1,5 +1,7 @@
 import { route } from '../../api/router';
+import { dashboardSummary } from './service';
 
-// TODO(module): implement routes for the dashboard module.
-void route;
-export const dashboardRoutes = {};
+export const dashboardRoutes = {
+  /** Home screen figures; only the parts the logged-in user may see are filled in. */
+  'dashboard.summary': route({ access: 'user', handler: (ctx) => dashboardSummary(ctx) }),
+};

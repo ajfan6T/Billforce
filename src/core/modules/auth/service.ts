@@ -111,6 +111,7 @@ export function completeSetup(ctx: Ctx, input: SetupInput): { recoveryCode: stri
     full_name: input.owner.fullName,
     role: 'owner',
     password_hash: hashPassword(input.owner.password),
+    last_login_at: ts,
     created_at: ts,
   });
   const recoveryCode = generateRecoveryCode();

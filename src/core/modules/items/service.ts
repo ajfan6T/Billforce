@@ -155,6 +155,19 @@ export function updateItem(ctx: Ctx, id: number, input: ItemInput): Item {
   return getItem(ctx, id);
 }
 
+/** Change only the default rate (quick edit from the item list). */
+export function setItemRate(ctx: Ctx, id: number, rate: number): Item {
+  const before = getItem(ctx, id);
+  if (before.rate === rate) return before;
+  ctx.db.update('items', id, { rate, updated_at: now(ctx) });
+  logActivity(ctx, 'item.update', `Changed rate of "${before.name}": ${formatINR(before.rate)} → ${formatINR(rate)}/${before.unit}`, {
+    entityType: 'item',
+    entityId: id,
+    details: { before: before.rate, after: rate },
+  });
+  return getItem(ctx, id);
+}
+
 export function setItemActive(ctx: Ctx, id: number, active: boolean): Item {
   const item = getItem(ctx, id);
   ctx.db.update('items', id, { is_active: active ? 1 : 0, updated_at: now(ctx) });

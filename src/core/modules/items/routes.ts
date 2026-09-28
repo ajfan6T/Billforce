@@ -49,6 +49,12 @@ export const itemsRoutes = {
     input: zItemInput.extend({ id: zId }),
     handler: (ctx, { id, ...input }) => items.updateItem(ctx, id, input),
   }),
+  'items.setRate': route({
+    access: 'items.manage',
+    mutation: true,
+    input: z.object({ id: zId, rate: zPaise }),
+    handler: (ctx, input) => items.setItemRate(ctx, input.id, input.rate),
+  }),
   'items.setActive': route({
     access: 'items.manage',
     mutation: true,

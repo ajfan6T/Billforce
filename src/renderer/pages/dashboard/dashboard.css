@@ -1,0 +1,159 @@
+/* Dashboard (pages/dashboard). */
+
+.db-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-end;
+  gap: 16px;
+  flex-wrap: wrap;
+  margin-bottom: 16px;
+}
+.db-greeting {
+  font-size: 22px;
+}
+.db-date {
+  color: var(--text-2);
+  font-size: 13px;
+  margin-top: 2px;
+}
+.db-actions {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+.db-alert {
+  margin-bottom: 12px;
+}
+.db-alert .alert {
+  align-items: flex-start;
+}
+.db-alert .alert > div {
+  flex: 1;
+}
+.db-alert-body {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  flex-wrap: wrap;
+}
+
+.db-stats {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(220px, 280px));
+  gap: 12px;
+  margin-bottom: 16px;
+  transition: opacity 0.2s;
+}
+.db-stats.cols-4 {
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+}
+.db-stats.cols-5 {
+  grid-template-columns: repeat(5, minmax(0, 1fr));
+}
+.db-stats.cols-6 {
+  grid-template-columns: repeat(6, minmax(0, 1fr));
+}
+.db-hint-line {
+  display: block;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.db-stats.is-loading {
+  opacity: 0.6;
+}
+.db-stats .stat {
+  min-width: 0;
+  padding: 13px 14px;
+}
+.db-stats .stat-value {
+  font-size: 19px;
+  font-variant-numeric: normal;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.db-stats .stat-hint {
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.db-grid {
+  display: grid;
+  grid-template-columns: minmax(0, 2fr) minmax(0, 1fr);
+  gap: 16px;
+  margin-bottom: 16px;
+  align-items: start;
+}
+.db-grid.pair {
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1.4fr);
+}
+.db-grid > .db-card:only-child {
+  grid-column: 1 / -1;
+}
+.db-card {
+  min-width: 0;
+}
+.db-card .table-wrap {
+  border: 0;
+  border-radius: 0 0 var(--radius-lg) var(--radius-lg);
+}
+.db-month {
+  display: flex;
+  align-items: flex-end;
+  justify-content: space-between;
+  gap: 16px;
+  flex-wrap: wrap;
+  margin-bottom: 16px;
+}
+.db-month-label {
+  font-size: 12.5px;
+  color: var(--text-2);
+  font-weight: 600;
+}
+.db-month-value {
+  font-size: 24px;
+  font-weight: 700;
+  letter-spacing: -0.01em;
+}
+.db-month-meta {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 2px;
+  font-size: 12.5px;
+}
+.db-delta {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  font-weight: 600;
+}
+.db-delta.up {
+  color: var(--success);
+}
+.db-delta.down {
+  color: var(--danger);
+}
+.db-note {
+  margin-top: 10px;
+}
+.db-billno {
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+@media (max-width: 1240px) {
+  .db-stats.cols-5,
+  .db-stats.cols-6 {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+  }
+}
+@media (max-width: 1100px) {
+  .db-grid,
+  .db-grid.pair {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}

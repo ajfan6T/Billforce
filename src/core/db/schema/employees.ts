@@ -14,10 +14,13 @@ CREATE TABLE employees (
   id_proof TEXT,
   bank_details TEXT,
   notes TEXT,
+  -- Advance already given before the books start (Dr Employee Advances / Cr Opening Balance Adjustment).
+  opening_entry_id INTEGER REFERENCES journal_entries (id),
   is_active INTEGER NOT NULL DEFAULT 1,
   created_at TEXT NOT NULL,
   updated_at TEXT
 );
+CREATE INDEX idx_employees_name ON employees (name COLLATE NOCASE);
 
 -- P = present, A = absent, H = half day, L = paid leave, W = weekly off
 CREATE TABLE attendance (
@@ -71,6 +74,8 @@ CREATE TABLE salaries (
   deductions INTEGER NOT NULL DEFAULT 0,
   advance_recovery INTEGER NOT NULL DEFAULT 0,
   net INTEGER NOT NULL,                 -- gross + bonus - deductions - advance_recovery
+  -- JSON snapshot of how paid days were worked out (employment window, attendance counts).
+  details TEXT,
   paid INTEGER NOT NULL DEFAULT 0,
   status TEXT NOT NULL DEFAULT 'unpaid' CHECK (status IN ('unpaid', 'partly_paid', 'paid', 'cancelled')),
   remarks TEXT,
@@ -84,6 +89,7 @@ CREATE TABLE salaries (
   cancel_reason TEXT
 );
 CREATE UNIQUE INDEX idx_salaries_employee_month ON salaries (employee_id, month) WHERE status <> 'cancelled';
+CREATE INDEX idx_salaries_month ON salaries (month);
 
 CREATE TABLE salary_payments (
   id INTEGER PRIMARY KEY,
@@ -98,7 +104,8 @@ CREATE TABLE salary_payments (
   created_by INTEGER,
   created_at TEXT NOT NULL,
   cancelled_by INTEGER,
-  cancelled_at TEXT
+  cancelled_at TEXT,
+  cancel_reason TEXT
 );
 CREATE INDEX idx_salary_payments_salary ON salary_payments (salary_id);
 `;

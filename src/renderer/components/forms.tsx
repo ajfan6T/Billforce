@@ -198,8 +198,11 @@ export const MoneyInput = forwardRef<HTMLInputElement, MoneyInputProps>(function
         value={display}
         onFocus={(e) => {
           setFocused(true);
-          setText(paiseToEditText(value));
-          setTimeout(() => e.target.select(), 0);
+          const editText = paiseToEditText(value);
+          setText(editText);
+          const el = e.target;
+          // select() also focuses in Chromium: skip it if the user already moved on or started typing.
+          setTimeout(() => document.activeElement === el && el.value === editText && el.select(), 0);
           onFocus?.(e);
         }}
         onBlur={(e) => {
@@ -244,7 +247,10 @@ export const NumberInput = forwardRef<HTMLInputElement, NumberInputProps>(functi
       value={text}
       onFocus={(e) => {
         setFocused(true);
-        setTimeout(() => e.target.select(), 0);
+        const el = e.target;
+        const before = el.value;
+        // select() also focuses in Chromium: skip it if the user already moved on or started typing.
+        setTimeout(() => document.activeElement === el && el.value === before && el.select(), 0);
         onFocus?.(e);
       }}
       onBlur={(e) => {

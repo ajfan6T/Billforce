@@ -133,6 +133,7 @@ body { width: ${width}mm; margin: 0 auto; padding: 2mm 0 4mm; font-family: "Sego
 .row span:last-child { text-align: right; white-space: nowrap; font-variant-numeric: tabular-nums; }
 .row.b { font-weight: 700; }
 .row.big { font-size: ${fs + 4}px; font-weight: 700; border-top: 1px dashed #000; border-bottom: 1px dashed #000; padding: 2px 0; margin: 2px 0; }
+.sep + .row.big { border-top: 0; }
 .party { margin-top: 2px; }
 table { width: 100%; border-collapse: collapse; }
 th { font-weight: 700; border-bottom: 1px dashed #000; text-align: right; padding: 1px 0 2px 3px; }

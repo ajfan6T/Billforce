@@ -200,12 +200,14 @@ function normalize(ctx: Ctx, input: ReceiptInput, customerName: string, dueBefor
   const amount = input.amount;
   const discount = input.discount ?? 0;
   if (amount + discount <= 0) throw fail.validation('Enter the amount received', { amount: 'Enter the amount received' });
-  if (discount > 0 && discount > Math.max(dueBefore, 0)) {
+  // A discount settles what is left unpaid; it can never turn into an advance.
+  const maxDiscount = Math.max(dueBefore - amount, 0);
+  if (discount > maxDiscount) {
     throw fail.validation(
       dueBefore <= 0
         ? `${customerName} has nothing due, so a discount cannot be given.`
-        : `The discount cannot be more than the amount due (${formatINR(dueBefore)}).`,
-      { discount: 'Discount is more than the amount due' },
+        : `The discount cannot be more than the amount still due after this payment (${formatINR(maxDiscount)}).`,
+      { discount: `At most ${formatINR(maxDiscount)}` },
     );
   }
   return {

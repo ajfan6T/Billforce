@@ -25,7 +25,7 @@ export function linkPath(link: AppLink): string {
     case 'salary':
       return `/employees/salary/${link.id}`;
     case 'advance':
-      return `/employees/advances`;
+      return `/employees/advances?id=${link.id}`;
     case 'customer':
       return `/customers/${link.id}`;
     case 'supplier':
