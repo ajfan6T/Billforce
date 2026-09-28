@@ -58,7 +58,7 @@ export function SalaryPage() {
       align: 'right',
       value: (r) => r.slip?.paidDays ?? r.paidDays,
       render: (r) => (
-        <span title={r.daysEmployed < r.daysInMonth ? `Worked ${r.daysEmployed} of ${r.daysInMonth} days` : undefined}>
+        <span title={r.daysEmployed < r.daysInMonth ? `Worked ${r.daysEmployed} ${r.daysEmployed === 1 ? 'day' : 'days'} of ${r.daysInMonth}` : undefined}>
           <b>{fmtDays(r.slip?.paidDays ?? r.paidDays)}</b>
           <span className="faint"> / {r.daysInMonth}</span>
           {!r.slip && r.noAttendance && (

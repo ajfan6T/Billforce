@@ -63,7 +63,7 @@ export function PurchasesListPage() {
         describeRange(range),
         [
           { key: 'date', label: 'Date', type: 'date', width: 11, get: (r: Row) => r.date },
-          { key: 'no', label: 'Purchase no', width: 16, get: (r) => r.purchaseNo },
+          { key: 'no', label: 'Purchase no', width: 16, nowrap: true, get: (r) => r.purchaseNo },
           { key: 'supplier', label: 'Supplier', width: 22, get: (r) => r.supplierName ?? 'Cash purchase' },
           { key: 'billNo', label: 'Their bill no', width: 14, get: (r) => r.supplierBillNo },
           { key: 'items', label: 'Items', width: 30, get: (r) => r.items },

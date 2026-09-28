@@ -506,7 +506,7 @@ export function getLoan(ctx: Ctx, id: number, range?: { from?: string | null; to
     columns: [
       { key: 'date', label: 'Date', type: 'date', width: 11 },
       { key: 'particulars', label: 'Particulars', width: 40 },
-      { key: 'no', label: 'Voucher no', width: 15 },
+      { key: 'no', label: 'Voucher no', width: 15, nowrap: true },
       { key: 'taken', label: taken ? 'Received' : 'Given', type: 'money', width: 14 },
       { key: 'repaid', label: taken ? 'Repaid' : 'Collected', type: 'money', width: 14 },
       { key: 'interest', label: taken ? 'Interest paid' : 'Interest received', type: 'money', width: 14 },

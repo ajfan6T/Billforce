@@ -365,7 +365,7 @@ export function salesByItem(ctx: Ctx, r: SalesRange): SalesInsight {
   const totalReturned = list.reduce((s, v) => s + v.returnedAmount, 0);
   if (rows.length) {
     rows.push({
-      cells: { item: `Total (${list.length} items)`, soldAmount: totalSold, returnedAmount: totalReturned || null, amount: totalAmount, share: totalAmount ? 100 : null },
+      cells: { item: `Total (${list.length} ${list.length === 1 ? 'item' : 'items'})`, soldAmount: totalSold, returnedAmount: totalReturned || null, amount: totalAmount, share: totalAmount ? 100 : null },
       style: 'total',
     });
   }
@@ -439,7 +439,8 @@ export function salesByCustomer(ctx: Ctx, r: SalesRange): SalesInsight {
     ...(id ? { link: { kind: 'customer', id } } : { style: 'muted' as const }),
   }));
   const credit = list.reduce((s, x) => s + x.a.credit, 0);
-  if (rows.length) rows.push({ cells: { customer: `Total (${list.filter((x) => x.id).length} customers${map.has(0) ? ' + walk-ins' : ''})`, phone: null, ...aggCells(t), credit: credit || null, share: totalNet ? 100 : null }, style: 'total' });
+  const customerCount = list.filter((x) => x.id).length;
+  if (rows.length) rows.push({ cells: { customer: `Total (${customerCount} ${customerCount === 1 ? 'customer' : 'customers'}${map.has(0) ? ' + walk-ins' : ''})`, phone: null, ...aggCells(t), credit: credit || null, share: totalNet ? 100 : null }, style: 'total' });
   const top = list.slice(0, 10);
   return {
     report: {
@@ -447,7 +448,7 @@ export function salesByCustomer(ctx: Ctx, r: SalesRange): SalesInsight {
       subtitle: rangeSubtitle(r.from, r.to),
       columns: [
         { key: 'customer', label: 'Customer', width: 26 },
-        { key: 'phone', label: 'Phone', width: 13 },
+        { key: 'phone', label: 'Phone', width: 13, nowrap: true },
         ...AGG_COLUMNS,
         { key: 'credit', label: 'On credit', type: 'money', width: 13 },
         { key: 'share', label: 'Share %', type: 'percent', width: 9 },

@@ -100,7 +100,7 @@ export function ExpensesPage() {
       describeRange(range),
       [
         { key: 'date', label: 'Date', type: 'date', width: 11, get: (r: Row) => r.date },
-        { key: 'no', label: 'No', width: 16, get: (r) => r.expenseNo },
+        { key: 'no', label: 'No', width: 16, nowrap: true, get: (r) => r.expenseNo },
         { key: 'head', label: 'Expense head', width: 24, get: (r) => r.accountName },
         { key: 'payee', label: 'Paid to', width: 22, get: (r) => r.supplierName ?? r.payee },
         { key: 'mode', label: 'Paid by', width: 12, get: (r) => (r.status === 'cancelled' ? 'Cancelled' : fmtMode(r.mode)) },
@@ -110,7 +110,7 @@ export function ExpensesPage() {
       ],
       list.data.rows,
       {
-        totals: { date: null, no: 'Total', head: `${list.data.totals.count} expenses`, payee: null, mode: null, ref: null, remarks: null, amount: list.data.totals.amount },
+        totals: { date: null, no: 'Total', head: `${list.data.totals.count} ${list.data.totals.count === 1 ? 'expense' : 'expenses'}`, payee: null, mode: null, ref: null, remarks: null, amount: list.data.totals.amount },
         summary: [
           { label: 'Total', value: list.data.totals.amount, type: 'money' },
           { label: 'Cash', value: list.data.totals.cash, type: 'money' },
@@ -157,7 +157,7 @@ export function ExpensesPage() {
       </Card>
 
       <StatGrid>
-        <Stat label="Total expenses" value={formatINR(t?.amount ?? 0)} hint={`${t?.count ?? 0} entries · ${describeRange(range)}`} />
+        <Stat label="Total expenses" value={formatINR(t?.amount ?? 0)} hint={`${t?.count ?? 0} ${t?.count === 1 ? 'entry' : 'entries'} · ${describeRange(range)}`} />
         <Stat label="Paid in cash" value={formatINR(t?.cash ?? 0)} />
         <Stat label="Paid by UPI / bank" value={formatINR((t?.upi ?? 0) + (t?.bank ?? 0))} />
         <Stat label="On credit" value={formatINR(t?.credit ?? 0)} tone={t?.credit ? 'amber' : undefined} hint={t?.cancelled ? `${t.cancelled} cancelled not counted` : 'Owed to suppliers'} />
@@ -206,7 +206,7 @@ export function ExpensesPage() {
               rowKey={(r) => r.id}
               onRowClick={(r) => navigate(`/accounts/expenses/${r.id}`)}
               rowClassName={(r) => (r.status === 'cancelled' ? 'cancelled' : '')}
-              footer={t ? { accountName: `${t.count} expenses`, amount: <span className="money">{formatINR(t.amount)}</span> } : undefined}
+              footer={t ? { accountName: `${t.count} ${t.count === 1 ? 'expense' : 'expenses'}`, amount: <span className="money">{formatINR(t.amount)}</span> } : undefined}
               empty={
                 dq || head || mode ? (
                   'No expenses match your filters'

@@ -6,7 +6,7 @@ import { Field, TextInput } from '../../components/forms';
 import { Modal } from '../../components/modal';
 import { useMutation, useQuery } from '../../hooks';
 import { useAuth } from '../../auth';
-import { ROLE_LABELS } from '../../../shared/constants';
+import { ROLE_LABELS, WRONG_LOGIN_MESSAGE } from '../../../shared/constants';
 
 function RecoveryModal({ open, onClose }: { open: boolean; onClose: () => void }) {
   const [code, setCode] = useState('');
@@ -241,6 +241,8 @@ export function LockScreen() {
       pwRef.current?.focus();
     }
   };
+  // Only the password is asked here, so "Wrong username or password" would confuse; the lockout message stays.
+  const error = m.error === WRONG_LOGIN_MESSAGE ? 'Wrong password. Try again.' : m.error;
   return createPortal(
     <div className="lock-overlay" ref={overlayRef} role="dialog" aria-modal="true" aria-labelledby="lock-title" onMouseDown={(e) => e.target === e.currentTarget && e.preventDefault()}>
       <div className="auth-card">
@@ -261,7 +263,7 @@ export function LockScreen() {
           <Field label="Password">
             <TextInput ref={pwRef} type="password" value={password} onChange={(e) => setPassword(e.target.value)} autoFocus autoComplete="current-password" />
           </Field>
-          {m.error && <Alert tone="red">{m.error}</Alert>}
+          {error && <Alert tone="red">{error}</Alert>}
           <Button type="submit" variant="primary" size="lg" block loading={m.loading} disabled={!password}>
             Unlock
           </Button>

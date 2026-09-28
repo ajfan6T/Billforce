@@ -319,7 +319,7 @@ function GoodsReturn({ cfg, initialBillId }: { cfg: ApiOutput<'sales.posConfig'>
             <div className="sl-refund-limits small" aria-label="Refund limits">
               <div className="tr">
                 <span className="muted">Received on this bill</span>
-                <span className="money">{formatINR(b.paid + data.paidLater)}</span>
+                <span className="money">{formatINR(data.moneyReceived)}</span>
               </div>
               {data.paidLater > 0 && (
                 <div className="tr small">
@@ -352,7 +352,7 @@ function GoodsReturn({ cfg, initialBillId }: { cfg: ApiOutput<'sales.posConfig'>
             </Field>
             {refund.mode === 'credit' && <div className="small muted">The amount will be taken off {b.customerName}'s balance.</div>}
             {b.customerId && data.moneyRefundable <= 0 && (
-              <div className="small muted">{b.paid + data.paidLater > 0 ? 'What was paid on this bill has already been paid back' : 'Nothing has been paid on this bill yet'}, so the return is adjusted in the account.</div>
+              <div className="small muted">{data.moneyReceived > 0 ? 'What was paid on this bill has already been paid back' : 'Nothing has been paid on this bill yet'}, so the return is adjusted in the account.</div>
             )}
             {!b.customerId && <div className="small faint">Walk-in bill: the refund is paid back in money, up to what was paid.</div>}
             {overMoney && b.customerId && (

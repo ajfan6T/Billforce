@@ -496,8 +496,18 @@ describe('payments received', () => {
     expect(html).toContain('Anita &lt;Desai&gt;');
     expect(html).toContain('₹1,234.50');
     expect(html).toContain('Rupees One Thousand Two Hundred Thirty Four and Fifty Paise Only');
-    expect(html).toContain('Previous balance: ₹1,500.00 Dr');
+    // The slip goes to the customer: both balances in plain words, no Dr / Cr.
+    expect(html).toContain('Previous balance: ₹1,500.00 due');
     expect(html).toContain('Balance now: ₹265.00 due');
+    expect(html).not.toMatch(/ (Dr|Cr)\b/);
+    const adv = await t.call('customers.create', { name: 'Ravi', openingBalance: { amount: 20000, direction: 'advance' } });
+    const more = await t.call('receipts.create', { customerId: adv.id, amount: 5000, mode: 'cash' });
+    const advHtml = (await t.call('receipts.receiptHtml', { id: more.id })).html;
+    expect(advHtml).toContain('Previous balance: ₹200.00 advance');
+    expect(advHtml).toContain('Balance now: ₹250.00 advance');
+    const settled = await t.call('customers.create', { name: 'Mohan', openingBalance: { amount: 5000, direction: 'receivable' } });
+    const full = await t.call('receipts.create', { customerId: settled.id, amount: 5000, mode: 'cash' });
+    expect((await t.call('receipts.receiptHtml', { id: full.id })).html).toContain('Balance now: Nil');
     expect(html).toContain('UPI · Ref UPI-42');
     expect(html).toContain('Sharma General Store');
     expect(html).not.toContain('DUPLICATE');

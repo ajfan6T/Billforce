@@ -67,7 +67,8 @@ tests/               vitest; helpers.ts gives createTestApp(), ledgerProblems(),
 * **Closed years**: `postEntry/replaceEntry/voidEntry` already refuse dates in a closed FY or before books start. Don't bypass.
 * **Reports / lists that can be exported** return `ReportData` (`shared/report.ts`) and are shown with `<ReportView/>` +
   `<ExportButtons/>` (Excel / CSV / PDF / Print handled generically by `files.exportReport` / `files.printReport`).
-  Every report takes a date filter (`{from, to}` or `{asOf}`); UI uses `<DateRangePicker/>` / `<AsOnPicker/>`.
+  In PDF / print, date columns never wrap; mark short code columns (bill / voucher numbers, phone) `nowrap: true` so
+  the long text (particulars, items) wraps instead. Every report takes a date filter (`{from, to}` or `{asOf}`); UI uses `<DateRangePicker/>` / `<AsOnPicker/>`.
   Row links: `link: { kind, id }` with kinds `bill | credit_note | receipt | purchase | supplier_payment | expense | journal | salary | advance | customer | supplier | employee | account | loan`.
   Drill-downs keep the period: `useOpenLink(period)` / `linkPath(link, period)` / `withPeriod(path, period)` (`renderer/links.ts`)
   add `?from=&to=&preset=` for ledgers and party accounts; pages read it through `useRange` / `useReportRange` (the address
@@ -147,9 +148,9 @@ Core helpers other modules may call: `touchItemUsage`, `searchCustomers`, `quick
 | Discounts need `billing.discount`; a catalogue item billed at other than its list rate, or any one-time (free-text) line, needs `billing.rate` | `sales.create` / `sales.update` |
 | Backdated bills and payments need `billing.backdate`; future dates are refused; the POS always saves today's date unless the user picked one | sales, receipts |
 | A return refunds at most what the customer paid for each unit (line + bill discount + round-off shares); all returns on a bill never exceed the bill total, and the return that settles the bill refunds exactly what is left | `returns.create` (`src/shared/billing.ts` helpers) |
-| Money back (cash / UPI / bank) is limited to what was received on the bill, plus the part of its credit the customer has paid since; the rest must be adjusted in the customer's account | `returns.billReturnable` |
+| Money back (cash / UPI / bank) is limited to the money received for the bill: at the counter, plus the money of later payments (not their discounts, credit notes or write-offs) shared out oldest dues first, once the customer no longer owes that part; the rest must be adjusted in the customer's account. Cancelling or cutting a payment that such a refund relied on returns a warning | `returns.billReturnable`, `receipts.cancel` / `receipts.update` |
 | Credit notes without goods need `returns.adjust` | returns |
-| Customer credit limits / opening balances need `customers.credit`; supplier opening balances need `accounts.manage`; employee opening advances need `employees.salary` | customers, suppliers, employees |
+| Customer credit limits / opening balances need `customers.credit`; supplier opening balances need `accounts.manage`; employee opening advances need `employees.salary` | customers, suppliers, employees; the import preview shows such rows as errors |
 | With "Stop bills over the credit limit" on, a credit bill over the limit is refused, and customers without a limit can buy on credit only when a user with `customers.credit` bills them | `sales.create` |
 | Receipt discounts need `billing.discount`; reprints need `billing.reprint` and are marked DUPLICATE | receipts, bills, salary slips |
 | Payments that would take a cash / bank account below zero are allowed but warned (`negativeBalanceWarning`) | all outflows |

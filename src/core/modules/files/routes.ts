@@ -12,6 +12,7 @@ const zReport = z.object({
       type: z.enum(['text', 'money', 'number', 'qty', 'date', 'datetime', 'percent', 'drcr']).optional(),
       width: z.number().optional(),
       align: z.enum(['left', 'right', 'center']).optional(),
+      nowrap: z.boolean().optional(),
     }),
   ),
   rows: z.array(

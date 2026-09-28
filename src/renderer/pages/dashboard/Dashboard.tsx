@@ -304,7 +304,18 @@ export function DashboardPage() {
               value={formatINR(t.netSales)}
               tone="blue"
               icon={<Receipt size={16} />}
-              hint={`${t.bills} bill${t.bills === 1 ? '' : 's'}${t.returns ? ` · returns ${formatINR(t.returns)}` : ''}`}
+              hint={
+                // Wraps (at the dot) on narrow cards so the returns figure is never cut off.
+                <span className="db-hint-wrap">
+                  {t.bills} bill{t.bills === 1 ? '' : 's'}
+                  {t.returns ? (
+                    <>
+                      {' · '}
+                      <span className="nowrap">returns {formatINR(t.returns)}</span>
+                    </>
+                  ) : null}
+                </span>
+              }
               onClick={() => navigate(can('reports.sales') ? withPeriod('/reports/sales?tab=day', period('today', d.today)) : '/sales/bills')}
             />
           )}

@@ -327,7 +327,7 @@ export function capitalSummary(ctx: Ctx, range: { from: string; to: string }): C
     columns: [
       { key: 'date', label: 'Date', type: 'date', width: 11 },
       { key: 'particulars', label: 'Particulars', width: 44 },
-      { key: 'no', label: 'Voucher no', width: 16 },
+      { key: 'no', label: 'Voucher no', width: 16, nowrap: true },
       { key: 'added', label: 'Added', type: 'money', width: 14 },
       { key: 'withdrawn', label: 'Withdrawn', type: 'money', width: 14 },
       { key: 'balance', label: 'Balance', type: 'money', width: 15 },

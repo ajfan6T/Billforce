@@ -1,4 +1,4 @@
-import type { ReportData } from '../../shared/report';
+import type { ReportColumn, ReportData } from '../../shared/report';
 import { cellText, columnAlign, escapeHtml } from './format';
 import { formatDrCr, formatINR } from '../../shared/money';
 import { formatDateTime } from '../../shared/dates';
@@ -10,10 +10,16 @@ export interface ReportHtmlOptions {
   generatedBy?: string;
 }
 
+/** Cells kept on one line: dates, and short codes the report marks (bill / voucher numbers, phone numbers). */
+export function keepsOnOneLine(col: ReportColumn): boolean {
+  return col.nowrap ?? (col.type === 'date' || col.type === 'datetime');
+}
+
 /** A4 printable HTML for any report; used for PDF export and printing. */
 export function reportToHtml(report: ReportData, opts: ReportHtmlOptions = {}): string {
+  const cls = (c: ReportColumn) => `${columnAlign(c)}${keepsOnOneLine(c) ? ' nowrap' : ''}`;
   const head = report.columns
-    .map((c) => `<th style="text-align:${columnAlign(c)}">${escapeHtml(c.label)}</th>`)
+    .map((c) => `<th class="${cls(c)}" style="text-align:${columnAlign(c)}">${escapeHtml(c.label)}</th>`)
     .join('');
   const body = report.rows
     .map((row) => {
@@ -21,7 +27,7 @@ export function reportToHtml(report: ReportData, opts: ReportHtmlOptions = {}): 
         .map((c, i) => {
           const text = cellText(c, row.cells[c.key] ?? null);
           const pad = i === 0 && row.indent ? ` style="padding-left:${6 + row.indent * 14}px"` : '';
-          return `<td class="${columnAlign(c)}"${pad}>${escapeHtml(text)}</td>`;
+          return `<td class="${cls(c)}"${pad}>${escapeHtml(text)}</td>`;
         })
         .join('');
       return `<tr class="${row.style ?? 'normal'}">${tds}</tr>`;
@@ -65,6 +71,7 @@ export function reportToHtml(report: ReportData, opts: ReportHtmlOptions = {}): 
   td { padding: 4px 6px; border-bottom: 1px solid #e2e8f0; vertical-align: top; font-variant-numeric: tabular-nums; }
   td.right { text-align: right; white-space: nowrap; }
   td.center { text-align: center; }
+  td.nowrap { white-space: nowrap; }
   tr { page-break-inside: avoid; }
   tr.group td, tr.section td { font-weight: 700; background: #f1f5f9; }
   tr.subtotal td { font-weight: 600; border-top: 1px solid #94a3b8; }

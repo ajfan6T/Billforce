@@ -9,7 +9,7 @@
  *          the ledger exactly like entering them by hand).
  */
 import type { Ctx } from '../../context';
-import { assertCan, requireSession } from '../../context';
+import { assertCan, can, requireSession } from '../../context';
 import { AppError, fail } from '../../errors';
 import { logActivity } from '../../audit';
 import { getSection } from '../../settings';
@@ -499,6 +499,14 @@ function prepareRows(ctx: Ctx, def: TypeDef, sheet: ParsedSheet, headerIdx: numb
   const booksStart = getSection(ctx, 'accounts').booksStartDate;
   const openingLocked = isDateInClosedYear(ctx, booksStart);
   const lockedMsg = `cannot be added or changed because the financial year ${fyOf(booksStart).name} (your first year) is closed`;
+  // The same permissions the customer / supplier / employee forms need; checked here so that such a
+  // row shows as an error in the preview and the other rows can still be imported.
+  const mayCredit = can(ctx, 'customers.credit');
+  const maySupplierOpening = can(ctx, 'accounts.manage');
+  const mayAdvance = can(ctx, 'employees.salary');
+  const creditDenied = 'you are not allowed to set credit limits or opening balances. Ask the owner or manager, or leave this column empty';
+  const supplierOpeningDenied = 'you are not allowed to set or change opening balances of suppliers. Ask the owner or manager, or leave this column empty';
+  const advanceDenied = 'you are not allowed to set or change the advance given before your books started. Ask the owner or manager, or leave this column empty';
   const dataRows = sheet.rows.slice(headerIdx + 1);
   const out: Prepared[] = [];
 
@@ -612,7 +620,15 @@ function prepareRows(ctx: Ctx, def: TypeDef, sheet: ParsedSheet, headerIdx: numb
             ['opening balance', exOpening, opening],
           ]);
           if (opening !== undefined && opening !== exOpening && openingLocked && mode === 'update') r.error('opening', lockedMsg);
-        } else if (opening && openingLocked) r.error('opening', lockedMsg);
+          if (!mayCredit && mode === 'update') {
+            if (creditLimit !== undefined && creditLimit !== ex.credit_limit) r.error('creditLimit', creditDenied);
+            if (opening !== undefined && opening !== exOpening) r.error('opening', creditDenied);
+          }
+        } else {
+          if (opening && openingLocked) r.error('opening', lockedMsg);
+          if (!mayCredit && creditLimit !== undefined) r.error('creditLimit', creditDenied);
+          if (!mayCredit && opening) r.error('opening', creditDenied);
+        }
       }
       data = { name, phone, address, email, creditLimit, opening };
     } else if (def.type === 'suppliers') {
@@ -640,7 +656,11 @@ function prepareRows(ctx: Ctx, def: TypeDef, sheet: ParsedSheet, headerIdx: numb
             ['opening balance', exOpening, opening],
           ]);
           if (opening !== undefined && opening !== exOpening && openingLocked && mode === 'update') r.error('opening', lockedMsg);
-        } else if (opening && openingLocked) r.error('opening', lockedMsg);
+          if (opening !== undefined && opening !== exOpening && !maySupplierOpening && mode === 'update') r.error('opening', supplierOpeningDenied);
+        } else {
+          if (opening && openingLocked) r.error('opening', lockedMsg);
+          if (opening && !maySupplierOpening) r.error('opening', supplierOpeningDenied);
+        }
       }
       data = { name, phone, address, contactPerson, email, opening };
     } else {
@@ -674,8 +694,10 @@ function prepareRows(ctx: Ctx, def: TypeDef, sheet: ParsedSheet, headerIdx: numb
             ['advance', exOpening, openingAdvance],
           ]);
           if (openingAdvance !== undefined && openingAdvance !== exOpening && openingLocked && mode === 'update') r.error('openingAdvance', lockedMsg);
+          if (openingAdvance !== undefined && openingAdvance !== exOpening && !mayAdvance && mode === 'update') r.error('openingAdvance', advanceDenied);
         } else {
           if (openingAdvance && openingLocked) r.error('openingAdvance', lockedMsg);
+          if (openingAdvance && !mayAdvance) r.error('openingAdvance', advanceDenied);
           if (salaryAmount === undefined && !r.fieldErrors.salaryAmount) r.warnings.push('No salary amount - you can add it later');
         }
       }

@@ -501,7 +501,7 @@ export function customerOutstanding(ctx: Ctx, asOf: string): ReportData {
     subtitle: `As on ${formatDate(asOf)}`,
     columns: [
       { key: 'name', label: 'Customer', width: 28 },
-      { key: 'phone', label: 'Phone', width: 14 },
+      { key: 'phone', label: 'Phone', width: 14, nowrap: true },
       { key: 'due', label: 'Due', type: 'money', width: 14 },
       { key: 'advance', label: 'Advance', type: 'money', width: 14 },
       { key: 'lastBill', label: 'Last bill', type: 'date', width: 11 },

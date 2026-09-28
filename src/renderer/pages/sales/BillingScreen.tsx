@@ -425,18 +425,29 @@ function PosForm({
   const creditPart = Math.max(0, total - paid);
   const totalQty = roundQty(lines.reduce((s, l) => s + (l.qty ?? 0), 0));
   const oldCreditSameCustomer = editBill && customer && editBill.customerId === customer.id ? editBill.credit : 0;
-  const dueAfter = customer ? customer.balance - oldCreditSameCustomer + creditPart : 0;
-  const overLimit = !!customer && creditPart > 0 && !!customer.creditLimit && customer.creditLimit > 0 && dueAfter > customer.creditLimit;
-  // Limits enforced: a customer with no limit gets credit only from users who may set limits (checked again
-  // when saving; a hidden limit is not known here).
-  const noLimitSet =
-    cfg.enforceCreditLimit &&
-    !!customer &&
-    !customer.balanceHidden &&
-    creditPart > 0 &&
-    !(customer.creditLimit && customer.creditLimit > 0) &&
-    !can('customers.credit') &&
-    !(editBill && editBill.customerId === customer.id && creditPart <= editBill.credit);
+  /** Credit-limit checks for keeping `credit` of this bill on the customer's account. */
+  const creditCheck = (credit: number) => {
+    const due = customer ? customer.balance - oldCreditSameCustomer + credit : 0;
+    const over = !!customer && credit > 0 && !!customer.creditLimit && customer.creditLimit > 0 && due > customer.creditLimit;
+    // Limits enforced: a customer with no limit gets credit only from users who may set limits (checked again
+    // when saving; a hidden limit is not known here).
+    const noLimit =
+      cfg.enforceCreditLimit &&
+      !!customer &&
+      !customer.balanceHidden &&
+      credit > 0 &&
+      !(customer.creditLimit && customer.creditLimit > 0) &&
+      !can('customers.credit') &&
+      !(editBill && editBill.customerId === customer.id && credit <= editBill.credit);
+    const problem =
+      over && cfg.enforceCreditLimit
+        ? `${customer!.name} would go over the credit limit of ${formatINR(customer!.creditLimit!)}.`
+        : noLimit
+          ? `${customer!.name} has no credit limit set. Ask the owner to set a credit limit for this customer first, or take the full payment now.`
+          : null;
+    return { due, over, problem };
+  };
+  const { due: dueAfter, over: overLimit, problem: creditProblem } = creditCheck(creditPart);
 
   const problems = useMemo(() => {
     const out: Array<{ message: string; key?: string; field?: CellField | 'customer' | 'split' | 'billDisc' }> = [];
@@ -453,12 +464,9 @@ function PosForm({
     if (lines.length && total <= 0 && !out.length) out.push({ message: 'The bill total must be more than zero.' });
     if (split && splitPaid > total) out.push({ message: `Payments (${formatINR(splitPaid)}) are more than the total (${formatINR(total)}).`, field: 'split' });
     if (creditPart > 0 && !customer && total > 0) out.push({ message: `Choose a customer to keep ${formatINR(creditPart)} on credit.`, field: 'customer' });
-    if (overLimit && cfg.enforceCreditLimit) out.push({ message: `${customer!.name} would go over the credit limit of ${formatINR(customer!.creditLimit!)}.`, field: 'customer' });
-    if (noLimitSet) {
-      out.push({ message: `${customer!.name} has no credit limit set. Ask the owner to set a credit limit for this customer first, or take the full payment now.`, field: 'customer' });
-    }
+    if (creditProblem) out.push({ message: creditProblem, field: 'customer' });
     return out;
-  }, [lines, calc, total, split, splitPaid, creditPart, customer, overLimit, noLimitSet, cfg.enforceCreditLimit]);
+  }, [lines, calc, total, split, splitPaid, creditPart, customer, creditProblem]);
 
   useEffect(() => {
     if (error) setError(null);
@@ -683,6 +691,14 @@ function PosForm({
         const short = total - cashReceived;
         if (!customer) {
           setError(`Cash received (${formatINR(cashReceived)}) is less than the total (${formatINR(total)}). Take the full amount, or choose a customer to keep ${formatINR(short)} on credit.`);
+          cashRef.current?.focus();
+          return;
+        }
+        // The short part goes on credit, so the credit limit rules apply to it: say so now instead of
+        // asking "Keep on credit?" and then being refused.
+        const limit = creditCheck(short).problem;
+        if (limit) {
+          setError(`Only ${formatINR(cashReceived)} was received against ${formatINR(total)}. ${limit}`);
           cashRef.current?.focus();
           return;
         }

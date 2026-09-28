@@ -24,6 +24,14 @@ export function BillsList() {
   const navigate = useNavigate();
   const { can } = useAuth();
   const canViewAll = can('billing.view');
+  // Only offer what this user can do on a bill (a cashier usually can reprint, not edit or cancel).
+  const billActions = [can('billing.reprint') && 'reprint', can('billing.edit') && 'edit', can('billing.cancel') && 'cancel'].filter(Boolean) as string[];
+  const billActionsHint =
+    billActions.length === 0
+      ? 'Click a bill to see it.'
+      : billActions.length === 1
+        ? `Click a bill to see or ${billActions[0]} it.`
+        : `Click a bill to see it, ${billActions.slice(0, -1).join(', ')} or ${billActions[billActions.length - 1]} it.`;
   const [range, setRange] = useState<RangeValue>(() => rangeFromPreset('today', todayISO()));
   const [q, setQ] = useState('');
   const [status, setStatus] = useState<'' | 'active' | 'cancelled'>('');
@@ -88,10 +96,10 @@ export function BillsList() {
       title: 'Bills',
       subtitle: `${searchAll ? 'All dates' : describeRange({ from: data.from, to: data.to })}${status ? ` · ${status === 'active' ? 'Active' : 'Cancelled'}` : ''}${mode ? ` · ${BILL_PAYMENT_MODE_LABELS[mode]}` : ''}${dq ? ` · "${dq}"` : ''}`,
       columns: [
-        { key: 'billNo', label: 'Bill no', width: 16 },
+        { key: 'billNo', label: 'Bill no', width: 16, nowrap: true },
         { key: 'date', label: 'Date', type: 'date', width: 11 },
         { key: 'customer', label: 'Customer', width: 24 },
-        { key: 'phone', label: 'Phone', width: 14 },
+        { key: 'phone', label: 'Phone', width: 14, nowrap: true },
         { key: 'items', label: 'Items', width: 36 },
         { key: 'total', label: 'Total', type: 'money', width: 13 },
         { key: 'paid', label: 'Paid', type: 'money', width: 13 },
@@ -243,7 +251,7 @@ export function BillsList() {
           </div>
         )}
       </div>
-      <p className="faint small mt-1">Totals leave out cancelled bills. Click a bill to see it, reprint, edit or cancel it.</p>
+      <p className="faint small mt-1">Totals leave out cancelled bills. {billActionsHint}</p>
     </Page>
   );
 }

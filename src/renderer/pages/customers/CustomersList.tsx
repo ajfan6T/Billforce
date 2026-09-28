@@ -74,7 +74,7 @@ export function CustomersListPage() {
         `As on ${formatDate(todayISO())}${q ? ` · matching "${q}"` : ''}`,
         [
           { key: 'name', label: 'Customer', width: 26, get: (r: Row) => r.name + (r.isActive ? '' : ' (inactive)') },
-          { key: 'phone', label: 'Phone', width: 14, get: (r) => r.phone },
+          { key: 'phone', label: 'Phone', width: 14, nowrap: true, get: (r) => r.phone },
           { key: 'address', label: 'Address', width: 30, get: (r) => r.address },
           { key: 'balance', label: 'Balance', type: 'drcr', width: 14, get: (r) => r.balance },
           { key: 'lastBill', label: 'Last bill', type: 'date', width: 11, get: (r) => r.lastBillDate },

@@ -64,7 +64,7 @@ export function AdvancesPage() {
         `${describeRange(range)}${empName ? ` · ${empName}` : ''}`,
         [
           { key: 'date', label: 'Date', type: 'date', width: 11, get: (r: Row) => r.date },
-          { key: 'no', label: 'Advance no', width: 15, get: (r) => r.advanceNo },
+          { key: 'no', label: 'Advance no', width: 15, nowrap: true, get: (r) => r.advanceNo },
           { key: 'employee', label: 'Employee', width: 22, get: (r) => r.employeeName },
           { key: 'mode', label: 'Paid by', width: 9, get: (r) => PAYMENT_MODE_LABELS[r.mode] },
           { key: 'remarks', label: 'Remarks', width: 28, get: (r) => (r.status === 'cancelled' ? `CANCELLED: ${r.cancelReason ?? ''}` : r.remarks) },

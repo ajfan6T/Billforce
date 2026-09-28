@@ -77,7 +77,7 @@ export function EmployeesListPage() {
         [
           { key: 'name', label: 'Employee', width: 24, get: (r: Row) => r.name },
           { key: 'designation', label: 'Designation', width: 16, get: (r) => r.designation },
-          { key: 'phone', label: 'Phone', width: 14, get: (r) => r.phone },
+          { key: 'phone', label: 'Phone', width: 14, nowrap: true, get: (r) => r.phone },
           { key: 'joined', label: 'Joined', type: 'date', width: 11, get: (r) => r.joinDate },
           ...(showPay
             ? [

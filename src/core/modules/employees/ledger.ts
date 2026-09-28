@@ -55,7 +55,7 @@ function describe(ctx: Ctx, e: LedgerEntry): { type: string; number: string; par
       if (s) {
         number = s.salary_no;
         const extra = [s.bonus ? `bonus ${formatINR(s.bonus)}` : '', s.deductions ? `deductions ${formatINR(s.deductions)}` : ''].filter(Boolean).join(', ');
-        particulars = `${monthLabel(s.month, true)} · ${s.paid_days} paid days · gross ${formatINR(s.gross)}${extra ? ` · ${extra}` : ''}`;
+        particulars = `${monthLabel(s.month, true)} · ${s.paid_days} paid ${s.paid_days === 1 ? 'day' : 'days'} · gross ${formatINR(s.gross)}${extra ? ` · ${extra}` : ''}`;
       }
       break;
     }
@@ -160,7 +160,7 @@ export function employeeLedger(ctx: Ctx, employeeId: number, from: string, to: s
     landscape: true,
     columns: [
       { key: 'date', label: 'Date', type: 'date', width: 11 },
-      { key: 'number', label: 'Number', width: 15 },
+      { key: 'number', label: 'Number', width: 15, nowrap: true },
       { key: 'particulars', label: 'Particulars', width: 44 },
       { key: 'given', label: 'Advance given', type: 'money', width: 13 },
       { key: 'recovered', label: 'Recovered', type: 'money', width: 13 },

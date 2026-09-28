@@ -147,7 +147,7 @@ export function SalesInsightsPage() {
         const byLabel = new Map(data.report.rows.map((r) => [r.cells.mode, r]));
         return (
           <>
-            <ChartHeader title="How customers paid at billing" note={values.length ? `${labels.length} modes` : undefined} />
+            <ChartHeader title="How customers paid at billing" note={values.length ? `${labels.length} ${labels.length === 1 ? 'mode' : 'modes'}` : undefined} />
             <ShareBar
               legendColumns={4}
               loading={q.loading}

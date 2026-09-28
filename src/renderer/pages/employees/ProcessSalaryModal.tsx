@@ -208,7 +208,7 @@ export function ProcessSalaryModal({
                           <td>
                             Worked here {formatDate(p.employedFrom)} to {formatDate(p.employedTo)}
                           </td>
-                          <td>{p.daysEmployed} days</td>
+                          <td>{p.daysEmployed} {p.daysEmployed === 1 ? 'day' : 'days'}</td>
                         </tr>
                       )}
                       <tr>

@@ -79,6 +79,9 @@
   overflow: hidden;
   text-overflow: ellipsis;
 }
+.db-stats .stat-hint .db-hint-wrap {
+  white-space: normal;
+}
 
 .db-grid {
   display: grid;

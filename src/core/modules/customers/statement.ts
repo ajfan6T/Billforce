@@ -219,7 +219,7 @@ export function partyStatement(ctx: Ctx, opts: StatementOptions): ReportData {
     columns: [
       { key: 'date', label: 'Date', type: 'date', width: 11 },
       { key: 'type', label: 'Type', width: 16 },
-      { key: 'number', label: 'Number', width: 16 },
+      { key: 'number', label: 'Number', width: 16, nowrap: true },
       { key: 'particulars', label: 'Particulars', width: 40 },
       { key: 'debit', label: isCustomer ? 'Debit (owed)' : 'Debit (paid)', type: 'money', width: 14 },
       { key: 'credit', label: isCustomer ? 'Credit (paid / returned)' : 'Credit (billed)', type: 'money', width: 14 },

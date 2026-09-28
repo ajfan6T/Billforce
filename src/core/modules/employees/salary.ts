@@ -103,12 +103,12 @@ export function salaryRuleText(c: SalaryCalc): { rule: string; working: string }
   if (c.salaryType === 'monthly') {
     return {
       rule: 'Monthly salary is paid for every day of the month the employee works here, except absent days. A half day counts as half a day. Weekly offs, paid leave and days not marked are paid.',
-      working: `${formatINR(c.rate)} × ${formatIndianNumber(c.paidDays, Number.isInteger(c.paidDays) ? 0 : 1)} paid days ÷ ${c.daysInMonth} days in the month = ${formatINR(c.gross)}`,
+      working: `${formatINR(c.rate)} × ${formatIndianNumber(c.paidDays, Number.isInteger(c.paidDays) ? 0 : 1)} paid ${c.paidDays === 1 ? 'day' : 'days'} ÷ ${c.daysInMonth} days in the month = ${formatINR(c.gross)}`,
     };
   }
   return {
     rule: 'Daily wages are paid for each day present and each paid-leave day. A half day counts as half a day. Weekly offs, absent days and days not marked are not paid.',
-    working: `${formatINR(c.rate)} × ${formatIndianNumber(c.paidDays, Number.isInteger(c.paidDays) ? 0 : 1)} paid days = ${formatINR(c.gross)}`,
+    working: `${formatINR(c.rate)} × ${formatIndianNumber(c.paidDays, Number.isInteger(c.paidDays) ? 0 : 1)} paid ${c.paidDays === 1 ? 'day' : 'days'} = ${formatINR(c.gross)}`,
   };
 }
 

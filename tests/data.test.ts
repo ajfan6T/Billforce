@@ -482,11 +482,14 @@ describe('restore', () => {
     expect(restoreLog?.summary).toMatch(/^Restored data from Sharma-General-Store_manual_20260928_100000\.bfbackup \(Sharma General Store\)\. The data from before the restore was saved to /);
     expect(restoreLog?.username).toBe('owner');
     expect(ledgerProblems(f.app)).toEqual([]);
-    // The restored data knows about the safety copy, and the newest file counts as the last backup.
+    // The restored data knows about the safety copy, but "Last backup" is the automatic backup of the restored data
+    // taken straight after the restore, never the safety copy of the data that was replaced.
     expect(f.app.db.value<string>("SELECT path FROM backup_history WHERE kind = 'safety'")).toBe(res.safetyBackupPath);
     const st = await f.call('backup.status');
-    expect(st.lastBackup).toMatchObject({ path: res.safetyBackupPath, kind: 'safety', exists: true });
-    expect(st.backups.map((b: any) => b.kind)).toEqual(['safety', 'manual']);
+    expect(path.basename(res.backupAfterRestore)).toBe('Sharma-General-Store_auto_20260928_120000.bfbackup');
+    expect(st.lastBackup).toMatchObject({ path: res.backupAfterRestore, kind: 'auto', exists: true });
+    expect(st.backups.map((b: any) => b.kind).sort()).toEqual(['auto', 'manual', 'safety']);
+    expect((await f.call('backup.inspect', { path: res.backupAfterRestore })).counts).toMatchObject({ customers: 1, bills: 0 });
 
     // The safety backup holds the data from just before the restore.
     const safety = await f.call('backup.inspect', { path: res.safetyBackupPath });
@@ -819,6 +822,61 @@ describe('import: customers & suppliers', () => {
     expect(bal('Gupta & Sons')).toBe(-500000);
     expect(list.find((s) => s.name === 'Balaji Distributors')).toMatchObject({ contactPerson: 'Suresh Patil', payable: 1250000 });
     expect(systemBalance(t.app, 'AP')).toBe(-1250000 + 200000 - 500000);
+    expect(ledgerProblems(t.app)).toEqual([]);
+  });
+
+  it('shows rows with opening balances or credit limits the user may not set as errors, and imports the rest', async () => {
+    const t = await createTestApp();
+    await t.call('customers.create', { name: 'Old Customer', phone: '98000 00009', creditLimit: 100000 });
+    await t.call('suppliers.create', { name: 'Old Supplier' });
+    t.app.db.run("DELETE FROM role_permissions WHERE role = 'manager' AND permission IN ('customers.credit', 'accounts.manage', 'employees.salary')");
+    await t.loginAs('manager');
+
+    const cus = writeCsv(path.join(tmpDir(), 'c.csv'), [
+      ['Name', 'Phone', 'Credit limit', 'Opening balance'],
+      ['Anita', '98000 00001', '5000', ''],
+      ['Rahul', '98000 00002', '', '300'],
+      ['Plain', '98000 00003', '', ''],
+      ['Old Customer', '98000 00009', '2000', ''],
+    ]);
+    let p = await t.call('import.preview', { type: 'customers', path: cus });
+    expect(p.rows[0].fieldErrors.creditLimit).toMatch(/^you are not allowed to set credit limits or opening balances/);
+    expect(p.rows[1].fieldErrors.opening).toMatch(/^you are not allowed to set credit limits or opening balances/);
+    expect(p.rows[2].errors).toEqual([]);
+    // Existing customers are only checked when they would be updated.
+    expect(p.rows[3]).toMatchObject({ action: 'skip', errors: [] });
+    p = await t.call('import.preview', { type: 'customers', path: cus, duplicateMode: 'update' });
+    expect(p.rows[3].fieldErrors.creditLimit).toMatch(/not allowed/);
+    expect(p.counts).toMatchObject({ create: 1, errors: 3 });
+    expect(await t.call('import.commit', { type: 'customers', path: cus, duplicateMode: 'skip' })).toMatchObject({ created: 1, errors: 2 });
+    // Sending the saved limit back unchanged is fine.
+    const same = writeCsv(path.join(tmpDir(), 'same.csv'), [
+      ['Name', 'Phone', 'Credit limit', 'Address'],
+      ['Old Customer', '98000 00009', '1000', 'Main Road'],
+    ]);
+    p = await t.call('import.preview', { type: 'customers', path: same, duplicateMode: 'update' });
+    expect(p.rows[0]).toMatchObject({ action: 'update', note: 'Will update address', errors: [] });
+
+    const sup = writeCsv(path.join(tmpDir(), 's.csv'), [
+      ['Supplier name', 'Opening balance'],
+      ['Chawla', '5000'],
+      ['Dutta', ''],
+      ['Old Supplier', '100'],
+    ]);
+    p = await t.call('import.preview', { type: 'suppliers', path: sup, duplicateMode: 'update' });
+    expect(p.rows.map((r) => r.fieldErrors.opening ?? null)).toEqual([expect.stringMatching(/^you are not allowed to set or change opening balances of suppliers/), null, expect.stringMatching(/not allowed/)]);
+    expect(await t.call('import.commit', { type: 'suppliers', path: sup, duplicateMode: 'update' })).toMatchObject({ created: 1, updated: 0, errors: 2 });
+
+    const emp = writeCsv(path.join(tmpDir(), 'e.csv'), [
+      ['Employee name', 'Salary', 'Advance given'],
+      ['Shyam', '12000', '2000'],
+      ['Mohan', '10000', ''],
+    ]);
+    p = await t.call('import.preview', { type: 'employees', path: emp });
+    expect(p.rows[0].fieldErrors.openingAdvance).toMatch(/^you are not allowed to set or change the advance given before your books started/);
+    expect(p.counts).toMatchObject({ create: 1, errors: 1 });
+    expect(await t.call('import.commit', { type: 'employees', path: emp, duplicateMode: 'skip' })).toMatchObject({ created: 1, errors: 1 });
+    expect(t.app.db.all<{ name: string }>('SELECT name FROM employees').map((e) => e.name)).toEqual(['Mohan']);
     expect(ledgerProblems(t.app)).toEqual([]);
   });
 

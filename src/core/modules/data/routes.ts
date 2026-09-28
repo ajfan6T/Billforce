@@ -76,6 +76,16 @@ export const dataRoutes = {
    */
   'backup.restore': route({ access: 'data.restore', input: z.object({ path: zPath }), handler: (ctx, input) => backup.restoreBackup(ctx, input.path) }),
 
+  /*
+   * First run on a new computer / after a reinstall: bring back a backup instead of setting up a new business.
+   * No login exists yet, so these are public, and all three refuse once Billforce is set up. Only the file picked
+   * in the dialog can be inspected or restored. No safety copy is taken (there is no data yet); the checks are the
+   * same as a normal restore. Afterwards the app shows the login screen of the restored business.
+   */
+  'setup.pickBackup': route({ access: 'public', handler: (ctx) => backup.pickBackupOnFirstRun(ctx) }),
+  'setup.inspectBackup': route({ access: 'public', input: z.object({ path: zPath }), handler: (ctx, input) => backup.inspectBackupOnFirstRun(ctx, input.path) }),
+  'setup.restoreBackup': route({ access: 'public', input: z.object({ path: zPath }), handler: (ctx, input) => backup.restoreOnFirstRun(ctx, input.path) }),
+
   /* ------------------------------ Import ------------------------------ */
   'import.types': route({ access: 'data.import', handler: (ctx) => importer.importTypes(ctx) }),
 

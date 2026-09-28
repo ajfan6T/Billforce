@@ -132,3 +132,6 @@ export const ATTENDANCE_LABELS: Record<AttendanceStatus, string> = {
   L: 'Paid leave',
   W: 'Weekly off',
 };
+
+/** What a failed login says (wrong password, or an unknown / inactive user). The lock screen words it for a password only. */
+export const WRONG_LOGIN_MESSAGE = 'Wrong username or password';

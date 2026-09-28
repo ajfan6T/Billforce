@@ -49,7 +49,7 @@ export function SupplierPaymentsListPage() {
         describeRange(range),
         [
           { key: 'date', label: 'Date', type: 'date', width: 11, get: (r: Row) => r.date },
-          { key: 'no', label: 'Payment no', width: 16, get: (r) => r.paymentNo },
+          { key: 'no', label: 'Payment no', width: 16, nowrap: true, get: (r) => r.paymentNo },
           { key: 'supplier', label: 'Supplier', width: 24, get: (r) => r.supplierName },
           { key: 'mode', label: 'Mode', width: 8, get: (r) => (r.status === 'cancelled' ? 'Cancelled' : PAYMENT_MODE_LABELS[r.mode]) },
           { key: 'reference', label: 'Reference', width: 16, get: (r) => r.reference },

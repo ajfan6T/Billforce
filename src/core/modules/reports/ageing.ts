@@ -208,7 +208,7 @@ function ageing(ctx: Ctx, which: 'receivables' | 'payables', asOf: string): Agei
       subtitle: `As on ${formatDate(asOf)}`,
       columns: [
         { key: 'party', label: k.partyLabel, width: 28 },
-        { key: 'phone', label: 'Phone', width: 13 },
+        { key: 'phone', label: 'Phone', width: 13, nowrap: true },
         { key: 'balance', label: k.dueLabel, type: 'money', width: 15 },
         ...AGE_BUCKETS.map((b) => ({ key: b.key, label: b.label, type: 'money' as const, width: 14 })),
         { key: 'oldest', label: 'Oldest due since', type: 'date', width: 13 },

@@ -20,7 +20,7 @@ import { DatabaseSync } from 'node:sqlite';
 import type { Ctx } from '../../context';
 import { now } from '../../context';
 import { AppError, fail } from '../../errors';
-import { getSection, updateSection } from '../../settings';
+import { getMeta, getSection, updateSection } from '../../settings';
 import { logActivity } from '../../audit';
 import { Db } from '../../db/database';
 import { LATEST_SCHEMA_VERSION, migrate } from '../../db/migrate';
@@ -722,8 +722,9 @@ export function backupStatus(ctx: Ctx) {
   // After a restore the database cannot know about backups taken later (e.g. the backup it came from),
   // so a newer Billforce backup file in the folder counts as the last backup (files dated only by
   // their modified time, e.g. copied in from elsewhere, do not).
-  // A damaged file (e.g. left by an older version when the disk was full) never counts as a backup.
-  const newest = backups.find((b) => b.kind !== 'other' && !b.damaged);
+  // A damaged file (e.g. left by an older version when the disk was full) never counts as a backup, and
+  // neither does a safety copy: the newest one is usually the data a restore has just replaced.
+  const newest = backups.find((b) => b.kind !== 'other' && b.kind !== 'safety' && !b.damaged);
   if (newest && (!lastBackup || newest.at > lastBackup.at || lastBackup.damaged)) {
     lastBackup = { at: newest.at, path: newest.path, sizeBytes: newest.sizeBytes, kind: newest.kind, exists: true, damaged: false };
   }
@@ -987,17 +988,73 @@ export interface RestoreResult {
   restoredFrom: string;
   businessName: string;
   safetyBackupPath: string;
+  /** Automatic backup of the restored data taken straight after the restore (null when automatic backup is off or it failed). */
+  backupAfterRestore: string | null;
 }
 
 /**
  * Replace all current data with a backup:
  * extract -> validate a copy (opens and migrates, integrity check, set-up business)
- * -> safety backup of the current data -> swap the database -> log in the NEW database.
+ * -> safety backup of the current data -> swap the database -> log in the NEW database
+ * -> automatic backup of the restored data.
  * The logged-in session ends (the app shows the login screen again).
  */
 export function restoreBackup(ctx: Ctx, file: string): RestoreResult {
+  const r = restoreFrom(ctx, file, false);
+  return { restoredFrom: r.restoredFrom, businessName: r.businessName, safetyBackupPath: r.safetyBackupPath!, backupAfterRestore: r.backupAfterRestore };
+}
+
+/* ------------------------------ First run: restore instead of setting up ------------------------------ */
+
+export const ALREADY_SET_UP_MESSAGE =
+  'Billforce is already set up on this computer. To restore a backup, log in as the owner and use Settings & data > Backup & restore.';
+
+/**
+ * A new computer or a reinstall: before set-up (no business, no logins, no entries) a backup may be brought back
+ * without logging in. Refused once Billforce is set up.
+ */
+export function assertFirstRun(ctx: Ctx): void {
+  if (getMeta(ctx, 'setup_done') === '1') throw fail.forbidden(ALREADY_SET_UP_MESSAGE);
+}
+
+/** The file chosen in the first-run file dialog, per running app: only that file can be read or restored without a login. */
+const firstRunPick = new WeakMap<object, string>();
+
+export async function pickBackupOnFirstRun(ctx: Ctx): Promise<{ path: string | null; fileName: string | null }> {
+  assertFirstRun(ctx);
+  const file = await ctx.platform.pickFile({ title: 'Choose your Billforce backup (for example on your pen drive)', filters: BACKUP_FILE_FILTERS });
+  // Cancelling the dialog keeps the file chosen before (e.g. "Choose another file", then Cancel).
+  if (file) firstRunPick.set(ctx.platform, file);
+  return { path: file, fileName: file ? path.basename(file) : null };
+}
+
+function assertPickedOnFirstRun(ctx: Ctx, file: string): void {
+  assertFirstRun(ctx);
+  const picked = firstRunPick.get(ctx.platform);
+  if (!picked || pathKey(picked) !== pathKey(file)) throw fail.validation('Choose the backup file again.');
+}
+
+/** What is inside the chosen backup, for the set-up screen. Changes nothing. */
+export function inspectBackupOnFirstRun(ctx: Ctx, file: string): BackupInspection {
+  assertPickedOnFirstRun(ctx, file);
+  return inspectBackup(ctx, file);
+}
+
+/**
+ * Bring back a backup on a computer where Billforce is not set up yet. The same checks as a normal restore, but
+ * no safety copy (there is no data to keep). Afterwards the app shows the login screen of the restored business.
+ */
+export function restoreOnFirstRun(ctx: Ctx, file: string): Omit<RestoreResult, 'safetyBackupPath'> {
+  assertPickedOnFirstRun(ctx, file);
+  const r = restoreFrom(ctx, file, true);
+  firstRunPick.delete(ctx.platform);
+  return { restoredFrom: r.restoredFrom, businessName: r.businessName, backupAfterRestore: r.backupAfterRestore };
+}
+
+function restoreFrom(ctx: Ctx, file: string, firstRun: boolean): Omit<RestoreResult, 'safetyBackupPath'> & { safetyBackupPath: string | null } {
   if (ctx.info.dbPath === ':memory:') throw fail.validation('Restore is not available in this mode.');
   if (ctx.db.inTransaction) throw new AppError('INTERNAL', 'restoreBackup cannot run inside a transaction');
+  if (firstRun) assertFirstRun(ctx);
   if (!fs.existsSync(file)) throw fail.notFound('Backup file');
   refuseLiveDatabase(ctx, file);
   // A backup still being written in the background holds the current database; wait for it to finish.
@@ -1032,31 +1089,63 @@ export function restoreBackup(ctx: Ctx, file: string): RestoreResult {
       probe.close();
     }
 
-    const safety = createBackup(ctx, 'safety', { note: `Before restoring ${path.basename(file)}` });
+    // Before set-up there is nothing to lose (no business, logins or entries), so no safety copy is needed.
+    const note = `Before restoring ${path.basename(file)}`;
+    const safety = firstRun ? null : createBackup(ctx, 'safety', { note });
     ctx.app.replaceDatabase(raw);
 
     // Record the restore in the NEW database (a fresh context on the swapped-in file),
     // attributed to the same person when their login exists there.
     const fresh = new Db(ctx.info.dbPath);
+    let backupAfterRestore: string | null = null;
     try {
       const userId = session ? fresh.value<number | null>('SELECT id FROM users WHERE username = ? COLLATE NOCASE', [session.username], null) : null;
       const freshCtx: Ctx = { ...ctx, db: fresh, session: session && userId ? { ...session, userId } : null };
       const by = session && !userId ? ` by ${session.fullName}` : '';
-      // The safety copy belongs to the history of this installation, so keep a record of it in the new data too.
-      fresh.insert('backup_history', {
-        at: safety.at,
-        kind: 'safety',
-        path: safety.path,
-        size_bytes: safety.sizeBytes,
-        user_id: freshCtx.session?.userId ?? null,
-        note: `Before restoring ${path.basename(file)}`,
-      });
-      logActivity(freshCtx, 'backup.restore', `Restored data from ${path.basename(file)}${businessName ? ` (${businessName})` : ''}${by}. The data from before the restore was saved to ${safety.path}`, {
-        details: { from: file, safetyBackup: safety.path, by: session?.username ?? null },
-      });
+      const what = `Restored data from ${path.basename(file)}${businessName ? ` (${businessName})` : ''}`;
+      if (safety) {
+        // The safety copy belongs to the history of this installation, so keep a record of it in the new data too.
+        fresh.insert('backup_history', {
+          at: safety.at,
+          kind: 'safety',
+          path: safety.path,
+          size_bytes: safety.sizeBytes,
+          user_id: freshCtx.session?.userId ?? null,
+          note,
+        });
+        logActivity(freshCtx, 'backup.restore', `${what}${by}. The data from before the restore was saved to ${safety.path}`, {
+          details: { from: file, safetyBackup: safety.path, by: session?.username ?? null },
+        });
+      } else {
+        logActivity(freshCtx, 'backup.restore', `${what} while setting up Billforce on this computer`, { details: { from: file, firstRun: true } });
+      }
+      backupAfterRestore = backupRestoredData(freshCtx, file);
     } finally {
       fresh.close();
     }
-    return { restoredFrom: file, businessName, safetyBackupPath: safety.path };
+    return { restoredFrom: file, businessName, safetyBackupPath: safety?.path ?? null, backupAfterRestore };
   });
+}
+
+/**
+ * An automatic backup of the data just restored, so "Last backup" is a copy of the books now in use (on a new
+ * computer the restored data's own backups are on the old one). Skipped when automatic backup is off; a failure
+ * (e.g. the restored backup folder does not exist on this computer) never undoes the restore.
+ */
+function backupRestoredData(ctx: Ctx, file: string): string | null {
+  if (!getSection(ctx, 'backup').autoBackup) return null;
+  try {
+    const b = createBackup(ctx, 'auto', { note: `After restoring ${path.basename(file)}` });
+    let pruned: string[] = [];
+    try {
+      pruned = pruneAutoBackups(ctx);
+    } catch (e) {
+      console.error('[backup] could not remove old automatic backups:', e);
+    }
+    logActivity(ctx, 'backup.auto', `Automatic backup of the restored data saved to ${b.path}`, { details: { path: b.path, sizeBytes: b.sizeBytes, pruned } });
+    return b.path;
+  } catch (e) {
+    console.error('[backup] could not back up the restored data:', e);
+    return null;
+  }
 }

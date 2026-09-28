@@ -35,6 +35,8 @@ function setRef<T>(ref: React.ForwardedRef<T>, value: T | null) {
 }
 
 const toEdit = (p: number | null | undefined) => (p === null || p === undefined ? '' : Number.isInteger(p / 100) ? String(p / 100) : (p / 100).toFixed(2));
+/** The amount (paise) the text in a money box stands for, as its onChange reports it: blank = null. */
+const shownPaise = (t: string) => (t.trim() === '' ? null : parseMoney(t));
 
 export interface FastMoneyInputProps extends Omit<InputHTMLAttributes<HTMLInputElement>, 'value' | 'onChange'> {
   value: number | null | undefined;
@@ -52,7 +54,10 @@ export const FastMoneyInput = forwardRef<HTMLInputElement, FastMoneyInputProps>(
   const el = useRef<HTMLInputElement | null>(null);
   const sel = useSelectOnFocus();
   useEffect(() => {
-    if (!focused) setText(toEdit(value));
+    // While focused the typed text stays as typed ("12.50", "5."), unless the amount was changed from outside
+    // (e.g. Enter in a split-payment box fills in the rest): then the box shows the new amount at once.
+    if (!focused || shownPaise(text) !== (value ?? null)) setText(toEdit(value));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [value, focused]);
   // The shown text changes on focus (1,234.00 -> 1234); select it before the next key press.
   useLayoutEffect(() => {

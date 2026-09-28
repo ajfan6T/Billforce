@@ -13,6 +13,11 @@ export interface ReportColumn {
   /** Relative width hint (characters) for Excel / PDF. */
   width?: number;
   align?: 'left' | 'right' | 'center';
+  /**
+   * Keep each cell on one line in PDF / print (short codes such as "INV/26-27/0001" or a phone number), so the
+   * long text columns wrap instead. Date and date-time columns never wrap unless this is set to false.
+   */
+  nowrap?: boolean;
 }
 
 /**

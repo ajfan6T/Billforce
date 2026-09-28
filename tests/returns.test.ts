@@ -449,6 +449,159 @@ describe('refund limits (never more than the customer paid)', () => {
     expect(ledgerProblems(t.app)).toEqual([]);
   });
 
+  describe('money refunded never exceeds money received', () => {
+    /** ₹1,000 bill to Ramesh, all on credit. */
+    async function creditBill(t: TestApp, name = 'Ramesh', rate = 100000, qty = 1) {
+      const c = await t.call('customers.quickCreate', { name });
+      const bill = await t.call('sales.create', { customerId: c.id, items: [{ itemName: 'Mixer', qty, rate }], payments: [] });
+      return { c, bill };
+    }
+    const accountId = async (t: TestApp, name: string) => (await t.call('accounts.list', { includeInactive: true })).find((a) => a.name === name)!.id;
+
+    it('(A) a payment discount is not money: ₹900 + ₹100 discount lets at most ₹900 go back', async () => {
+      const t = await createTestApp({ openingCash: 1000000 });
+      const { c, bill } = await creditBill(t);
+      await t.call('receipts.create', { customerId: c.id, amount: 90000, discount: 10000, mode: 'cash' });
+      expect(partyBalance(t.app.ctx(), 'customer', c.id)).toBe(0);
+      const r = await t.call('returns.billReturnable', { billId: bill.id });
+      expect(r).toMatchObject({ paidLater: 90000, moneyReceived: 90000, moneyRefundable: 90000 });
+      await t.loginAs('cashier');
+      const e = await t.fails('returns.create', { kind: 'return', billId: bill.id, items: [{ billItemId: bill.items[0].id, qty: 1 }], refundMode: 'cash' });
+      expect(e.message).toMatch(/^Only ₹900\.00 was received on bill INV\/26-27\/0001, so at most ₹900\.00 can be refunded in money\./);
+      expect(systemBalance(t.app, 'CASH')).toBe(1000000 + 90000);
+      expect(ledgerProblems(t.app)).toEqual([]);
+    });
+
+    it('(B) a credit note without goods, adjusted in the account, is not money', async () => {
+      const t = await createTestApp({ openingCash: 1000000 });
+      const { c, bill } = await creditBill(t);
+      await t.call('returns.create', { kind: 'adjustment', customerId: c.id, amount: 100000, reason: 'Rate difference', refundMode: 'credit' });
+      expect(partyBalance(t.app.ctx(), 'customer', c.id)).toBe(0);
+      const r = await t.call('returns.billReturnable', { billId: bill.id });
+      expect(r).toMatchObject({ paidLater: 0, moneyReceived: 0, moneyRefundable: 0, suggestedRefundMode: 'credit' });
+      await t.loginAs('cashier');
+      const e = await t.fails('returns.create', { kind: 'return', billId: bill.id, items: [{ billItemId: bill.items[0].id, qty: 1 }], refundMode: 'cash' });
+      expect(e.message).toMatch(/^Nothing was paid on bill INV\/26-27\/0001 \(it was sold on credit\)/);
+      expect(systemBalance(t.app, 'CASH')).toBe(1000000);
+    });
+
+    it('(C) a journal write-off to Sundry Debtors is not money', async () => {
+      const t = await createTestApp({ openingCash: 1000000 });
+      const { c, bill } = await creditBill(t);
+      await t.call('journals.create', {
+        narration: 'Bad debt written off - Ramesh',
+        lines: [
+          { accountId: await accountId(t, 'Miscellaneous Expenses'), debit: 100000 },
+          { accountId: await accountId(t, 'Sundry Debtors'), credit: 100000, partyType: 'customer', partyId: c.id },
+        ],
+      });
+      expect(partyBalance(t.app.ctx(), 'customer', c.id)).toBe(0);
+      const r = await t.call('returns.billReturnable', { billId: bill.id });
+      expect(r).toMatchObject({ paidLater: 0, moneyRefundable: 0 });
+      await t.loginAs('cashier');
+      expect((await t.fails('returns.create', { kind: 'return', billId: bill.id, items: [{ billItemId: bill.items[0].id, qty: 1 }], refundMode: 'cash' })).message).toMatch(
+        /^Nothing was paid on bill INV\/26-27\/0001/,
+      );
+      expect(systemBalance(t.app, 'CASH')).toBe(1000000);
+      expect(ledgerProblems(t.app)).toEqual([]);
+    });
+
+    it('shares the money out oldest dues first: opening balance, then bills in date order', async () => {
+      const t = await createTestApp({ openingCash: 1000000 });
+      const c = await t.call('customers.create', { name: 'Suresh', openingBalance: { amount: 50000, direction: 'receivable' } });
+      const b1 = await t.call('sales.create', { customerId: c.id, items: [{ itemName: 'Fan', qty: 2, rate: 50000 }], payments: [] });
+      const b2 = await t.call('sales.create', { customerId: c.id, items: [{ itemName: 'Iron', qty: 1, rate: 100000 }], payments: [] });
+      // ₹1,500 received: ₹500 clears the opening balance and ₹1,000 pays bill 1; bill 2 got no money.
+      await t.call('receipts.create', { customerId: c.id, amount: 150000, mode: 'cash' });
+      // Still owed ₹1,000 (bill 2): the customer's dues count against each bill first.
+      let r1 = await t.call('returns.billReturnable', { billId: b1.id });
+      expect(r1).toMatchObject({ paidLater: 0, moneyRefundable: 0 });
+      // Bill 2 written off: the customer owes nothing now, but only bill 1 was paid for in money.
+      await t.call('journals.create', {
+        narration: 'Written off',
+        lines: [
+          { accountId: await accountId(t, 'Miscellaneous Expenses'), debit: 100000 },
+          { accountId: await accountId(t, 'Sundry Debtors'), credit: 100000, partyType: 'customer', partyId: c.id },
+        ],
+      });
+      expect(partyBalance(t.app.ctx(), 'customer', c.id)).toBe(0);
+      r1 = await t.call('returns.billReturnable', { billId: b1.id });
+      expect(r1).toMatchObject({ paidLater: 100000, moneyReceived: 100000, moneyRefundable: 100000, suggestedRefundMode: 'cash' });
+      const r2 = await t.call('returns.billReturnable', { billId: b2.id });
+      expect(r2).toMatchObject({ paidLater: 0, moneyRefundable: 0, suggestedRefundMode: 'credit' });
+      await t.loginAs('cashier');
+      await t.call('returns.create', { kind: 'return', billId: b1.id, items: [{ billItemId: b1.items[0].id, qty: 2 }], refundMode: 'cash' });
+      expect((await t.fails('returns.create', { kind: 'return', billId: b2.id, items: [{ billItemId: b2.items[0].id, qty: 1 }], refundMode: 'cash' })).message).toMatch(
+        /^Nothing was paid on bill INV\/26-27\/0002/,
+      );
+      // ₹1,500 came in and ₹1,000 went back.
+      expect(systemBalance(t.app, 'CASH')).toBe(1000000 + 150000 - 100000);
+      expect(ledgerProblems(t.app)).toEqual([]);
+    });
+
+    it('money for a bill returned into the account counts for the next bill', async () => {
+      const t = await createTestApp({ openingCash: 1000000 });
+      const { c, bill: b1 } = await creditBill(t);
+      const b2 = await t.call('sales.create', { customerId: c.id, items: [{ itemName: 'Iron', qty: 1, rate: 100000 }], payments: [] });
+      await t.call('receipts.create', { customerId: c.id, amount: 100000, mode: 'cash' });
+      // Bill 1 comes back and is adjusted: the ₹1,000 received now pays for bill 2.
+      await t.call('returns.create', { kind: 'return', billId: b1.id, items: [{ billItemId: b1.items[0].id, qty: 1 }], refundMode: 'credit' });
+      expect(await t.call('returns.billReturnable', { billId: b2.id })).toMatchObject({ paidLater: 100000, moneyRefundable: 100000 });
+      await t.call('returns.create', { kind: 'return', billId: b2.id, items: [{ billItemId: b2.items[0].id, qty: 1 }], refundMode: 'cash' });
+      expect(systemBalance(t.app, 'CASH')).toBe(1000000);
+      expect(partyBalance(t.app.ctx(), 'customer', c.id)).toBe(0);
+      expect(ledgerProblems(t.app)).toEqual([]);
+    });
+
+    it('warns when a payment that money was paid back against is cancelled or cut', async () => {
+      const t = await createTestApp({ openingCash: 1000000 });
+      const { c, bill } = await creditBill(t, 'Ramesh', 50000, 2);
+      await t.loginAs('cashier');
+      const rc = await t.call('receipts.create', { customerId: c.id, amount: 100000, mode: 'cash' });
+      const cn = await t.call('returns.create', { kind: 'return', billId: bill.id, items: [{ billItemId: bill.items[0].id, qty: 1 }], refundMode: 'cash' });
+      await t.loginAs('manager');
+      const cancelled = await t.call('receipts.cancel', { id: rc.id, reason: 'Cheque bounced' });
+      expect(cancelled.warnings).toEqual([
+        `Cash was refunded on ${bill.billNo} against this payment (return ${cn.cnNo}). ₹500.00 was paid back on that bill, but only ₹0.00 has now been received for it.`,
+      ]);
+      expect(await t.call('returns.billReturnable', { billId: bill.id })).toMatchObject({ moneyReceived: 0, moneyRefunded: 50000, moneyRefundable: 0 });
+
+      // Cut down after a full refund by UPI; a payment nothing was paid back against says nothing.
+      const t2 = await createTestApp({ openingCash: 1000000 });
+      const s = await creditBill(t2, 'Suresh');
+      const other = await creditBill(t2, 'Mohan');
+      const r2 = await t2.call('receipts.create', { customerId: s.c.id, amount: 100000, mode: 'cash' });
+      const r3 = await t2.call('receipts.create', { customerId: other.c.id, amount: 40000, mode: 'cash' });
+      const upi = await t2.call('returns.create', { kind: 'return', billId: s.bill.id, items: [{ billItemId: s.bill.items[0].id, qty: 1 }], refundMode: 'upi' });
+      const cut = await t2.call('receipts.update', { id: r2.id, customerId: s.c.id, amount: 1000, mode: 'cash', reason: 'Typed wrong' });
+      expect(cut.warnings).toEqual([
+        `Money was refunded by UPI on ${s.bill.billNo} against this payment (return ${upi.cnNo}). ₹1,000.00 was paid back on that bill, but only ₹10.00 has now been received for it.`,
+      ]);
+      // Cutting it further warns again; changing only the remarks does not.
+      expect((await t2.call('receipts.update', { id: r2.id, customerId: s.c.id, amount: 500, mode: 'cash' })).warnings).toHaveLength(1);
+      expect((await t2.call('receipts.update', { id: r2.id, customerId: s.c.id, amount: 500, mode: 'cash', remarks: 'note' })).warnings).toEqual([]);
+      expect((await t2.call('receipts.cancel', { id: r3.id, reason: 'Entered twice' })).warnings).toEqual([]);
+      expect(ledgerProblems(t2.app)).toEqual([]);
+    });
+
+    it('warns when cancelling an adjusted return moves received money away from a bill refunded in cash', async () => {
+      const t = await createTestApp({ openingCash: 1000000 });
+      const c = await t.call('customers.quickCreate', { name: 'Kavita' });
+      const b1 = await t.call('sales.create', { customerId: c.id, items: [{ itemName: 'Mixer', qty: 1, rate: 100000 }], payments: [] });
+      const b2 = await t.call('sales.create', { customerId: c.id, items: [{ itemName: 'Fan', qty: 2, rate: 50000 }], payments: [] });
+      // Bill 1 goes back into the account, so the ₹1,000 payment counts for bill 2, which may then refund cash.
+      const adjust = await t.call('returns.create', { kind: 'return', billId: b1.id, items: [{ billItemId: b1.items[0].id, qty: 1 }], refundMode: 'credit' });
+      await t.call('receipts.create', { customerId: c.id, amount: 100000, mode: 'cash' });
+      const cash = await t.call('returns.create', { kind: 'return', billId: b2.id, items: [{ billItemId: b2.items[0].id, qty: 1 }], refundMode: 'cash' });
+      expect(cash.total).toBe(50000);
+      // Cancelling the adjustment puts bill 1's debt back first, so bill 2 no longer has the money it refunded.
+      const res = await t.call('returns.cancel', { id: adjust.id, reason: 'Customer kept the mixer' });
+      expect(res.warnings).toHaveLength(1);
+      expect(res.warnings[0]).toMatch(new RegExp(`Cash was refunded on ${b2.billNo.replace(/\//g, '\\/')}`));
+      expect(ledgerProblems(t.app)).toEqual([]);
+    });
+  });
+
   it('credit notes without goods need "returns.adjust" (cashiers do not have it)', async () => {
     const t = await createTestApp({ openingCash: 5000 });
     const c = await customer(t, 'Fatima Begum');

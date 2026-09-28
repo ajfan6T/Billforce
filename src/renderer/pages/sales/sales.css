@@ -709,7 +709,8 @@ body.pos-active .toasts {
   max-width: 420px;
 }
 .sl-items-toolbar .input-adorn.search {
-  min-width: 320px;
+  /* Room for the whole hint "Search name, code or category… (F3)". */
+  min-width: 380px;
 }
 .sl-return-lines td:nth-child(2) {
   min-width: 150px;

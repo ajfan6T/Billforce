@@ -197,7 +197,7 @@ export function SalaryDetailPage() {
                         <td>
                           Worked here {formatDate(s.employedFrom)} to {formatDate(s.employedTo)}
                         </td>
-                        <td>{s.daysEmployed} days</td>
+                        <td>{s.daysEmployed} {s.daysEmployed === 1 ? 'day' : 'days'}</td>
                       </tr>
                     )}
                     <tr>

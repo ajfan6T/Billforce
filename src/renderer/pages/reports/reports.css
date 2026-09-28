@@ -77,7 +77,7 @@
 }
 .rp-tabs .tabs {
   margin-bottom: -1px;
-  border-bottom: 0;
+  box-shadow: none;
 }
 .rp-chart {
   padding: 16px 16px 14px;

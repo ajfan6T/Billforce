@@ -10,12 +10,13 @@ import { nextDocNumber } from '../../numbering';
 import { getSection } from '../../settings';
 import { partyBalance, paymentAccountId, postEntry, replaceEntry, voidEntry, type EntryInput } from '../../accounting/ledger';
 import { renderReceiptHtml } from '../../print/receipt';
-import { amountInWords, formatDrCr, formatINR } from '../../../shared/money';
+import { amountInWords, formatINR } from '../../../shared/money';
 import { formatDate, formatTime } from '../../../shared/dates';
 import { PAYMENT_MODE_LABELS, type SettlementMode } from '../../../shared/constants';
 import { assertCancelKeepsClosedAccounts } from '../accounting/common';
 import { advanceWarning, assertSameFinancialYear, balanceThroughEntry, modeText, postingLines, resolveDocDate, type PostingLine } from './common';
 import { getCustomerRow } from './service';
+import { watchMoneyRefunds } from '../returns/service';
 
 export interface ReceiptInput {
   customerId: number;
@@ -276,6 +277,8 @@ export function updateReceipt(ctx: Ctx, id: number, input: ReceiptInput, reason?
     partyBalance(ctx, 'customer', customer.id, { account: 'AR' }) + (before.customer_id === customer.id ? before.amount + before.discount : 0);
   // Keeping (or lowering) the saved discount for the same customer is fine; a bigger or moved discount needs permission.
   const v = normalize(ctx, input, customer.name, due, before.customer_id === customer.id ? before.discount : 0);
+  // Money paid back on returns may have relied on this payment; less of it (or moving it) must be told.
+  const refundWarnings = watchMoneyRefunds(ctx, before.customer_id);
   const revision = before.revision + 1;
   ctx.db.update('customer_receipts', id, {
     date,
@@ -306,16 +309,17 @@ export function updateReceipt(ctx: Ctx, id: number, input: ReceiptInput, reason?
     { entityType: 'receipt', entityId: id, details: { before: toReceipt(before), after: saved, reason: reason ?? null } },
   );
   const warning = advanceWarning(customer.name, due, v.amount + v.discount, 'customer');
-  return { ...saved, warnings: warning ? [warning] : [] };
+  return { ...saved, warnings: [...(warning ? [warning] : []), ...refundWarnings()] };
 }
 
-export function cancelReceipt(ctx: Ctx, id: number, reason: string): Receipt {
+export function cancelReceipt(ctx: Ctx, id: number, reason: string): SavedReceipt {
   assertCan(ctx, 'billing.cancel', 'You do not have permission to cancel saved payments. Ask the owner or manager.');
   const r = getRow(ctx, id);
   if (r.status === 'cancelled') throw fail.validation('This payment is already cancelled.');
   const why = reason.trim();
   if (!why) throw fail.validation('Enter the reason for cancelling', { reason: 'Enter a reason' });
   assertCancelKeepsClosedAccounts(ctx, r.journal_entry_id, 'this payment');
+  const refundWarnings = watchMoneyRefunds(ctx, r.customer_id);
   if (r.journal_entry_id) voidEntry(ctx, r.journal_entry_id, `Payment ${r.receipt_no} cancelled: ${why}`);
   ctx.db.update('customer_receipts', id, {
     status: 'cancelled',
@@ -331,7 +335,7 @@ export function cancelReceipt(ctx: Ctx, id: number, reason: string): Receipt {
     entityId: id,
     details: { reason: why },
   });
-  return saved;
+  return { ...saved, warnings: refundWarnings() };
 }
 
 export interface ReceiptListQuery {
@@ -399,6 +403,11 @@ export function listReceipts(ctx: Ctx, query: ReceiptListQuery): { rows: Receipt
 
 /* ------------------------------ Printing ------------------------------ */
 
+/** A customer's balance in words for the slip handed to them: "₹X due", "₹X advance" or "Nil" (no Dr / Cr). */
+function balanceWords(balance: number): string {
+  return balance > 0 ? `${formatINR(balance)} due` : balance < 0 ? `${formatINR(-balance)} advance` : 'Nil';
+}
+
 export function receiptHtml(ctx: Ctx, id: number, opts: { duplicate?: boolean } = {}): string {
   const r = getReceiptDetail(ctx, id);
   const business = getSection(ctx, 'business');
@@ -416,8 +425,8 @@ export function receiptHtml(ctx: Ctx, id: number, opts: { duplicate?: boolean } 
   }
   const lines = [`Paid by ${modeText(r.mode, r.reference)}`, amountInWords(r.amount)];
   if (r.balanceBefore !== null && r.balanceAfter !== null) {
-    lines.push(`Previous balance: ${formatDrCr(r.balanceBefore)}`);
-    lines.push(`Balance now: ${r.balanceAfter > 0 ? `${formatINR(r.balanceAfter)} due` : r.balanceAfter < 0 ? `${formatINR(-r.balanceAfter)} advance` : 'Nil'}`);
+    lines.push(`Previous balance: ${balanceWords(r.balanceBefore)}`);
+    lines.push(`Balance now: ${balanceWords(r.balanceAfter)}`);
   }
   if (r.remarks) lines.push(r.remarks);
   if (r.status === 'cancelled' && r.cancelReason) lines.push(`Cancelled: ${r.cancelReason}`);

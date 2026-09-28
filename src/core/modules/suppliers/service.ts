@@ -386,7 +386,7 @@ export function supplierPayables(ctx: Ctx, asOf: string): ReportData {
     subtitle: `As on ${formatDate(asOf)}`,
     columns: [
       { key: 'name', label: 'Supplier', width: 28 },
-      { key: 'phone', label: 'Phone', width: 14 },
+      { key: 'phone', label: 'Phone', width: 14, nowrap: true },
       { key: 'payable', label: 'Payable', type: 'money', width: 14 },
       { key: 'advance', label: 'Advance paid', type: 'money', width: 14 },
       { key: 'lastPurchase', label: 'Last purchase', type: 'date', width: 12 },

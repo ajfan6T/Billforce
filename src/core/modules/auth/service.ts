@@ -2,7 +2,7 @@ import type { Ctx, Session } from '../../context';
 import { now } from '../../context';
 import { AppError } from '../../errors';
 import { ALL_PERMISSIONS, type Permission } from '../../../shared/permissions';
-import type { Role } from '../../../shared/constants';
+import { WRONG_LOGIN_MESSAGE, type Role } from '../../../shared/constants';
 import { logActivity } from '../../audit';
 import { getMeta, getSection, setMeta, updateSection } from '../../settings';
 import { generateRecoveryCode, hashPassword, normalizeRecoveryCode, passwordProblem, verifyPassword } from './passwords';
@@ -157,7 +157,7 @@ export function login(ctx: Ctx, username: string, password: string): SessionInfo
   const ts = now(ctx);
   if (!user || !user.is_active) {
     logActivity(ctx, 'user.login_failed', `Failed login for "${username}" (unknown or inactive user)`);
-    throw new AppError('UNAUTHENTICATED', 'Wrong username or password');
+    throw new AppError('UNAUTHENTICATED', WRONG_LOGIN_MESSAGE);
   }
   if (user.locked_until && user.locked_until > ts) {
     throw new AppError('UNAUTHENTICATED', 'Too many wrong attempts. Please wait a minute and try again.');
@@ -169,7 +169,7 @@ export function login(ctx: Ctx, username: string, password: string): SessionInfo
     logActivity(ctx, 'user.login_failed', `Failed login for ${user.username}`, { entityType: 'user', entityId: user.id });
     throw new AppError(
       'UNAUTHENTICATED',
-      lock ? 'Too many wrong attempts. Please wait a minute and try again.' : 'Wrong username or password',
+      lock ? 'Too many wrong attempts. Please wait a minute and try again.' : WRONG_LOGIN_MESSAGE,
     );
   }
   ctx.db.update('users', user.id, { failed_attempts: 0, locked_until: null, last_login_at: ts });

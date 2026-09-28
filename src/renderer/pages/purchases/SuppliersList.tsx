@@ -71,7 +71,7 @@ export function SuppliersListPage() {
         [
           { key: 'name', label: 'Supplier', width: 26, get: (r: Row) => r.name + (r.isActive ? '' : ' (inactive)') },
           { key: 'contact', label: 'Contact person', width: 18, get: (r) => r.contactPerson },
-          { key: 'phone', label: 'Phone', width: 14, get: (r) => r.phone },
+          { key: 'phone', label: 'Phone', width: 14, nowrap: true, get: (r) => r.phone },
           { key: 'payable', label: 'Payable', type: 'money', width: 14, get: (r) => r.payable },
           { key: 'last', label: 'Last purchase', type: 'date', width: 12, get: (r) => r.lastPurchaseDate },
           { key: 'fy', label: 'Purchased this year', type: 'money', width: 14, get: (r) => r.purchasedThisFy },

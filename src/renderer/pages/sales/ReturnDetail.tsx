@@ -62,8 +62,9 @@ export function ReturnDetail() {
     if (!reason) return;
     setBusy('cancel');
     try {
-      await call('returns.cancel', { id: d.id, reason });
+      const res = await call('returns.cancel', { id: d.id, reason });
       toast.success(`${d.cnNo} cancelled`);
+      res.warnings.forEach((w) => toast.warning(w));
       await q.reload();
       void preview.reload();
     } catch (e) {

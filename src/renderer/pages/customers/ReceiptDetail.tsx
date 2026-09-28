@@ -34,6 +34,8 @@ export function ReceiptDetailPage() {
   const preview = useQuery('receipts.receiptHtml', valid ? { id } : null);
   const [editing, setEditing] = useState(false);
   const [printing, setPrinting] = useState(false);
+  // Warnings from the last cancel / edit of this payment (e.g. money paid back on a return relied on it); kept on screen.
+  const [notices, setNotices] = useState<{ id: number; list: string[] }>({ id, list: [] });
   const d = r.data;
 
   const reload = () => {
@@ -73,8 +75,9 @@ export function ReceiptDetailPage() {
     });
     if (!reason) return;
     try {
-      await call('receipts.cancel', { id: d.id, reason });
+      const res = await call('receipts.cancel', { id: d.id, reason });
       toast.success(`Payment ${d.receiptNo} cancelled`);
+      setNotices({ id: d.id, list: res.warnings });
       reload();
     } catch (e) {
       toast.error(e);
@@ -132,6 +135,15 @@ export function ReceiptDetailPage() {
           </Alert>
         </div>
       )}
+      {notices.id === d.id && notices.list.length > 0 && (
+        <div className="cancel-banner">
+          <Alert tone="amber" title="Check this">
+            {notices.list.map((n) => (
+              <div key={n}>{n}</div>
+            ))}
+          </Alert>
+        </div>
+      )}
       <div className="detail-grid">
         <div className="stack">
           <Card title="Payment details">
@@ -168,7 +180,15 @@ export function ReceiptDetailPage() {
           {!canPrint && <p className="faint small mt-1">This receipt was already printed. Reprinting needs permission.</p>}
         </Card>
       </div>
-      <ReceiptModal open={editing} receipt={d} onClose={() => setEditing(false)} onSaved={reload} />
+      <ReceiptModal
+        open={editing}
+        receipt={d}
+        onClose={() => setEditing(false)}
+        onSaved={(saved) => {
+          setNotices({ id: saved.id, list: saved.warnings });
+          reload();
+        }}
+      />
     </Page>
   );
 }

@@ -42,6 +42,8 @@ Windows may show a "Windows protected your PC" screen for new, unsigned apps. Cl
 - Data file: `%APPDATA%\Billforce\billforce.db`. Uninstalling Billforce does **not** delete it.
 - Automatic backups: `Documents\Billforce Backups` (one per day, the newest 30 are kept). You can change the folder,
   back up to a pen drive, or restore from *Settings & data → Backup & restore*.
+- New computer or reinstall: on the first screen choose *Moving from another computer? Restore from a backup*, pick
+  the `.bfbackup` file (e.g. on your pen drive) and log in with your usual username and password.
 
 ### Roles
 

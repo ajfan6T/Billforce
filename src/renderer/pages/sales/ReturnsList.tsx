@@ -48,10 +48,10 @@ export function ReturnsList() {
       title: 'Sales returns & credit notes',
       subtitle: describeRange({ from: data.from, to: data.to }),
       columns: [
-        { key: 'no', label: 'Number', width: 16 },
+        { key: 'no', label: 'Number', width: 16, nowrap: true },
         { key: 'date', label: 'Date', type: 'date', width: 11 },
         { key: 'kind', label: 'Type', width: 14 },
-        { key: 'bill', label: 'Against bill', width: 16 },
+        { key: 'bill', label: 'Against bill', width: 16, nowrap: true },
         { key: 'customer', label: 'Customer', width: 22 },
         { key: 'reason', label: 'Reason', width: 30 },
         { key: 'refund', label: 'Refund', width: 16 },

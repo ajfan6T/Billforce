@@ -58,7 +58,7 @@ export function ReceiptsListPage() {
         describeRange(range),
         [
           { key: 'date', label: 'Date', type: 'date', width: 11, get: (r: Row) => r.date },
-          { key: 'no', label: 'Receipt no', width: 16, get: (r) => r.receiptNo },
+          { key: 'no', label: 'Receipt no', width: 16, nowrap: true, get: (r) => r.receiptNo },
           { key: 'customer', label: 'Customer', width: 24, get: (r) => r.customerName },
           { key: 'mode', label: 'Mode', width: 8, get: (r) => (r.status === 'cancelled' ? 'Cancelled' : PAYMENT_MODE_LABELS[r.mode]) },
           { key: 'reference', label: 'Reference', width: 16, get: (r) => r.reference },

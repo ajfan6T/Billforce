@@ -312,7 +312,7 @@ function accountBook(ctx: Ctx, opts: BookOptions): BookResult {
   const columns: ReportColumn[] = [
     { key: 'date', label: 'Date', type: 'date', width: 11 },
     { key: 'voucher', label: 'Voucher', width: 16 },
-    { key: 'no', label: 'No', width: 15 },
+    { key: 'no', label: 'No', width: 15, nowrap: true },
     ...(opts.showAccount ? [{ key: 'account', label: 'Account', width: 16 } as ReportColumn] : []),
     { key: 'particulars', label: 'Particulars', width: 40 },
     { key: 'in', label: opts.inLabel, type: 'money', width: 14 },
@@ -625,7 +625,7 @@ export function dayBook(ctx: Ctx, input: { from: string; to: string; voucherType
     columns: [
       { key: 'date', label: 'Date', type: 'date', width: 11 },
       { key: 'voucher', label: 'Voucher', width: 18 },
-      { key: 'no', label: 'No', width: 15 },
+      { key: 'no', label: 'No', width: 15, nowrap: true },
       { key: 'particulars', label: 'Particulars', width: 46 },
       { key: 'debit', label: 'Debit', type: 'money', width: 14 },
       { key: 'credit', label: 'Credit', type: 'money', width: 14 },

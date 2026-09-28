@@ -323,7 +323,7 @@ function BillHistory({ billId, count }: { billId: number; count: number }) {
   if (!q.data.length) return <EmptyState icon={<RotateCcw size={30} />} title="No history" message="This bill has no recorded versions." />;
   const revs = [...q.data].reverse();
   return (
-    <div className="sl-rev-list" aria-label={`${count} versions`}>
+    <div className="sl-rev-list" aria-label={`${count} ${count === 1 ? 'version' : 'versions'}`}>
       {revs.map((r) => (
         <RevisionCard key={r.revision} r={r} />
       ))}

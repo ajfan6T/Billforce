@@ -86,7 +86,7 @@ export function TransfersPage() {
         describeRange(range),
         [
           { key: 'date', label: 'Date', type: 'date', width: 11, get: (r: Row) => r.date },
-          { key: 'no', label: 'No', width: 16, get: (r) => r.voucherNo },
+          { key: 'no', label: 'No', width: 16, nowrap: true, get: (r) => r.voucherNo },
           { key: 'from', label: 'From', width: 22, get: (r) => r.fromAccount },
           { key: 'to', label: 'To', width: 22, get: (r) => r.toAccount },
           { key: 'narration', label: 'Narration', width: 32, get: (r) => (r.isVoid ? `${r.narration ?? ''} (cancelled)` : r.narration) },

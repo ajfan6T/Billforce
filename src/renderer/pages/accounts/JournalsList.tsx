@@ -67,7 +67,7 @@ export function JournalsListPage() {
       describeRange(range),
       [
         { key: 'date', label: 'Date', type: 'date', width: 11, get: (r: Row) => r.date },
-        { key: 'no', label: 'No', width: 16, get: (r) => r.voucherNo ?? `#${r.id}` },
+        { key: 'no', label: 'No', width: 16, nowrap: true, get: (r) => r.voucherNo ?? `#${r.id}` },
         { key: 'type', label: 'Type', width: 20, get: (r) => (r.isVoid ? `${r.voucherLabel} (cancelled)` : r.voucherLabel) },
         { key: 'narration', label: 'Narration', width: 36, get: (r) => r.narration },
         { key: 'dr', label: 'Debit', width: 24, get: (r) => r.debitNames },

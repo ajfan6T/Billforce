@@ -49,8 +49,9 @@ export function timeAgo(ts: string | null | undefined, nowTs: string = toTimesta
   if (days === 1) return 'yesterday';
   if (days < 45) return `${days} days ago`;
   const months = Math.floor(days / 30);
-  if (months < 18) return `${months} months ago`;
-  return `${Math.floor(days / 365)} years ago`;
+  if (months < 18) return `${months} month${months === 1 ? '' : 's'} ago`;
+  const years = Math.floor(days / 365);
+  return `${years} year${years === 1 ? '' : 's'} ago`;
 }
 
 export function hoursSince(ts: string | null | undefined): number | null {
