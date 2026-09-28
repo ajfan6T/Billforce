@@ -1,0 +1,40 @@
+# Windows packaging. `npm run dist:win` produces:
+#   release/Billforce-Setup-<version>.exe     one-click per-user installer (no admin rights needed)
+#   release/Billforce-Portable-<version>.exe  single exe, runs without installing
+appId: in.billforce.desktop
+productName: Billforce
+copyright: Copyright © 2026 Billforce
+directories:
+  output: release
+  buildResources: build
+files:
+  - dist/main/**
+  - dist/renderer/**
+  - build/icon.png
+  - package.json
+  - "!**/*.map"
+asar: true
+# No native modules: SQLite comes built into Electron (node:sqlite).
+npmRebuild: false
+nodeGypRebuild: false
+win:
+  icon: build/icon.ico
+  target:
+    - target: nsis
+      arch: [x64]
+    - target: portable
+      arch: [x64]
+nsis:
+  oneClick: true
+  perMachine: false
+  createDesktopShortcut: always
+  createStartMenuShortcut: true
+  shortcutName: Billforce
+  runAfterFinish: true
+  # Business data lives in %APPDATA%\Billforce and must survive uninstall / reinstall.
+  deleteAppDataOnUninstall: false
+  installerIcon: build/icon.ico
+  uninstallerIcon: build/icon.ico
+  artifactName: Billforce-Setup-${version}.${ext}
+portable:
+  artifactName: Billforce-Portable-${version}.${ext}
