@@ -13,6 +13,7 @@ CREATE TABLE bills (
   subtotal INTEGER NOT NULL,              -- sum of qty x rate (before discounts)
   item_discount INTEGER NOT NULL DEFAULT 0, -- sum of line discounts
   bill_discount INTEGER NOT NULL DEFAULT 0, -- discount on the whole bill
+  bill_discount_pct REAL,                 -- set when the bill discount was entered as a percentage
   round_off INTEGER NOT NULL DEFAULT 0,
   total INTEGER NOT NULL,                 -- subtotal - item_discount - bill_discount + round_off
   paid INTEGER NOT NULL DEFAULT 0,        -- received now via cash / UPI / bank
@@ -22,6 +23,7 @@ CREATE TABLE bills (
   status TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('active', 'cancelled')),
   revision INTEGER NOT NULL DEFAULT 1,
   print_count INTEGER NOT NULL DEFAULT 0,
+  printed_revision INTEGER,               -- revision last printed; printing it again is a duplicate
   journal_entry_id INTEGER REFERENCES journal_entries (id),
   created_by INTEGER,
   created_at TEXT NOT NULL,
@@ -34,6 +36,7 @@ CREATE TABLE bills (
 CREATE UNIQUE INDEX idx_bills_seq ON bills (fy_start, seq);
 CREATE INDEX idx_bills_date ON bills (date);
 CREATE INDEX idx_bills_customer ON bills (customer_id);
+CREATE INDEX idx_bills_created_by ON bills (created_by);
 
 CREATE TABLE bill_items (
   id INTEGER PRIMARY KEY,
@@ -109,6 +112,7 @@ CREATE TABLE credit_note_items (
   amount INTEGER NOT NULL
 );
 CREATE INDEX idx_cn_items_cn ON credit_note_items (credit_note_id);
+CREATE INDEX idx_cn_items_bill_item ON credit_note_items (bill_item_id);
 
 CREATE TABLE customer_receipts (
   id INTEGER PRIMARY KEY,
@@ -125,6 +129,7 @@ CREATE TABLE customer_receipts (
   remarks TEXT,
   status TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('active', 'cancelled')),
   revision INTEGER NOT NULL DEFAULT 1,
+  print_count INTEGER NOT NULL DEFAULT 0,
   journal_entry_id INTEGER REFERENCES journal_entries (id),
   created_by INTEGER,
   created_at TEXT NOT NULL,

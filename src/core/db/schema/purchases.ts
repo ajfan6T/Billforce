@@ -72,6 +72,7 @@ CREATE TABLE supplier_payments (
   remarks TEXT,
   status TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('active', 'cancelled')),
   revision INTEGER NOT NULL DEFAULT 1,
+  print_count INTEGER NOT NULL DEFAULT 0,
   journal_entry_id INTEGER REFERENCES journal_entries (id),
   created_by INTEGER,
   created_at TEXT NOT NULL,

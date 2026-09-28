@@ -1,0 +1,1264 @@
+/**
+ * Sales bills: create, edit, cancel, list, print and quick repeat.
+ *
+ * Posting (voucher "sale", source "bill"), per docs/ARCHITECTURE.md:
+ *   Dr each payment's cash / bank account (paid part)
+ *   Dr AR(customer) for the credit part
+ *   Dr DISCOUNT_ALLOWED for item + bill discounts
+ *   Dr ROUND_OFF if rounded down        Cr ROUND_OFF if rounded up
+ *   Cr SALES gross (sum of qty x rate)
+ */
+import type { Ctx } from '../../context';
+import { assertCan, can, currentUserId, now, requireSession, today } from '../../context';
+import { AppError, fail } from '../../errors';
+import { listRevisions, logActivity, recordRevision } from '../../audit';
+import { nextDocNumber, peekDocNumber } from '../../numbering';
+import { getSection } from '../../settings';
+import { partyBalance, paymentAccountId, postEntry, replaceEntry, voidEntry, type EntryInput, type EntryLineInput } from '../../accounting/ledger';
+import { assertDateOpen } from '../../accounting/periods';
+import { touchItemUsage } from '../items/service';
+import { renderReceiptHtml, upiLink, type ReceiptDoc, type ReceiptTotal } from '../../print/receipt';
+import { BILL_PAYMENT_MODE_LABELS, billPaymentMode, calcBill, roundQty, type BillPaymentMode } from '../../../shared/billing';
+import { amountInWords, formatAmount, formatINR, formatQty } from '../../../shared/money';
+import { formatDate, formatTime, fyOf, isValidISODate } from '../../../shared/dates';
+import { PAYMENT_MODE_LABELS, type SettlementMode } from '../../../shared/constants';
+
+/* ------------------------------------------------------------------ */
+/* Types                                                               */
+/* ------------------------------------------------------------------ */
+
+export interface BillLineInput {
+  itemId?: number | null;
+  itemName: string;
+  unit?: string | null;
+  qty: number;
+  /** Rate in paise. */
+  rate: number;
+  /** Line discount in paise. */
+  discount?: number | null;
+  /** Line discount as a percentage (0-100); wins over `discount`. */
+  discountPct?: number | null;
+}
+
+export interface BillPaymentInput {
+  mode: SettlementMode;
+  amount: number;
+  accountId?: number | null;
+  reference?: string | null;
+}
+
+export interface BillInput {
+  date?: string | null;
+  customerId?: number | null;
+  customerName?: string | null;
+  customerPhone?: string | null;
+  items: BillLineInput[];
+  billDiscount?: number | null;
+  billDiscountPct?: number | null;
+  /** Money received now. Anything left of the total goes on the customer's credit. */
+  payments: BillPaymentInput[];
+  remarks?: string | null;
+}
+
+export interface BillRow {
+  id: number;
+  bill_no: string;
+  seq: number;
+  fy_start: string;
+  date: string;
+  customer_id: number | null;
+  customer_name: string | null;
+  customer_phone: string | null;
+  subtotal: number;
+  item_discount: number;
+  bill_discount: number;
+  bill_discount_pct: number | null;
+  round_off: number;
+  total: number;
+  paid: number;
+  credit: number;
+  payment_mode: BillPaymentMode;
+  remarks: string | null;
+  status: 'active' | 'cancelled';
+  revision: number;
+  print_count: number;
+  printed_revision: number | null;
+  journal_entry_id: number | null;
+  created_by: number | null;
+  created_at: string;
+  updated_by: number | null;
+  updated_at: string | null;
+  cancelled_by: number | null;
+  cancelled_at: string | null;
+  cancel_reason: string | null;
+}
+
+interface BillItemRow {
+  id: number;
+  bill_id: number;
+  line_no: number;
+  item_id: number | null;
+  item_name: string;
+  unit: string | null;
+  qty: number;
+  rate: number;
+  discount: number;
+  discount_pct: number | null;
+  amount: number;
+}
+
+export interface BillItem {
+  id: number;
+  lineNo: number;
+  itemId: number | null;
+  itemName: string;
+  unit: string | null;
+  qty: number;
+  rate: number;
+  /** qty x rate */
+  gross: number;
+  discount: number;
+  discountPct: number | null;
+  /** gross - discount */
+  amount: number;
+}
+
+export interface BillPayment {
+  id: number;
+  mode: SettlementMode;
+  accountId: number;
+  accountName: string;
+  amount: number;
+  reference: string | null;
+}
+
+export interface BillCustomer {
+  id: number;
+  name: string;
+  phone: string | null;
+  /** Current balance: + = customer owes you. */
+  balance: number;
+  creditLimit: number | null;
+  isActive: boolean;
+}
+
+export interface BillCreditNoteRef {
+  id: number;
+  cnNo: string;
+  date: string;
+  kind: 'return' | 'adjustment';
+  total: number;
+  refundMode: string;
+  status: 'active' | 'cancelled';
+}
+
+export interface RevisionSummary {
+  revision: number;
+  action: string;
+  reason: string | null;
+  username: string | null;
+  at: string;
+}
+
+export interface BillDetail {
+  id: number;
+  billNo: string;
+  date: string;
+  fyStart: string;
+  customerId: number | null;
+  customerName: string | null;
+  customerPhone: string | null;
+  subtotal: number;
+  itemDiscount: number;
+  billDiscount: number;
+  billDiscountPct: number | null;
+  roundOff: number;
+  total: number;
+  paid: number;
+  credit: number;
+  paymentMode: BillPaymentMode;
+  remarks: string | null;
+  status: 'active' | 'cancelled';
+  revision: number;
+  printCount: number;
+  /** True when the current version was already printed (the next print is a duplicate). */
+  printedCurrent: boolean;
+  journalEntryId: number | null;
+  createdAt: string;
+  createdById: number | null;
+  createdByName: string | null;
+  updatedAt: string | null;
+  updatedByName: string | null;
+  cancelledAt: string | null;
+  cancelledByName: string | null;
+  cancelReason: string | null;
+  items: BillItem[];
+  payments: BillPayment[];
+  customer: BillCustomer | null;
+  creditNotes: BillCreditNoteRef[];
+  /** Total of active returns / credit notes against this bill. */
+  returnedTotal: number;
+  revisions: RevisionSummary[];
+}
+
+/* ------------------------------------------------------------------ */
+/* Reading                                                             */
+/* ------------------------------------------------------------------ */
+
+export function getBillRow(ctx: Ctx, id: number): BillRow {
+  const row = ctx.db.get<BillRow>('SELECT * FROM bills WHERE id = ?', [id]);
+  if (!row) throw fail.notFound('Bill');
+  return row;
+}
+
+function userName(ctx: Ctx, id: number | null): string | null {
+  if (!id) return null;
+  return ctx.db.value<string | null>('SELECT full_name FROM users WHERE id = ?', [id], null);
+}
+
+interface CustomerRow {
+  id: number;
+  name: string;
+  phone: string | null;
+  credit_limit: number | null;
+  is_active: number;
+}
+
+function customerRow(ctx: Ctx, id: number): CustomerRow | undefined {
+  return ctx.db.get<CustomerRow>('SELECT id, name, phone, credit_limit, is_active FROM customers WHERE id = ?', [id]);
+}
+
+export function customerSummary(ctx: Ctx, id: number): BillCustomer {
+  const c = customerRow(ctx, id);
+  if (!c) throw fail.notFound('Customer');
+  return {
+    id: c.id,
+    name: c.name,
+    phone: c.phone,
+    balance: partyBalance(ctx, 'customer', c.id, { account: 'AR' }),
+    creditLimit: c.credit_limit,
+    isActive: !!c.is_active,
+  };
+}
+
+function toBillItem(r: BillItemRow): BillItem {
+  return {
+    id: r.id,
+    lineNo: r.line_no,
+    itemId: r.item_id,
+    itemName: r.item_name,
+    unit: r.unit,
+    qty: r.qty,
+    rate: r.rate,
+    gross: r.amount + r.discount,
+    discount: r.discount,
+    discountPct: r.discount_pct,
+    amount: r.amount,
+  };
+}
+
+export function getBillItems(ctx: Ctx, billId: number): BillItem[] {
+  return ctx.db.all<BillItemRow>('SELECT * FROM bill_items WHERE bill_id = ? ORDER BY line_no', [billId]).map(toBillItem);
+}
+
+function getBillPayments(ctx: Ctx, billId: number): BillPayment[] {
+  return ctx.db
+    .all<{ id: number; mode: SettlementMode; account_id: number; account_name: string; amount: number; reference: string | null }>(
+      `SELECT p.id, p.mode, p.account_id, a.name AS account_name, p.amount, p.reference
+         FROM bill_payments p JOIN accounts a ON a.id = p.account_id WHERE p.bill_id = ? ORDER BY p.id`,
+      [billId],
+    )
+    .map((p) => ({ id: p.id, mode: p.mode, accountId: p.account_id, accountName: p.account_name, amount: p.amount, reference: p.reference }));
+}
+
+export function creditNotesForBill(ctx: Ctx, billId: number): BillCreditNoteRef[] {
+  return ctx.db
+    .all<{ id: number; cn_no: string; date: string; kind: 'return' | 'adjustment'; total: number; refund_mode: string; status: 'active' | 'cancelled' }>(
+      'SELECT id, cn_no, date, kind, total, refund_mode, status FROM credit_notes WHERE bill_id = ? ORDER BY date, id',
+      [billId],
+    )
+    .map((r) => ({ id: r.id, cnNo: r.cn_no, date: r.date, kind: r.kind, total: r.total, refundMode: r.refund_mode, status: r.status }));
+}
+
+export function getBill(ctx: Ctx, id: number): BillDetail {
+  const b = getBillRow(ctx, id);
+  const creditNotes = creditNotesForBill(ctx, id);
+  let customer: BillCustomer | null = null;
+  if (b.customer_id) {
+    try {
+      customer = customerSummary(ctx, b.customer_id);
+    } catch {
+      customer = null;
+    }
+  }
+  return {
+    id: b.id,
+    billNo: b.bill_no,
+    date: b.date,
+    fyStart: b.fy_start,
+    customerId: b.customer_id,
+    customerName: b.customer_name,
+    customerPhone: b.customer_phone,
+    subtotal: b.subtotal,
+    itemDiscount: b.item_discount,
+    billDiscount: b.bill_discount,
+    billDiscountPct: b.bill_discount_pct,
+    roundOff: b.round_off,
+    total: b.total,
+    paid: b.paid,
+    credit: b.credit,
+    paymentMode: b.payment_mode,
+    remarks: b.remarks,
+    status: b.status,
+    revision: b.revision,
+    printCount: b.print_count,
+    printedCurrent: b.printed_revision !== null && b.printed_revision === b.revision,
+    journalEntryId: b.journal_entry_id,
+    createdAt: b.created_at,
+    createdById: b.created_by,
+    createdByName: userName(ctx, b.created_by),
+    updatedAt: b.updated_at,
+    updatedByName: userName(ctx, b.updated_by),
+    cancelledAt: b.cancelled_at,
+    cancelledByName: userName(ctx, b.cancelled_by),
+    cancelReason: b.cancel_reason,
+    items: getBillItems(ctx, id),
+    payments: getBillPayments(ctx, id),
+    customer,
+    creditNotes,
+    returnedTotal: creditNotes.filter((c) => c.status === 'active').reduce((s, c) => s + c.total, 0),
+    revisions: listRevisions(ctx, 'bill', id).map((r) => ({ revision: r.revision, action: r.action, reason: r.reason, username: r.username, at: r.at })),
+  };
+}
+
+/** Users without "View bills (all days)" may only open today's bills. */
+export function assertBillVisible(ctx: Ctx, bill: { date: string; created_by?: number | null }, opts: { allowOwn?: boolean } = {}): void {
+  requireSession(ctx);
+  if (can(ctx, 'billing.view')) return;
+  if (bill.date === today(ctx)) return;
+  if (opts.allowOwn && bill.created_by && bill.created_by === currentUserId(ctx)) return;
+  throw new AppError('FORBIDDEN', "You can only open today's bills. Ask the owner for permission to view older bills.");
+}
+
+/* ------------------------------------------------------------------ */
+/* Validation & computation                                            */
+/* ------------------------------------------------------------------ */
+
+interface PreparedLine {
+  itemId: number | null;
+  itemName: string;
+  unit: string | null;
+  qty: number;
+  rate: number;
+  discount: number;
+  discountPct: number | null;
+  amount: number;
+}
+
+interface PreparedPayment {
+  mode: SettlementMode;
+  accountId: number;
+  amount: number;
+  reference: string | null;
+}
+
+interface PreparedBill {
+  date: string;
+  customer: CustomerRow | null;
+  customerName: string | null;
+  customerPhone: string | null;
+  lines: PreparedLine[];
+  subtotal: number;
+  itemDiscount: number;
+  billDiscount: number;
+  billDiscountPct: number | null;
+  roundOff: number;
+  total: number;
+  paid: number;
+  credit: number;
+  paymentMode: BillPaymentMode;
+  payments: PreparedPayment[];
+  remarks: string | null;
+  warnings: string[];
+}
+
+const clean = (s: string | null | undefined): string | null => {
+  const t = (s ?? '').trim();
+  return t ? t : null;
+};
+
+function hasAtMost3Decimals(q: number): boolean {
+  return Math.abs(Math.round(q * 1000) - q * 1000) < 1e-6;
+}
+
+function prepareBill(ctx: Ctx, input: BillInput, existing: BillRow | null): PreparedBill {
+  requireSession(ctx);
+  const t = today(ctx);
+  const warnings: string[] = [];
+
+  /* Date */
+  const date = input.date || (existing ? existing.date : t);
+  if (!isValidISODate(date)) throw fail.validation('Enter a valid bill date', { date: 'Enter a valid date' });
+  if (date > t) throw fail.validation('The bill date cannot be in the future.', { date: 'Date is in the future' });
+  const dateChanged = !existing || date !== existing.date;
+  if (dateChanged && date !== t && !can(ctx, 'billing.backdate')) {
+    throw new AppError('FORBIDDEN', "You are not allowed to make bills for a past date. Use today's date or ask the owner for permission.", {
+      date: 'Past dates need permission',
+    });
+  }
+  if (existing && fyOf(date).start !== existing.fy_start) {
+    const fy = fyOf(existing.date);
+    throw fail.validation(
+      `Bill ${existing.bill_no} belongs to financial year ${fy.name}, so its date must stay between ${formatDate(fy.start)} and ${formatDate(fy.end)}. Cancel it and make a new bill instead.`,
+      { date: `Must be within FY ${fy.name}` },
+    );
+  }
+  assertDateOpen(ctx, date, 'This bill');
+
+  /* Customer */
+  let customer: CustomerRow | null = null;
+  if (input.customerId) {
+    customer = customerRow(ctx, input.customerId) ?? null;
+    if (!customer) throw fail.validation('The chosen customer was not found. Please pick the customer again.', { customerId: 'Customer not found' });
+    if (!customer.is_active && existing?.customer_id !== customer.id) {
+      throw fail.validation(`${customer.name} is marked inactive. Re-activate the customer before billing them.`, { customerId: 'Customer is inactive' });
+    }
+  }
+  const customerName = customer ? customer.name : clean(input.customerName);
+  const customerPhone = customer ? customer.phone : clean(input.customerPhone);
+
+  /* Lines */
+  if (!input.items?.length) throw fail.validation('Add at least one item to the bill.', { items: 'Add an item' });
+  const base: Array<Omit<PreparedLine, 'discount' | 'discountPct' | 'amount'> & { inDiscount: number | null; inPct: number | null }> = [];
+  input.items.forEach((l, i) => {
+    const name = (l.itemName ?? '').trim();
+    if (!name) throw fail.validation(`Enter the item name on line ${i + 1}.`, { [`items.${i}.itemName`]: 'Enter the item name' });
+    if (!(l.qty > 0)) throw fail.validation(`Quantity of "${name}" must be more than zero.`, { [`items.${i}.qty`]: 'Must be more than zero' });
+    if (!hasAtMost3Decimals(l.qty)) throw fail.validation(`Quantity of "${name}" can have at most 3 decimal places.`, { [`items.${i}.qty`]: 'Up to 3 decimals' });
+    if (!Number.isInteger(l.rate) || l.rate < 0) throw fail.validation(`Enter a valid rate for "${name}".`, { [`items.${i}.rate`]: 'Invalid rate' });
+    let unit = clean(l.unit);
+    let itemId: number | null = null;
+    if (l.itemId) {
+      const item = ctx.db.get<{ id: number; unit: string }>('SELECT id, unit FROM items WHERE id = ?', [l.itemId]);
+      if (!item) throw fail.validation(`Item "${name}" was not found in the item list. Remove the line and add it again.`, { [`items.${i}.itemId`]: 'Item not found' });
+      itemId = item.id;
+      unit = unit ?? item.unit;
+    }
+    base.push({ itemId, itemName: name, unit, qty: roundQty(l.qty), rate: l.rate, inDiscount: l.discount ?? null, inPct: l.discountPct ?? null });
+  });
+
+  const roundOffOn = getSection(ctx, 'billing').roundOff;
+  const calc = calcBill({
+    lines: base.map((b) => ({ qty: b.qty, rate: b.rate, discount: b.inDiscount, discountPct: b.inPct })),
+    billDiscount: input.billDiscount,
+    billDiscountPct: input.billDiscountPct,
+    roundOff: roundOffOn,
+  });
+  for (const p of calc.problems) {
+    if (p.line !== null) {
+      const l = calc.lines[p.line];
+      throw fail.validation(
+        `Discount on "${base[p.line].itemName}" (${formatINR(l.discount)}) is more than its amount (${formatINR(l.gross)}).`,
+        { [`items.${p.line}.discount`]: p.message },
+      );
+    }
+    throw fail.validation(`The bill discount (${formatINR(calc.billDiscount)}) is more than the bill amount (${formatINR(calc.afterItemDiscount)}).`, {
+      billDiscount: p.message,
+    });
+  }
+  const lines: PreparedLine[] = base.map((b, i) => ({
+    itemId: b.itemId,
+    itemName: b.itemName,
+    unit: b.unit,
+    qty: b.qty,
+    rate: b.rate,
+    discount: calc.lines[i].discount,
+    discountPct: calc.lines[i].discountPct,
+    amount: calc.lines[i].amount,
+  }));
+
+  const totalDiscount = calc.itemDiscount + calc.billDiscount;
+  const discountBefore = existing ? existing.item_discount + existing.bill_discount : 0;
+  if (totalDiscount > discountBefore && !can(ctx, 'billing.discount')) {
+    throw new AppError('FORBIDDEN', 'You are not allowed to give discounts. Remove the discount or ask the owner for permission.', {
+      billDiscount: 'Discounts need permission',
+    });
+  }
+  if (calc.total <= 0) throw fail.validation('The bill total must be more than zero. Check the rates and discounts.', { total: 'Total is zero' });
+
+  /* Payments */
+  const payments: PreparedPayment[] = (input.payments ?? []).map((p, i) => {
+    if (!Number.isInteger(p.amount) || p.amount <= 0) {
+      throw fail.validation(`Payment ${i + 1}: amount must be more than zero.`, { [`payments.${i}.amount`]: 'Must be more than zero' });
+    }
+    return { mode: p.mode, accountId: paymentAccountId(ctx, p.mode, p.accountId), amount: p.amount, reference: clean(p.reference) };
+  });
+  const paid = payments.reduce((s, p) => s + p.amount, 0);
+  if (paid > calc.total) {
+    throw fail.validation(
+      `Payments (${formatINR(paid)}) are more than the bill total (${formatINR(calc.total)}). Enter only the bill amount; give the rest back as change.`,
+      { payments: 'More than the bill total' },
+    );
+  }
+  const credit = calc.total - paid;
+  if (credit > 0 && !customer) {
+    throw fail.validation(`Choose a customer to keep ${formatINR(credit)} on credit, or take the full payment now.`, {
+      customerId: 'Choose a customer for credit',
+    });
+  }
+
+  /* Credit limit */
+  if (customer && credit > 0 && customer.credit_limit !== null && customer.credit_limit > 0) {
+    let balance = partyBalance(ctx, 'customer', customer.id, { account: 'AR' });
+    if (existing && existing.status === 'active' && existing.customer_id === customer.id) balance -= existing.credit;
+    const after = balance + credit;
+    const increases = !existing || existing.customer_id !== customer.id || credit > existing.credit;
+    if (after > customer.credit_limit && increases) {
+      const msg = `${customer.name}'s credit limit is ${formatINR(customer.credit_limit)}; with this bill they would owe ${formatINR(after)}.`;
+      if (getSection(ctx, 'billing').enforceCreditLimit) {
+        throw fail.validation(`${msg} Take a payment now or ask the owner to raise the limit.`, { customerId: 'Credit limit exceeded' });
+      }
+      warnings.push(msg);
+    }
+  }
+
+  return {
+    date,
+    customer,
+    customerName,
+    customerPhone,
+    lines,
+    subtotal: calc.subtotal,
+    itemDiscount: calc.itemDiscount,
+    billDiscount: calc.billDiscount,
+    billDiscountPct: calc.billDiscountPct,
+    roundOff: calc.roundOff,
+    total: calc.total,
+    paid,
+    credit,
+    paymentMode: billPaymentMode(calc.total, payments),
+    payments,
+    remarks: clean(input.remarks),
+    warnings,
+  };
+}
+
+function buildEntry(p: PreparedBill, billId: number, billNo: string): EntryInput {
+  const lines: EntryLineInput[] = [];
+  for (const pay of p.payments) {
+    lines.push({ account: pay.accountId, debit: pay.amount, memo: `${PAYMENT_MODE_LABELS[pay.mode]}${pay.reference ? ` ref ${pay.reference}` : ''}` });
+  }
+  if (p.credit > 0) lines.push({ account: 'AR', debit: p.credit, partyType: 'customer', partyId: p.customer!.id, memo: 'On credit' });
+  const discount = p.itemDiscount + p.billDiscount;
+  if (discount > 0) lines.push({ account: 'DISCOUNT_ALLOWED', debit: discount });
+  if (p.roundOff < 0) lines.push({ account: 'ROUND_OFF', debit: -p.roundOff });
+  lines.push({ account: 'SALES', credit: p.subtotal });
+  if (p.roundOff > 0) lines.push({ account: 'ROUND_OFF', credit: p.roundOff });
+  return {
+    date: p.date,
+    voucherType: 'sale',
+    voucherNo: billNo,
+    sourceType: 'bill',
+    sourceId: billId,
+    narration: `Bill ${billNo}${p.customerName ? ` - ${p.customerName}` : ''}`,
+    lines,
+  };
+}
+
+function billColumns(p: PreparedBill): Record<string, unknown> {
+  return {
+    date: p.date,
+    customer_id: p.customer?.id ?? null,
+    customer_name: p.customerName,
+    customer_phone: p.customerPhone,
+    subtotal: p.subtotal,
+    item_discount: p.itemDiscount,
+    bill_discount: p.billDiscount,
+    bill_discount_pct: p.billDiscountPct,
+    round_off: p.roundOff,
+    total: p.total,
+    paid: p.paid,
+    credit: p.credit,
+    payment_mode: p.paymentMode,
+    remarks: p.remarks,
+  };
+}
+
+function writeLinesAndPayments(ctx: Ctx, billId: number, p: PreparedBill): void {
+  p.lines.forEach((l, i) => {
+    ctx.db.insert('bill_items', {
+      bill_id: billId,
+      line_no: i + 1,
+      item_id: l.itemId,
+      item_name: l.itemName,
+      unit: l.unit,
+      qty: l.qty,
+      rate: l.rate,
+      discount: l.discount,
+      discount_pct: l.discountPct,
+      amount: l.amount,
+    });
+  });
+  for (const pay of p.payments) {
+    ctx.db.insert('bill_payments', { bill_id: billId, mode: pay.mode, account_id: pay.accountId, amount: pay.amount, reference: pay.reference });
+  }
+}
+
+/* ------------------------------------------------------------------ */
+/* Snapshots & change descriptions (audit trail)                       */
+/* ------------------------------------------------------------------ */
+
+export interface BillSnapshot {
+  billNo: string;
+  date: string;
+  status: 'active' | 'cancelled';
+  customerId: number | null;
+  customerName: string | null;
+  customerPhone: string | null;
+  items: Array<{ itemId: number | null; itemName: string; unit: string | null; qty: number; rate: number; discount: number; discountPct: number | null; amount: number }>;
+  subtotal: number;
+  itemDiscount: number;
+  billDiscount: number;
+  billDiscountPct: number | null;
+  roundOff: number;
+  total: number;
+  paid: number;
+  credit: number;
+  paymentMode: BillPaymentMode;
+  payments: Array<{ mode: SettlementMode; accountId: number; accountName: string; amount: number; reference: string | null }>;
+  remarks: string | null;
+  cancelReason: string | null;
+}
+
+export function billSnapshot(b: BillDetail): BillSnapshot {
+  return {
+    billNo: b.billNo,
+    date: b.date,
+    status: b.status,
+    customerId: b.customerId,
+    customerName: b.customerName,
+    customerPhone: b.customerPhone,
+    items: b.items.map((i) => ({
+      itemId: i.itemId,
+      itemName: i.itemName,
+      unit: i.unit,
+      qty: i.qty,
+      rate: i.rate,
+      discount: i.discount,
+      discountPct: i.discountPct,
+      amount: i.amount,
+    })),
+    subtotal: b.subtotal,
+    itemDiscount: b.itemDiscount,
+    billDiscount: b.billDiscount,
+    billDiscountPct: b.billDiscountPct,
+    roundOff: b.roundOff,
+    total: b.total,
+    paid: b.paid,
+    credit: b.credit,
+    paymentMode: b.paymentMode,
+    payments: b.payments.map((p) => ({ mode: p.mode, accountId: p.accountId, accountName: p.accountName, amount: p.amount, reference: p.reference })),
+    remarks: b.remarks,
+    cancelReason: b.cancelReason,
+  };
+}
+
+export interface BillChange {
+  /** What changed, e.g. "Total", "Item added", "Sugar". */
+  label: string;
+  before: string | null;
+  after: string | null;
+}
+
+const qtyText = (qty: number, unit: string | null) => `${formatQty(qty)}${unit ? ' ' + unit : ''}`;
+const discText = (d: number, pct: number | null) => (d ? (pct ? `${formatQty(pct)}% (${formatINR(d)})` : formatINR(d)) : 'none');
+const lineText = (i: BillSnapshot['items'][number]) =>
+  `${qtyText(i.qty, i.unit)} × ${formatINR(i.rate)}${i.discount ? ` less ${discText(i.discount, i.discountPct)}` : ''} = ${formatINR(i.amount)}`;
+const paymentsText = (s: BillSnapshot) => {
+  const parts = s.payments.map((p) => `${PAYMENT_MODE_LABELS[p.mode]} ${formatINR(p.amount)}`);
+  if (s.credit > 0) parts.push(`Credit ${formatINR(s.credit)}`);
+  return parts.join(' + ') || 'none';
+};
+
+/** Readable differences between two versions of a bill. */
+export function diffBills(a: BillSnapshot, b: BillSnapshot): BillChange[] {
+  const out: BillChange[] = [];
+  if (a.date !== b.date) out.push({ label: 'Date', before: formatDate(a.date), after: formatDate(b.date) });
+  const custA = a.customerName ? `${a.customerName}${a.customerId ? '' : ' (walk-in)'}` : 'Walk-in';
+  const custB = b.customerName ? `${b.customerName}${b.customerId ? '' : ' (walk-in)'}` : 'Walk-in';
+  if (a.customerId !== b.customerId || (a.customerName ?? '') !== (b.customerName ?? '')) out.push({ label: 'Customer', before: custA, after: custB });
+  if ((a.customerPhone ?? '') !== (b.customerPhone ?? '') && a.customerId === b.customerId) {
+    out.push({ label: 'Phone', before: a.customerPhone || '—', after: b.customerPhone || '—' });
+  }
+
+  // Items: match by item id (or name for free-text lines), in order.
+  const key = (i: BillSnapshot['items'][number]) => (i.itemId ? `id:${i.itemId}` : `name:${i.itemName.toLowerCase()}`);
+  const remaining = [...b.items];
+  for (const ia of a.items) {
+    const idx = remaining.findIndex((ib) => key(ib) === key(ia));
+    if (idx < 0) {
+      out.push({ label: 'Item removed', before: `${ia.itemName}: ${lineText(ia)}`, after: null });
+      continue;
+    }
+    const ib = remaining.splice(idx, 1)[0];
+    if (ia.qty !== ib.qty || ia.rate !== ib.rate || ia.discount !== ib.discount || (ia.unit ?? '') !== (ib.unit ?? '') || ia.itemName !== ib.itemName) {
+      out.push({ label: ib.itemName, before: lineText(ia), after: lineText(ib) });
+    }
+  }
+  for (const ib of remaining) out.push({ label: 'Item added', before: null, after: `${ib.itemName}: ${lineText(ib)}` });
+
+  if (a.billDiscount !== b.billDiscount) out.push({ label: 'Bill discount', before: discText(a.billDiscount, a.billDiscountPct), after: discText(b.billDiscount, b.billDiscountPct) });
+  if (a.roundOff !== b.roundOff) out.push({ label: 'Round off', before: formatINR(a.roundOff), after: formatINR(b.roundOff) });
+  if (a.total !== b.total) out.push({ label: 'Total', before: formatINR(a.total), after: formatINR(b.total) });
+  if (paymentsText(a) !== paymentsText(b)) out.push({ label: 'Payment', before: paymentsText(a), after: paymentsText(b) });
+  if ((a.remarks ?? '') !== (b.remarks ?? '')) out.push({ label: 'Remarks', before: a.remarks || '—', after: b.remarks || '—' });
+  if (a.status !== b.status) out.push({ label: 'Status', before: a.status === 'active' ? 'Active' : 'Cancelled', after: b.status === 'active' ? 'Active' : 'Cancelled' });
+  return out;
+}
+
+const GENERIC_LABELS = ['Date', 'Customer', 'Phone', 'Bill discount', 'Round off', 'Total', 'Payment', 'Status'];
+
+/** One line for the activity log, e.g. "total ₹450.00 → ₹500.00; added Sugar: 2 kg × ₹45.00 = ₹90.00". */
+export function changeSummary(changes: BillChange[]): string {
+  if (!changes.length) return 'no changes';
+  return changes
+    .map((c) => {
+      if (c.label === 'Item added') return `added ${c.after}`;
+      if (c.label === 'Item removed') return `removed ${c.before}`;
+      if (c.label === 'Remarks') return 'remarks changed';
+      const label = GENERIC_LABELS.includes(c.label) ? c.label.toLowerCase() : c.label;
+      return `${label} ${c.before} → ${c.after}`;
+    })
+    .join('; ');
+}
+
+export interface BillRevision {
+  revision: number;
+  action: string;
+  reason: string | null;
+  username: string | null;
+  at: string;
+  snapshot: BillSnapshot;
+  /** Differences from the previous revision (empty for the first one). */
+  changes: BillChange[];
+}
+
+export function billRevisions(ctx: Ctx, id: number): BillRevision[] {
+  const revs = listRevisions(ctx, 'bill', id);
+  return revs.map((r, i) => ({
+    revision: r.revision,
+    action: r.action,
+    reason: r.reason,
+    username: r.username,
+    at: r.at,
+    snapshot: r.snapshot as BillSnapshot,
+    changes: i === 0 ? [] : diffBills(revs[i - 1].snapshot as BillSnapshot, r.snapshot as BillSnapshot),
+  }));
+}
+
+/* ------------------------------------------------------------------ */
+/* Create / update / cancel                                            */
+/* ------------------------------------------------------------------ */
+
+export type BillResult = BillDetail & { warnings: string[] };
+
+export function createBill(ctx: Ctx, input: BillInput): BillResult {
+  const p = prepareBill(ctx, input, null);
+  const num = nextDocNumber(ctx, 'bill', p.date);
+  const id = ctx.db.insert('bills', {
+    bill_no: num.number,
+    seq: num.seq,
+    fy_start: num.fyStart,
+    ...billColumns(p),
+    status: 'active',
+    revision: 1,
+    created_by: currentUserId(ctx),
+    created_at: now(ctx),
+  });
+  writeLinesAndPayments(ctx, id, p);
+  const entryId = postEntry(ctx, buildEntry(p, id, num.number));
+  ctx.db.update('bills', id, { journal_entry_id: entryId });
+  for (const itemId of new Set(p.lines.map((l) => l.itemId).filter((x): x is number => !!x))) touchItemUsage(ctx, itemId);
+
+  recordRevision(ctx, 'bill', id, 'created', billSnapshot(getBill(ctx, id)));
+  const mode = BILL_PAYMENT_MODE_LABELS[p.paymentMode];
+  logActivity(ctx, 'bill.create', `Created bill ${num.number} for ${formatINR(p.total)} (${mode})${p.customerName ? ` - ${p.customerName}` : ''}`, {
+    entityType: 'bill',
+    entityId: id,
+    details: { total: p.total, paymentMode: p.paymentMode, customerId: p.customer?.id ?? null, items: p.lines.length },
+  });
+  return { ...getBill(ctx, id), warnings: p.warnings };
+}
+
+function activeCreditNotes(ctx: Ctx, billId: number): Array<{ cn_no: string }> {
+  return ctx.db.all<{ cn_no: string }>("SELECT cn_no FROM credit_notes WHERE bill_id = ? AND status = 'active' ORDER BY id", [billId]);
+}
+
+function assertNoActiveReturns(ctx: Ctx, bill: BillRow, action: 'edit' | 'cancel'): void {
+  const notes = activeCreditNotes(ctx, bill.id);
+  if (notes.length) {
+    const list = notes.map((n) => n.cn_no).join(', ');
+    throw fail.validation(
+      `Bill ${bill.bill_no} has ${notes.length === 1 ? 'a sales return' : 'sales returns'} (${list}). Cancel ${notes.length === 1 ? 'it' : 'them'} first, then ${action} the bill.`,
+    );
+  }
+}
+
+export function updateBill(ctx: Ctx, id: number, input: BillInput, reason: string | null): BillResult {
+  const bill = getBillRow(ctx, id);
+  if (bill.status !== 'active') throw fail.validation(`Bill ${bill.bill_no} is cancelled and cannot be edited.`);
+  assertNoActiveReturns(ctx, bill, 'edit');
+  const before = billSnapshot(getBill(ctx, id));
+  const p = prepareBill(ctx, input, bill);
+
+  ctx.db.update('bills', id, { ...billColumns(p), revision: bill.revision + 1, updated_by: currentUserId(ctx), updated_at: now(ctx) });
+  ctx.db.run('DELETE FROM bill_items WHERE bill_id = ?', [id]);
+  ctx.db.run('DELETE FROM bill_payments WHERE bill_id = ?', [id]);
+  writeLinesAndPayments(ctx, id, p);
+  const entry = buildEntry(p, id, bill.bill_no);
+  if (bill.journal_entry_id) replaceEntry(ctx, bill.journal_entry_id, entry);
+  else ctx.db.update('bills', id, { journal_entry_id: postEntry(ctx, entry) });
+
+  const oldItems = new Set(before.items.map((i) => i.itemId).filter(Boolean));
+  for (const itemId of new Set(p.lines.map((l) => l.itemId).filter((x): x is number => !!x))) {
+    if (!oldItems.has(itemId)) touchItemUsage(ctx, itemId);
+  }
+
+  const after = billSnapshot(getBill(ctx, id));
+  recordRevision(ctx, 'bill', id, 'edited', after, reason);
+  const changes = diffBills(before, after);
+  logActivity(ctx, 'bill.edit', `Edited bill ${bill.bill_no}: ${changeSummary(changes)}${reason ? `. Reason: ${reason}` : ''}`, {
+    entityType: 'bill',
+    entityId: id,
+    details: { reason, changes },
+  });
+  return { ...getBill(ctx, id), warnings: p.warnings };
+}
+
+export function cancelBill(ctx: Ctx, id: number, reason: string): BillDetail {
+  const bill = getBillRow(ctx, id);
+  if (bill.status === 'cancelled') throw fail.validation(`Bill ${bill.bill_no} is already cancelled.`);
+  const why = reason.trim();
+  if (!why) throw fail.validation('Enter the reason for cancelling the bill.', { reason: 'Reason is required' });
+  assertNoActiveReturns(ctx, bill, 'cancel');
+  const at = now(ctx);
+  ctx.db.update('bills', id, { status: 'cancelled', cancelled_by: currentUserId(ctx), cancelled_at: at, cancel_reason: why });
+  if (bill.journal_entry_id) voidEntry(ctx, bill.journal_entry_id, `Bill ${bill.bill_no} cancelled: ${why}`);
+  const detail = getBill(ctx, id);
+  recordRevision(ctx, 'bill', id, 'cancelled', billSnapshot(detail), why);
+  logActivity(ctx, 'bill.cancel', `Cancelled bill ${bill.bill_no} (${formatINR(bill.total)}${bill.customer_name ? ` - ${bill.customer_name}` : ''}). Reason: ${why}`, {
+    entityType: 'bill',
+    entityId: id,
+    details: { reason: why, total: bill.total },
+  });
+  return getBill(ctx, id);
+}
+
+/* ------------------------------------------------------------------ */
+/* Lists                                                               */
+/* ------------------------------------------------------------------ */
+
+export interface BillListQuery {
+  from: string;
+  to: string;
+  q?: string | null;
+  status?: 'active' | 'cancelled' | null;
+  paymentMode?: BillPaymentMode | null;
+  customerId?: number | null;
+  limit: number;
+  offset: number;
+}
+
+export interface BillListRow {
+  id: number;
+  billNo: string;
+  date: string;
+  createdAt: string;
+  customerId: number | null;
+  customerName: string | null;
+  customerPhone: string | null;
+  itemCount: number;
+  itemsSummary: string;
+  total: number;
+  paid: number;
+  credit: number;
+  discount: number;
+  paymentMode: BillPaymentMode;
+  status: 'active' | 'cancelled';
+  edited: boolean;
+  printCount: number;
+  createdByName: string | null;
+}
+
+export interface BillListResult {
+  from: string;
+  to: string;
+  /** True when the range was limited to today (user may not view older bills). */
+  todayOnly: boolean;
+  rows: BillListRow[];
+  totals: { count: number; total: number; paid: number; credit: number; discount: number; cancelledCount: number };
+  hasMore: boolean;
+}
+
+export function listBills(ctx: Ctx, query: BillListQuery): BillListResult {
+  requireSession(ctx);
+  let { from, to } = query;
+  const todayOnly = !can(ctx, 'billing.view');
+  if (todayOnly) from = to = today(ctx);
+  if (from > to) [from, to] = [to, from];
+  const where = ['b.date >= :from', 'b.date <= :to'];
+  const params: Record<string, unknown> = { from, to };
+  if (query.status) {
+    where.push('b.status = :status');
+    params.status = query.status;
+  }
+  if (query.paymentMode) {
+    where.push('b.payment_mode = :mode');
+    params.mode = query.paymentMode;
+  }
+  if (query.customerId) {
+    where.push('b.customer_id = :customerId');
+    params.customerId = query.customerId;
+  }
+  const text = (query.q ?? '').trim();
+  if (text) {
+    where.push(`(b.bill_no LIKE :like OR b.customer_name LIKE :like OR REPLACE(COALESCE(b.customer_phone, ''), ' ', '') LIKE :phone
+       OR b.remarks LIKE :like OR EXISTS (SELECT 1 FROM bill_items bi WHERE bi.bill_id = b.id AND bi.item_name LIKE :like))`);
+    params.like = `%${text}%`;
+    params.phone = `%${text.replace(/\s/g, '')}%`;
+  }
+  const whereSql = where.join(' AND ');
+  const rows = ctx.db.all<BillRow & { item_count: number; created_by_name: string | null }>(
+    `SELECT b.*, (SELECT COUNT(*) FROM bill_items bi WHERE bi.bill_id = b.id) AS item_count, u.full_name AS created_by_name
+       FROM bills b LEFT JOIN users u ON u.id = b.created_by
+      WHERE ${whereSql}
+      ORDER BY b.date DESC, b.id DESC LIMIT :limit OFFSET :offset`,
+    { ...params, limit: query.limit + 1, offset: query.offset },
+  );
+  const hasMore = rows.length > query.limit;
+  if (hasMore) rows.pop();
+  const names = new Map<number, string[]>();
+  if (rows.length) {
+    const ids = rows.map((r) => r.id);
+    for (const r of ctx.db.all<{ bill_id: number; item_name: string }>(
+      `SELECT bill_id, item_name FROM bill_items WHERE bill_id IN (${ids.map(() => '?').join(',')}) ORDER BY bill_id, line_no`,
+      ids,
+    )) {
+      const list = names.get(r.bill_id) ?? [];
+      list.push(r.item_name);
+      names.set(r.bill_id, list);
+    }
+  }
+  const totals = ctx.db.get<{ count: number; total: number; paid: number; credit: number; discount: number; cancelled: number }>(
+    `SELECT COUNT(*) AS count,
+            COALESCE(SUM(CASE WHEN b.status = 'active' THEN b.total END), 0) AS total,
+            COALESCE(SUM(CASE WHEN b.status = 'active' THEN b.paid END), 0) AS paid,
+            COALESCE(SUM(CASE WHEN b.status = 'active' THEN b.credit END), 0) AS credit,
+            COALESCE(SUM(CASE WHEN b.status = 'active' THEN b.item_discount + b.bill_discount END), 0) AS discount,
+            COALESCE(SUM(CASE WHEN b.status = 'cancelled' THEN 1 ELSE 0 END), 0) AS cancelled
+       FROM bills b WHERE ${whereSql}`,
+    params,
+  )!;
+  return {
+    from,
+    to,
+    todayOnly,
+    hasMore,
+    rows: rows.map((r) => {
+      const list = names.get(r.id) ?? [];
+      return {
+        id: r.id,
+        billNo: r.bill_no,
+        date: r.date,
+        createdAt: r.created_at,
+        customerId: r.customer_id,
+        customerName: r.customer_name,
+        customerPhone: r.customer_phone,
+        itemCount: r.item_count,
+        itemsSummary: list.length > 3 ? `${list.slice(0, 3).join(', ')} +${list.length - 3} more` : list.join(', '),
+        total: r.total,
+        paid: r.paid,
+        credit: r.credit,
+        discount: r.item_discount + r.bill_discount,
+        paymentMode: r.payment_mode,
+        status: r.status,
+        edited: r.revision > 1,
+        printCount: r.print_count,
+        createdByName: r.created_by_name,
+      };
+    }),
+    totals: {
+      count: totals.count,
+      total: totals.total,
+      paid: totals.paid,
+      credit: totals.credit,
+      discount: totals.discount,
+      cancelledCount: totals.cancelled,
+    },
+  };
+}
+
+/* ------------------------------------------------------------------ */
+/* Quick repeat                                                        */
+/* ------------------------------------------------------------------ */
+
+export interface RepeatLine {
+  itemId: number | null;
+  itemName: string;
+  unit: string | null;
+  qty: number;
+  rate: number;
+  /** Current default rate of the item (null for free-text lines). */
+  defaultRate: number | null;
+  discount: number | null;
+  discountPct: number | null;
+}
+
+export interface RepeatData {
+  sourceBillId: number;
+  sourceBillNo: string;
+  lines: RepeatLine[];
+  customer: BillCustomer | null;
+  customerName: string | null;
+  customerPhone: string | null;
+  billDiscount: number | null;
+  billDiscountPct: number | null;
+  /** Items whose default rate is now different from the old bill. */
+  rateChanges: number;
+}
+
+export function repeatData(ctx: Ctx, billId: number): RepeatData {
+  const b = getBill(ctx, billId);
+  const allowDiscount = can(ctx, 'billing.discount');
+  let rateChanges = 0;
+  const lines = b.items.map((i): RepeatLine => {
+    const item = i.itemId ? ctx.db.get<{ rate: number; unit: string }>('SELECT rate, unit FROM items WHERE id = ?', [i.itemId]) : undefined;
+    if (item && item.rate !== i.rate) rateChanges++;
+    return {
+      itemId: item ? i.itemId : null,
+      itemName: i.itemName,
+      unit: i.unit,
+      qty: i.qty,
+      rate: i.rate,
+      defaultRate: item ? item.rate : null,
+      discount: allowDiscount && !i.discountPct && i.discount ? i.discount : null,
+      discountPct: allowDiscount && i.discountPct ? i.discountPct : null,
+    };
+  });
+  const customer = b.customer && b.customer.isActive ? b.customer : null;
+  return {
+    sourceBillId: b.id,
+    sourceBillNo: b.billNo,
+    lines,
+    customer,
+    customerName: customer ? null : b.customerId ? null : b.customerName,
+    customerPhone: customer ? null : b.customerId ? null : b.customerPhone,
+    billDiscount: allowDiscount && !b.billDiscountPct && b.billDiscount ? b.billDiscount : null,
+    billDiscountPct: allowDiscount && b.billDiscountPct ? b.billDiscountPct : null,
+    rateChanges,
+  };
+}
+
+export interface CustomerItem {
+  itemId: number | null;
+  itemName: string;
+  unit: string | null;
+  /** Rate charged to this customer last time. */
+  lastRate: number;
+  lastQty: number;
+  lastDate: string;
+  /** Current default rate (null for free-text lines or deleted items). */
+  defaultRate: number | null;
+  times: number;
+}
+
+/** Items a customer bought recently, newest first (for one-tap repeat on the billing screen). */
+export function customerItems(ctx: Ctx, customerId: number, limit = 12): CustomerItem[] {
+  const rows = ctx.db.all<{ item_id: number | null; item_name: string; unit: string | null; rate: number; qty: number; date: string; cur_rate: number | null; cur_active: number | null }>(
+    `SELECT bi.item_id, bi.item_name, bi.unit, bi.rate, bi.qty, b.date, it.rate AS cur_rate, it.is_active AS cur_active
+       FROM bill_items bi JOIN bills b ON b.id = bi.bill_id LEFT JOIN items it ON it.id = bi.item_id
+      WHERE b.customer_id = ? AND b.status = 'active'
+      ORDER BY b.date DESC, b.id DESC, bi.line_no LIMIT 400`,
+    [customerId],
+  );
+  const map = new Map<string, CustomerItem>();
+  for (const r of rows) {
+    const key = r.item_id ? `id:${r.item_id}` : `name:${r.item_name.toLowerCase()}`;
+    const existing = map.get(key);
+    if (existing) {
+      existing.times++;
+      continue;
+    }
+    if (r.item_id && r.cur_active === 0) continue;
+    map.set(key, {
+      itemId: r.item_id,
+      itemName: r.item_name,
+      unit: r.unit,
+      lastRate: r.rate,
+      lastQty: r.qty,
+      lastDate: r.date,
+      defaultRate: r.cur_rate,
+      times: 1,
+    });
+  }
+  return [...map.values()].slice(0, limit);
+}
+
+export interface LastBillInfo {
+  id: number;
+  billNo: string;
+  date: string;
+  total: number;
+  customerName: string | null;
+  itemCount: number;
+}
+
+/** The current user's most recent active bill (for "Repeat last bill"). */
+export function lastBill(ctx: Ctx): LastBillInfo | null {
+  const uid = requireSession(ctx).userId;
+  const r = ctx.db.get<{ id: number; bill_no: string; date: string; total: number; customer_name: string | null }>(
+    "SELECT id, bill_no, date, total, customer_name FROM bills WHERE created_by = ? AND status = 'active' ORDER BY id DESC LIMIT 1",
+    [uid],
+  );
+  if (!r) return null;
+  const itemCount = ctx.db.value<number>('SELECT COUNT(*) FROM bill_items WHERE bill_id = ?', [r.id], 0);
+  return { id: r.id, billNo: r.bill_no, date: r.date, total: r.total, customerName: r.customer_name, itemCount };
+}
+
+export function nextBillNumber(ctx: Ctx, date?: string | null): string {
+  return peekDocNumber(ctx, 'bill', date || today(ctx));
+}
+
+/** Settings the billing screen needs (readable by cashiers, unlike the settings module). */
+export function posConfig(ctx: Ctx) {
+  const billing = getSection(ctx, 'billing');
+  const receipt = getSection(ctx, 'receipt');
+  const t = today(ctx);
+  return {
+    today: t,
+    nextBillNo: nextBillNumber(ctx, t),
+    roundOff: billing.roundOff,
+    defaultPaymentMode: billing.defaultPaymentMode,
+    enforceCreditLimit: billing.enforceCreditLimit,
+    autoPrint: receipt.autoPrint,
+    paperWidth: receipt.paperWidth,
+    printerName: receipt.printerName,
+    booksStartDate: getSection(ctx, 'accounts').booksStartDate,
+  };
+}
+
+/* ------------------------------------------------------------------ */
+/* Receipts & printing                                                 */
+/* ------------------------------------------------------------------ */
+
+export function billReceiptDoc(ctx: Ctx, b: BillDetail, opts: { duplicate?: boolean } = {}): ReceiptDoc {
+  const receipt = getSection(ctx, 'receipt');
+  const business = getSection(ctx, 'business');
+  const sameDay = b.createdAt.slice(0, 10) === b.date;
+  const meta: Array<[string, string]> = [
+    ['Bill No', b.billNo],
+    ['Date', `${formatDate(b.date)}${sameDay ? `  ${formatTime(b.createdAt)}` : ''}`],
+  ];
+  if (receipt.showCashier && b.createdByName) meta.push(['Cashier', b.createdByName]);
+
+  const items = b.items.map((i) => ({
+    name: i.itemName,
+    qty: qtyText(i.qty, i.unit),
+    rate: formatAmount(i.rate),
+    amount: formatAmount(i.gross),
+    note: i.discount ? `Less discount${i.discountPct ? ` ${formatQty(i.discountPct)}%` : ''}: -${formatAmount(i.discount)}` : undefined,
+  }));
+
+  const totals: ReceiptTotal[] = [];
+  const hasAdjust = b.itemDiscount > 0 || b.billDiscount > 0 || b.roundOff !== 0;
+  if (hasAdjust) totals.push({ label: 'Subtotal', value: formatINR(b.subtotal) });
+  if (b.itemDiscount > 0) totals.push({ label: 'Item discount', value: `-${formatINR(b.itemDiscount)}` });
+  if (b.billDiscount > 0) totals.push({ label: `Discount${b.billDiscountPct ? ` (${formatQty(b.billDiscountPct)}%)` : ''}`, value: `-${formatINR(b.billDiscount)}` });
+  if (b.roundOff !== 0) totals.push({ label: 'Round off', value: formatINR(b.roundOff, { plus: true }) });
+  totals.push({ label: 'TOTAL', value: formatINR(b.total), big: true });
+  for (const p of b.payments) totals.push({ label: `Paid by ${PAYMENT_MODE_LABELS[p.mode]}${p.reference ? ` (${p.reference})` : ''}`, value: formatINR(p.amount) });
+  if (b.credit > 0) totals.push({ label: 'Balance on credit', value: formatINR(b.credit), bold: true });
+
+  const lines: string[] = [];
+  const totalQty = roundQty(b.items.reduce((s, i) => s + i.qty, 0));
+  lines.push(`Items: ${b.items.length}    Qty: ${formatQty(totalQty)}`);
+  if (b.itemDiscount + b.billDiscount > 0) lines.push(`You saved ${formatINR(b.itemDiscount + b.billDiscount)} on this bill`);
+  if (receipt.showAmountInWords) lines.push(amountInWords(b.total));
+  if (b.credit > 0 && b.customer && b.status === 'active') {
+    lines.push(`Total due from you: ${formatINR(b.customer.balance)} (as on ${formatDate(today(ctx))})`);
+  }
+  const returns = b.creditNotes.filter((c) => c.status === 'active');
+  for (const c of returns) lines.push(`${c.kind === 'return' ? 'Goods returned' : 'Credit note'} ${c.cnNo}: -${formatINR(c.total)}`);
+  if (b.remarks) lines.push(`Remarks: ${b.remarks}`);
+  if (b.status === 'cancelled') lines.push(`Cancelled${b.cancelledAt ? ` on ${formatDate(b.cancelledAt)}` : ''}: ${b.cancelReason ?? ''}`);
+
+  let qr: ReceiptDoc['qr'];
+  const upiId = business.upiId?.trim();
+  if (upiId && b.status === 'active' && (receipt.upiQr === 'always' || (receipt.upiQr === 'unpaid' && b.credit > 0))) {
+    const amount = b.credit > 0 ? b.credit : b.total;
+    qr = { data: upiLink(upiId, business.upiName?.trim() || business.name || 'Shop', amount, `Bill ${b.billNo}`), caption: `Scan to pay ${formatINR(amount)} by UPI` };
+  }
+
+  return {
+    title: 'BILL',
+    duplicate: !!opts.duplicate,
+    cancelled: b.status === 'cancelled',
+    meta,
+    party: receipt.showCustomer && b.customerName ? { label: 'Customer', name: b.customerName, phone: b.customerPhone } : undefined,
+    items,
+    totals,
+    lines,
+    qr,
+  };
+}
+
+export function billReceiptHtml(ctx: Ctx, id: number, opts: { duplicate?: boolean } = {}): { html: string; paperWidth: 80 | 58 } {
+  const b = getBill(ctx, id);
+  const receipt = getSection(ctx, 'receipt');
+  return { html: renderReceiptHtml(billReceiptDoc(ctx, b, opts), getSection(ctx, 'business'), receipt), paperWidth: receipt.paperWidth };
+}
+
+export interface PrintOutcome {
+  printed: boolean;
+  duplicate: boolean;
+  message: string;
+}
+
+/** Send receipt HTML to the configured receipt printer. */
+export async function sendToReceiptPrinter(ctx: Ctx, html: string, duplicate: boolean): Promise<{ printed: boolean; message?: string }> {
+  const receipt = getSection(ctx, 'receipt');
+  const printerName = receipt.printerName?.trim() || undefined;
+  return ctx.platform.printHtml(html, {
+    printerName,
+    silent: !!printerName,
+    paperWidthMm: receipt.paperWidth,
+    copies: duplicate ? 1 : Math.max(1, receipt.copies || 1),
+  });
+}
+
+/**
+ * Print a bill. The first print of each version is the original; printing
+ * the same version again is a reprint: it needs "Reprint bills", is marked
+ * DUPLICATE (setting) and is logged.
+ */
+export async function printBill(ctx: Ctx, id: number): Promise<PrintOutcome> {
+  const row = getBillRow(ctx, id);
+  assertBillVisible(ctx, row, { allowOwn: false });
+  const reprint = row.printed_revision !== null && row.printed_revision === row.revision;
+  if (reprint) assertCan(ctx, 'billing.reprint', 'You are not allowed to reprint bills. Ask the owner for permission.');
+  const duplicate = reprint && getSection(ctx, 'receipt').markDuplicate;
+  const { html } = billReceiptHtml(ctx, id, { duplicate });
+  const res = await sendToReceiptPrinter(ctx, html, reprint);
+  if (!res.printed) return { printed: false, duplicate, message: res.message || 'Printing was cancelled.' };
+  ctx.db.tx(() => {
+    ctx.db.run('UPDATE bills SET print_count = print_count + 1, printed_revision = revision WHERE id = ?', [id]);
+    if (reprint) {
+      logActivity(ctx, 'bill.reprint', `Reprinted bill ${row.bill_no} (${formatINR(row.total)})${duplicate ? ' marked DUPLICATE' : ''}`, {
+        entityType: 'bill',
+        entityId: id,
+        details: { printCount: row.print_count + 1 },
+      });
+    }
+  });
+  return { printed: true, duplicate, message: res.message || (reprint ? `Duplicate of ${row.bill_no} sent to the printer` : `Bill ${row.bill_no} sent to the printer`) };
+}
