@@ -138,11 +138,11 @@ export const salesRoutes = {
   }),
 
   /** Settings and next number for the billing screen. */
-  'sales.posConfig': route({ access: [...VIEW, 'returns.create'], handler: (ctx) => sales.posConfig(ctx) }),
+  'sales.posConfig': route({ access: [...VIEW, 'returns.create', 'returns.adjust'], handler: (ctx) => sales.posConfig(ctx) }),
 
   /** One customer with the current balance (e.g. /billing/new?customer=12). */
   'sales.customer': route({
-    access: ['billing.create', 'billing.view', 'returns.create'],
+    access: ['billing.create', 'billing.view', 'returns.create', 'returns.adjust'],
     input: z.object({ id: zId }),
     handler: (ctx, input) => sales.customerSummary(ctx, input.id),
   }),

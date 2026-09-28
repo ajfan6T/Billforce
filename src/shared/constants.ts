@@ -1,5 +1,3 @@
-export const APP_NAME = 'Billforce';
-
 export const PAYMENT_MODES = ['cash', 'upi', 'bank', 'credit'] as const;
 export type PaymentMode = (typeof PAYMENT_MODES)[number];
 
@@ -133,13 +131,4 @@ export const ATTENDANCE_LABELS: Record<AttendanceStatus, string> = {
   H: 'Half day',
   L: 'Paid leave',
   W: 'Weekly off',
-};
-
-/** Paid-day weight of each attendance status. */
-export const ATTENDANCE_PAID_WEIGHT: Record<AttendanceStatus, number> = {
-  P: 1,
-  A: 0,
-  H: 0.5,
-  L: 1,
-  W: 1,
 };

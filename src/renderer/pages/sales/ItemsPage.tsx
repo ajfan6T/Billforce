@@ -316,7 +316,7 @@ export function ItemsPage() {
         )}
       </Toolbar>
       {list.error && <ErrorBox error={list.error} onRetry={list.reload} />}
-      <div className="card">
+      <div className="card sl-list-card">
         <DataTable<Item>
           columns={columns}
           rows={list.data}

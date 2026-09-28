@@ -10,15 +10,15 @@
  */
 import type { Ctx } from '../../context';
 import { fail } from '../../errors';
-import { accountBalance, paymentAccountId, systemAccountId } from '../../accounting/ledger';
+import { paymentAccountId, systemAccountId } from '../../accounting/ledger';
 import { entrySourceLink } from '../../accounting/links';
 import { getSection } from '../../settings';
-import { formatINR, formatDrCr } from '../../../shared/money';
+import { formatINR } from '../../../shared/money';
 import { describeRange, formatDate, fyOf } from '../../../shared/dates';
 import { PAYMENT_MODE_LABELS, type SettlementMode, type VoucherType } from '../../../shared/constants';
 import type { ReportData, ReportRow } from '../../../shared/report';
 import { activeAccount, inList, joinNames, resolveVoucherDate, userName, voucherLabel } from './common';
-import { getEntryDetail, postManualVoucher, type EntryDetail } from './journals';
+import { getEntryDetail, postManualVoucher, type EntryDetail, type SavedEntry } from './journals';
 
 function settlementAccount(ctx: Ctx, mode: SettlementMode, accountId?: number | null) {
   const id = paymentAccountId(ctx, mode, accountId);
@@ -36,7 +36,7 @@ export interface CapitalInput {
   narration?: string | null;
 }
 
-export function addCapital(ctx: Ctx, input: CapitalInput): EntryDetail {
+export function addCapital(ctx: Ctx, input: CapitalInput): SavedEntry {
   const date = resolveVoucherDate(ctx, input.date, 'Capital');
   const pay = settlementAccount(ctx, input.mode, input.accountId);
   const capital = activeAccount(ctx, input.capitalAccountId ?? systemAccountId(ctx, 'CAPITAL'), 'capital account');
@@ -45,7 +45,7 @@ export function addCapital(ctx: Ctx, input: CapitalInput): EntryDetail {
     throw fail.validation('"Opening Balance Adjustment" is only for opening balances. Choose Owner\'s Capital.', { capitalAccountId: 'Choose another account' });
   }
   const narration = input.narration?.trim() || `Capital introduced by owner (${PAYMENT_MODE_LABELS[input.mode]})`;
-  const id = postManualVoucher(
+  const { id, warnings } = postManualVoucher(
     ctx,
     {
       date,
@@ -58,7 +58,7 @@ export function addCapital(ctx: Ctx, input: CapitalInput): EntryDetail {
     },
     { action: 'capital.add', summary: (no) => `Recorded capital of ${formatINR(input.amount)} into ${pay.name} (${no})` },
   );
-  return getEntryDetail(ctx, id);
+  return { ...getEntryDetail(ctx, id), warnings };
 }
 
 /* ------------------------------ Drawings ------------------------------ */
@@ -73,7 +73,8 @@ export interface DrawingsInput {
   goods?: boolean;
 }
 
-export function recordDrawings(ctx: Ctx, input: DrawingsInput): EntryDetail {
+/** Owner takes money (or goods) out; warns when the cash / bank account would go below zero. */
+export function recordDrawings(ctx: Ctx, input: DrawingsInput): SavedEntry {
   const date = resolveVoucherDate(ctx, input.date, 'Drawings');
   let credit: number;
   let what: string;
@@ -88,7 +89,7 @@ export function recordDrawings(ctx: Ctx, input: DrawingsInput): EntryDetail {
   }
   const narration =
     input.narration?.trim() || (input.goods ? 'Goods taken by owner for personal use' : `Money taken by owner for personal use (${PAYMENT_MODE_LABELS[input.mode!]})`);
-  const id = postManualVoucher(
+  const { id, warnings } = postManualVoucher(
     ctx,
     {
       date,
@@ -101,7 +102,7 @@ export function recordDrawings(ctx: Ctx, input: DrawingsInput): EntryDetail {
     },
     { action: 'drawings.add', summary: (no) => `Recorded drawings of ${formatINR(input.amount)} ${what} (${no})` },
   );
-  return getEntryDetail(ctx, id);
+  return { ...getEntryDetail(ctx, id), warnings };
 }
 
 /* ------------------------------ Transfers ------------------------------ */
@@ -136,7 +137,7 @@ export function transfer(ctx: Ctx, input: TransferInput): { entry: EntryDetail; 
     }
   }
   const narration = input.narration?.trim() || transferNarration(from, to);
-  const id = postManualVoucher(
+  const { id, warnings } = postManualVoucher(
     ctx,
     {
       date,
@@ -149,9 +150,6 @@ export function transfer(ctx: Ctx, input: TransferInput): { entry: EntryDetail; 
     },
     { action: 'transfer.create', summary: (no) => `Transferred ${formatINR(input.amount)} from ${from.name} to ${to.name} (${no})` },
   );
-  const warnings: string[] = [];
-  const after = accountBalance(ctx, from.id, { to: date });
-  if (after < 0) warnings.push(`${from.name} shows a balance of ${formatDrCr(after)} on ${formatDate(date)}. Check that all receipts into it have been entered.`);
   return { entry: getEntryDetail(ctx, id), warnings };
 }
 

@@ -1,6 +1,6 @@
 import { z } from 'zod';
 import { route } from '../../api/router';
-import { exportReport, printReport } from './service';
+import { assertAppFile, exportReport, printReport } from './service';
 
 const zReport = z.object({
   title: z.string(),
@@ -50,18 +50,23 @@ export const filesRoutes = {
     handler: (ctx, input) => printReport(ctx, input.report),
   }),
 
+  /** Open a file or folder Billforce produced (an export just saved, the data or backup folder). */
   'files.open': route({
     access: 'user',
-    input: z.object({ path: z.string().min(1) }),
+    input: z.object({ path: z.string().min(1).max(2000) }),
     handler: async (ctx, input) => {
+      assertAppFile(ctx, input.path);
       await ctx.platform.openPath(input.path);
     },
   }),
 
   'files.showInFolder': route({
     access: 'user',
-    input: z.object({ path: z.string().min(1) }),
-    handler: (ctx, input) => ctx.platform.showInFolder(input.path),
+    input: z.object({ path: z.string().min(1).max(2000) }),
+    handler: (ctx, input) => {
+      assertAppFile(ctx, input.path);
+      ctx.platform.showInFolder(input.path);
+    },
   }),
 
   'print.listPrinters': route({ access: 'user', handler: (ctx) => ctx.platform.listPrinters() }),

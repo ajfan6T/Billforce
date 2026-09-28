@@ -1,6 +1,6 @@
 import type { Ctx } from '../context';
 import { AppError } from '../errors';
-import { fyOf, formatDate, isValidISODate, type FinancialYear } from '../../shared/dates';
+import { fyOf, formatDate, isValidISODate } from '../../shared/dates';
 import { getSection } from '../settings';
 
 export interface FinancialYearRow {
@@ -23,12 +23,6 @@ export function ensureFinancialYear(ctx: Ctx, date: string): FinancialYearRow {
     row = ctx.db.get<FinancialYearRow>('SELECT * FROM financial_years WHERE start_date = ?', [fy.start])!;
   }
   return row;
-}
-
-export function getFinancialYear(ctx: Ctx, date: string): FinancialYear & { closed: boolean; id: number | null } {
-  const fy = fyOf(date);
-  const row = ctx.db.get<FinancialYearRow>('SELECT * FROM financial_years WHERE start_date = ?', [fy.start]);
-  return { ...fy, closed: !!row?.is_closed, id: row?.id ?? null };
 }
 
 export function isDateInClosedYear(ctx: Ctx, date: string): boolean {
@@ -56,8 +50,4 @@ export function assertDateOpen(ctx: Ctx, date: string, what = 'This transaction'
       `Financial year ${fyOf(date).name} is closed, so entries dated ${formatDate(date)} cannot be added or changed. The owner can re-open the year from Accounts > Year-end closing.`,
     );
   }
-}
-
-export function listFinancialYears(ctx: Ctx): FinancialYearRow[] {
-  return ctx.db.all<FinancialYearRow>('SELECT * FROM financial_years ORDER BY start_date DESC');
 }

@@ -59,8 +59,10 @@ CREATE TABLE journal_lines (
   CHECK (NOT (debit > 0 AND credit > 0))
 );
 CREATE INDEX idx_jl_entry ON journal_lines (entry_id);
-CREATE INDEX idx_jl_account ON journal_lines (account_id);
-CREATE INDEX idx_jl_party ON journal_lines (party_type, party_id);
+-- Covering indexes: account / party balances and "does this entry touch account X" are answered from the
+-- index alone, without reading every line of a busy account (Cash, Sales) for each entry.
+CREATE INDEX idx_jl_account_entry ON journal_lines (account_id, entry_id, debit, credit);
+CREATE INDEX idx_jl_party ON journal_lines (party_type, party_id, account_id, entry_id, debit, credit);
 
 -- Loans taken (liability) or given (asset). Each loan has its own ledger account.
 CREATE TABLE loans (

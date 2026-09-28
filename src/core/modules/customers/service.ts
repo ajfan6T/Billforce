@@ -1,5 +1,5 @@
 import type { Ctx } from '../../context';
-import { now, today } from '../../context';
+import { assertCan, can, now, today } from '../../context';
 import { AppError, fail } from '../../errors';
 import { logActivity } from '../../audit';
 import { partyBalance, partyBalances } from '../../accounting/ledger';
@@ -9,7 +9,7 @@ import { isDateInClosedYear } from '../../accounting/periods';
 import { diffDays, formatDate, fyOf } from '../../../shared/dates';
 import { formatINR } from '../../../shared/money';
 import type { ReportData, ReportRow } from '../../../shared/report';
-import { itemsSummary, normalizeEmail, openingDebit, phoneKey } from './common';
+import { cleanPhone, itemsSummary, normalizeEmail, openingDebit, PHONE_KEY_SQL, phoneKey } from './common';
 import { partyStatement } from './statement';
 
 /*
@@ -21,12 +21,24 @@ export interface CustomerSummary {
   id: number;
   name: string;
   phone: string | null;
-  /** Outstanding balance in paise: + = customer owes you, - = advance. */
+  /** Outstanding balance in paise: + = customer owes you, - = advance. 0 when balanceHidden. */
   balance: number;
+  /** null when there is no limit, or when balanceHidden. */
   creditLimit: number | null;
+  /** The user may not see customer balances ("View customers & balances"): balance and creditLimit are blanked. */
+  balanceHidden?: boolean;
 }
 
-/** Type-ahead search by name or phone; includes each customer's current balance. */
+/**
+ * Balances and credit limits are for users who look after customer accounts:
+ * "View customers & balances", or "Record payments received" (taking a payment
+ * needs the amount due; customers.get shows it to them too).
+ */
+export function canSeeCustomerBalances(ctx: Ctx): boolean {
+  return can(ctx, 'customers.view') || can(ctx, 'customers.receive');
+}
+
+/** Type-ahead search by name or phone; includes each customer's current balance (for users allowed to see it). */
 export function searchCustomers(ctx: Ctx, q: string, limit = 10): CustomerSummary[] {
   const text = q.trim();
   const rows = ctx.db.all<{ id: number; name: string; phone: string | null; credit_limit: number | null }>(
@@ -37,6 +49,9 @@ export function searchCustomers(ctx: Ctx, q: string, limit = 10): CustomerSummar
       : `SELECT id, name, phone, credit_limit FROM customers WHERE is_active = 1 ORDER BY id DESC LIMIT :limit`,
     text ? { like: `%${text}%`, phone: `%${text.replace(/\s/g, '')}%`, prefix: `${text}%`, limit } : { limit },
   );
+  if (!canSeeCustomerBalances(ctx)) {
+    return rows.map((r) => ({ id: r.id, name: r.name, phone: r.phone, balance: 0, creditLimit: null, balanceHidden: true }));
+  }
   const balances = partyBalances(ctx, 'customer', { account: 'AR' });
   return rows.map((r) => ({ id: r.id, name: r.name, phone: r.phone, balance: balances.get(r.id) ?? 0, creditLimit: r.credit_limit }));
 }
@@ -47,12 +62,13 @@ export interface QuickCustomerInput {
   address?: string | null;
 }
 
-/** Add a customer from the billing screen with just a name (and phone). */
+/** Add a customer from the billing screen with just a name (and phone). Never sets a credit limit or opening balance. */
 export function quickCreateCustomer(ctx: Ctx, input: QuickCustomerInput): CustomerSummary {
-  assertPhoneFree(ctx, input.phone ?? null);
-  const id = ctx.db.insert('customers', { name: input.name, phone: input.phone ?? null, address: input.address ?? null, created_at: now(ctx) });
+  const phone = cleanPhone(input.phone);
+  assertPhoneFree(ctx, phone);
+  const id = ctx.db.insert('customers', { name: input.name, phone, address: input.address ?? null, created_at: now(ctx) });
   logActivity(ctx, 'customer.create', `Added customer "${input.name}"`, { entityType: 'customer', entityId: id });
-  return { id, name: input.name, phone: input.phone ?? null, balance: 0, creditLimit: null };
+  return { id, name: input.name, phone, balance: 0, creditLimit: null, ...(canSeeCustomerBalances(ctx) ? {} : { balanceHidden: true }) };
 }
 
 /* ------------------------------------------------------------------ */
@@ -71,10 +87,16 @@ export interface CustomerInput {
   phone?: string | null;
   address?: string | null;
   email?: string | null;
-  /** Credit limit in paise; null = no limit. */
+  /**
+   * Credit limit in paise; null = no limit. On update, undefined = leave unchanged.
+   * Setting or changing it needs "Set credit limits & opening balances" (customers.credit).
+   */
   creditLimit?: number | null;
   notes?: string | null;
-  /** undefined = leave unchanged (on update); null or amount 0 = no opening balance. */
+  /**
+   * undefined = leave unchanged (on update); null or amount 0 = no opening balance.
+   * Setting or changing it needs "Set credit limits & opening balances" (customers.credit).
+   */
   openingBalance?: CustomerOpeningInput | null;
 }
 
@@ -136,6 +158,15 @@ export interface CustomerDetail {
     discount: number;
     /** Sales returns and credit notes. */
     returned: number;
+    /** Part of `returned` paid back in cash / UPI / bank (the rest was adjusted in the customer's account). */
+    refunded: number;
+    /** Opening balance (+ = owed to you, - = advance). */
+    opening: number;
+    /**
+     * Anything else in the customer's account (e.g. journal entries), so that
+     * opening + billed - paidAtBilling - received - discount - returned + refunded + adjustments = balance.
+     */
+    adjustments: number;
   };
   lastBillDate: string | null;
   lastPaymentDate: string | null;
@@ -149,17 +180,22 @@ export function getCustomerRow(ctx: Ctx, id: number): CustomerRow {
   return r;
 }
 
-/** Phone numbers must be unique among active customers (so the billing screen finds the right person). */
+/** SQL for the duplicate-phone lookup (exported so a test can check it uses idx_customers_phone_key). */
+export const PHONE_DUPLICATE_SQL = `SELECT id, name, phone FROM customers WHERE ${PHONE_KEY_SQL} = ? AND is_active = 1 AND id <> ? LIMIT 5`;
+
+/**
+ * Phone numbers must be unique among active customers (so the billing screen finds the right person).
+ * An index lookup on the phone key, so importing thousands of customers stays fast.
+ */
 function assertPhoneFree(ctx: Ctx, phone: string | null, exceptId?: number): void {
   const key = phoneKey(phone);
   if (!key) return;
-  const rows = ctx.db.all<{ id: number; name: string; phone: string }>(
-    'SELECT id, name, phone FROM customers WHERE is_active = 1 AND phone IS NOT NULL AND id <> ?',
-    [exceptId ?? 0],
-  );
+  const rows = ctx.db.all<{ id: number; name: string; phone: string }>(PHONE_DUPLICATE_SQL, [key, exceptId ?? 0]);
   const dup = rows.find((r) => phoneKey(r.phone) === key);
   if (dup) throw fail.validation(`This phone number already belongs to ${dup.name}`, { phone: `Already used by ${dup.name}` });
 }
+
+const CREDIT_DENIED = 'You are not allowed to set credit limits or opening balances. Ask the owner or manager.';
 
 function openingFromDebit(debit: number): CustomerOpeningInput | null {
   if (!debit) return null;
@@ -230,7 +266,13 @@ export function getCustomer(ctx: Ctx, id: number): CustomerDetail {
     "SELECT COUNT(*) AS n, COALESCE(SUM(amount), 0) AS received, COALESCE(SUM(discount), 0) AS discount, MAX(date) AS last FROM customer_receipts WHERE customer_id = ? AND status = 'active'",
     [id],
   )!;
-  const returned = ctx.db.value<number>("SELECT COALESCE(SUM(total), 0) FROM credit_notes WHERE customer_id = ? AND status = 'active'", [id], 0);
+  const returns = ctx.db.get<{ returned: number; refunded: number }>(
+    `SELECT COALESCE(SUM(total), 0) AS returned, COALESCE(SUM(CASE WHEN refund_mode <> 'credit' THEN total ELSE 0 END), 0) AS refunded
+       FROM credit_notes WHERE customer_id = ? AND status = 'active'`,
+    [id],
+  )!;
+  const opening = openingDebit(ctx, 'customer', id, r.opening_entry_id);
+  const explained = opening + bills.billed - bills.paid - receipts.received - receipts.discount - returns.returned + returns.refunded;
   return {
     id: r.id,
     name: r.name,
@@ -242,7 +284,7 @@ export function getCustomer(ctx: Ctx, id: number): CustomerDetail {
     isActive: !!r.is_active,
     createdAt: r.created_at,
     updatedAt: r.updated_at,
-    openingBalance: openingFromDebit(openingDebit(ctx, 'customer', id, r.opening_entry_id)),
+    openingBalance: openingFromDebit(opening),
     balance,
     overLimit: r.credit_limit !== null && balance > r.credit_limit,
     totals: {
@@ -252,7 +294,10 @@ export function getCustomer(ctx: Ctx, id: number): CustomerDetail {
       receipts: receipts.n,
       received: receipts.received,
       discount: receipts.discount,
-      returned,
+      returned: returns.returned,
+      refunded: returns.refunded,
+      opening,
+      adjustments: balance - explained,
     },
     lastBillDate: bills.last,
     lastPaymentDate: receipts.last,
@@ -268,18 +313,22 @@ function describeOpening(debit: number): string {
 export function createCustomer(ctx: Ctx, input: CustomerInput): CustomerDetail {
   const name = input.name.trim();
   if (!name) throw fail.validation('Enter the customer name', { name: 'Enter the customer name' });
-  assertPhoneFree(ctx, input.phone ?? null);
+  const phone = cleanPhone(input.phone);
+  assertPhoneFree(ctx, phone);
   const email = normalizeEmail(input.email);
+  const creditLimit = input.creditLimit ?? null;
+  const debit = debitFromOpening(input.openingBalance);
+  // A credit limit or opening balance changes what the customer may owe / what the books say they owe.
+  if (creditLimit !== null || debit) assertCan(ctx, 'customers.credit', CREDIT_DENIED);
   const id = ctx.db.insert('customers', {
     name,
-    phone: input.phone || null,
+    phone,
     address: input.address || null,
     email,
-    credit_limit: input.creditLimit ?? null,
+    credit_limit: creditLimit,
     notes: input.notes || null,
     created_at: now(ctx),
   });
-  const debit = debitFromOpening(input.openingBalance);
   if (debit) {
     const entryId = setPartyOpeningBalance(ctx, 'customer', id, name, debit, null);
     ctx.db.update('customers', id, { opening_entry_id: entryId });
@@ -287,7 +336,7 @@ export function createCustomer(ctx: Ctx, input: CustomerInput): CustomerDetail {
   logActivity(ctx, 'customer.create', `Added customer "${name}"${debit ? ` with ${describeOpening(debit)}` : ''}`, {
     entityType: 'customer',
     entityId: id,
-    details: { ...input, name },
+    details: { ...input, name, phone },
   });
   return getCustomer(ctx, id);
 }
@@ -297,36 +346,38 @@ export function updateCustomer(ctx: Ctx, id: number, input: CustomerInput): Cust
   const row = getCustomerRow(ctx, id);
   const name = input.name.trim();
   if (!name) throw fail.validation('Enter the customer name', { name: 'Enter the customer name' });
-  if (row.is_active) assertPhoneFree(ctx, input.phone ?? null, id);
+  const phone = cleanPhone(input.phone);
+  if (row.is_active) assertPhoneFree(ctx, phone, id);
   const email = normalizeEmail(input.email);
+  const creditLimit = input.creditLimit === undefined ? row.credit_limit : input.creditLimit;
+  const oldDebit = debitFromOpening(before.openingBalance);
+  const newDebit = input.openingBalance === undefined ? oldDebit : debitFromOpening(input.openingBalance);
+  // Sending the saved values back unchanged is fine; changing them needs the permission.
+  if (creditLimit !== row.credit_limit || newDebit !== oldDebit) assertCan(ctx, 'customers.credit', CREDIT_DENIED);
   ctx.db.update('customers', id, {
     name,
-    phone: input.phone || null,
+    phone,
     address: input.address || null,
     email,
-    credit_limit: input.creditLimit ?? null,
+    credit_limit: creditLimit,
     notes: input.notes || null,
     updated_at: now(ctx),
   });
   const changes: string[] = [];
   if (before.name !== name) changes.push(`renamed from "${before.name}"`);
-  if ((before.phone ?? '') !== (input.phone ?? '')) changes.push(`phone ${before.phone || '-'} → ${input.phone || '-'}`);
-  if (before.creditLimit !== (input.creditLimit ?? null)) {
-    changes.push(`credit limit ${before.creditLimit === null ? 'none' : formatINR(before.creditLimit)} → ${input.creditLimit == null ? 'none' : formatINR(input.creditLimit)}`);
+  if ((before.phone ?? '') !== (phone ?? '')) changes.push(`phone ${before.phone || '-'} → ${phone || '-'}`);
+  if (before.creditLimit !== creditLimit) {
+    changes.push(`credit limit ${before.creditLimit === null ? 'none' : formatINR(before.creditLimit)} → ${creditLimit === null ? 'none' : formatINR(creditLimit)}`);
   }
-  if (input.openingBalance !== undefined) {
-    const oldDebit = debitFromOpening(before.openingBalance);
-    const newDebit = debitFromOpening(input.openingBalance);
-    if (oldDebit !== newDebit) {
-      const entryId = setPartyOpeningBalance(ctx, 'customer', id, name, newDebit, row.opening_entry_id);
-      if (entryId !== row.opening_entry_id) ctx.db.update('customers', id, { opening_entry_id: entryId });
-      changes.push(`${describeOpening(oldDebit)} → ${describeOpening(newDebit)}`);
-    }
+  if (oldDebit !== newDebit) {
+    const entryId = setPartyOpeningBalance(ctx, 'customer', id, name, newDebit, row.opening_entry_id);
+    if (entryId !== row.opening_entry_id) ctx.db.update('customers', id, { opening_entry_id: entryId });
+    changes.push(`${describeOpening(oldDebit)} → ${describeOpening(newDebit)}`);
   }
   logActivity(ctx, 'customer.update', `Updated customer "${name}"${changes.length ? ': ' + changes.join(', ') : ''}`, {
     entityType: 'customer',
     entityId: id,
-    details: { before, after: { ...input, name } },
+    details: { before, after: { ...input, name, phone, creditLimit } },
   });
   return getCustomer(ctx, id);
 }

@@ -26,7 +26,7 @@ const zReturnInput = z.discriminatedUnion('kind', [
   }),
 ]);
 
-const VIEW = ['returns.create', 'returns.cancel', 'billing.view'] as const;
+const VIEW = ['returns.create', 'returns.adjust', 'returns.cancel', 'billing.view'] as const;
 
 export const returnsRoutes = {
   /** Lines of a bill that can still be returned, with the effective net rate. */
@@ -43,8 +43,9 @@ export const returnsRoutes = {
     handler: (ctx, input) => returns.findBillsForReturn(ctx, input.q, input.limit),
   }),
 
+  /** Goods returned need returns.create; credit notes without goods need returns.adjust (checked in the service). */
   'returns.create': route({
-    access: 'returns.create',
+    access: ['returns.create', 'returns.adjust'],
     mutation: true,
     input: zReturnInput,
     handler: (ctx, input) => returns.createCreditNote(ctx, input),

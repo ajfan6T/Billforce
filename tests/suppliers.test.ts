@@ -278,3 +278,47 @@ describe('supplier statement and payables', () => {
     void b;
   });
 });
+
+describe('review fixes: supplier payments', () => {
+  it('warns when a payment would take cash or bank below zero (and still saves it)', async () => {
+    const t = await createTestApp({ openingCash: 100000 });
+    const s = await t.call('suppliers.create', { name: 'Gupta Traders', openingBalance: { amount: 500000, direction: 'payable' } });
+    const ok = await t.call('supplierPayments.create', { supplierId: s.id, amount: 80000, mode: 'cash' });
+    expect(ok.warnings).toEqual([]);
+    expect(systemBalance(t.app, 'CASH')).toBe(20000);
+
+    const short = await t.call('supplierPayments.create', { supplierId: s.id, amount: 50000, mode: 'cash' });
+    expect(short.warnings).toEqual(['Cash in Hand will be short by ₹300.00 after this payment. Check that all money received has been entered.']);
+    expect(systemBalance(t.app, 'CASH')).toBe(-30000);
+    const upi = await t.call('supplierPayments.create', { supplierId: s.id, amount: 1000, mode: 'upi' });
+    expect(upi.warnings[0]).toContain('UPI Account will be short by ₹10.00');
+
+    // Editing: the saved amount is already in the balance, so only the extra outflow counts.
+    await t.call('supplierPayments.cancel', { id: short.id, reason: 'entered by mistake' });
+    await t.call('supplierPayments.cancel', { id: upi.id, reason: 'entered by mistake' });
+    let e = await t.call('supplierPayments.update', { id: ok.id, supplierId: s.id, amount: 90000, mode: 'cash' });
+    expect(e.warnings).toEqual([]);
+    e = await t.call('supplierPayments.update', { id: ok.id, supplierId: s.id, amount: 130000, mode: 'cash' });
+    expect(e.warnings).toEqual(['Cash in Hand will be short by ₹300.00 after this payment. Check that all money received has been entered.']);
+    expect(ledgerProblems(t.app)).toEqual([]);
+  });
+
+  it('reprinting a payment voucher needs "Reprint bills" and prints one DUPLICATE copy', async () => {
+    const t = await createTestApp({ openingCash: 1000000 });
+    await t.call('settings.update', { section: 'receipt', values: { copies: 2 } });
+    const s = await t.call('suppliers.create', { name: 'Gupta Traders', openingBalance: { amount: 90000, direction: 'payable' } });
+    await t.call('roles.update', { role: 'cashier', permissions: ['billing.create', 'suppliers.view', 'suppliers.pay'] });
+    await t.loginAs('cashier');
+    const p = await t.call('supplierPayments.create', { supplierId: s.id, amount: 10000, mode: 'cash' });
+    expect(await t.call('supplierPayments.print', { id: p.id })).toMatchObject({ printed: true, duplicate: false });
+    expect(t.platform.printed[0].opts.copies).toBe(2);
+    expect((await t.fails('supplierPayments.print', { id: p.id })).code).toBe('FORBIDDEN');
+    expect(t.platform.printed).toHaveLength(1);
+
+    await t.loginOwner();
+    expect(await t.call('supplierPayments.print', { id: p.id })).toMatchObject({ printed: true, duplicate: true });
+    expect(t.platform.printed[1].html).toContain('DUPLICATE');
+    expect(t.platform.printed[1].opts.copies).toBe(1);
+    expect((await t.call('supplierPayments.get', { id: p.id })).printCount).toBe(2);
+  });
+});

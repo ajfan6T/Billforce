@@ -11,7 +11,7 @@ import { can, now, today } from '../../context';
 import { fail } from '../../errors';
 import { logActivity } from '../../audit';
 import { getSection } from '../../settings';
-import { partyBalance, partyBalances } from '../../accounting/ledger';
+import { partyBalance, partyBalances, systemAccountId } from '../../accounting/ledger';
 import { setPartyOpeningBalance } from '../../accounting/opening';
 import { isDateInClosedYear } from '../../accounting/periods';
 import { formatINR } from '../../../shared/money';
@@ -119,8 +119,14 @@ export interface EmployeeDetail extends EmployeeListItem {
   showPay: boolean;
   totals: {
     slips: number;
-    /** Net salary processed in the current financial year. */
+    /** Salary earned in the current financial year: gross + bonus - deductions (what the employee cost). */
     salaryThisFy: number;
+    /** Net salary of those slips (after advance recovery). */
+    netThisFy: number;
+    /** Recovered from advances in those slips. */
+    recoveredThisFy: number;
+    /** Paid against those slips so far. */
+    paidThisFy: number;
     advancesThisFy: number;
     lastSalaryMonth: string | null;
   } | null;
@@ -183,6 +189,52 @@ export function emptyCounts(): AttendanceCounts {
 /** Outstanding advance of an employee (Employee Advances debit balance). */
 export function outstandingAdvance(ctx: Ctx, employeeId: number): number {
   return partyBalance(ctx, 'employee', employeeId, { account: 'EMP_ADV' });
+}
+
+/**
+ * Advance that an entry dated `date` may recover (credit to Employee Advances) for each employee:
+ * the lowest balance the employee's advance account has on that day or any later day, never below 0.
+ * Advances given after the date are not counted, nor is anything a later-dated salary already recovered,
+ * so recovering up to this amount can never make Employee Advances negative on any day.
+ * Employees without an advance are left out of the map.
+ */
+export function recoverableAdvances(ctx: Ctx, date: string, employeeId?: number): Map<number, number> {
+  const params: unknown[] = [date, 'employee', systemAccountId(ctx, 'EMP_ADV')];
+  let one = '';
+  if (employeeId !== undefined) {
+    one = ' AND l.party_id = ?';
+    params.push(employeeId);
+  }
+  // One row per employee for everything up to the date (day ''), then one per later day.
+  const rows = ctx.db.all<{ party_id: number; day: string; amt: number }>(
+    `SELECT l.party_id, CASE WHEN e.date <= ? THEN '' ELSE e.date END AS day, SUM(l.debit - l.credit) AS amt
+       FROM journal_lines l JOIN journal_entries e ON e.id = l.entry_id
+      WHERE l.party_type = ? AND l.account_id = ? AND e.is_void = 0${one}
+      GROUP BY l.party_id, day ORDER BY l.party_id, day`,
+    params,
+  );
+  const state = new Map<number, { bal: number; low: number }>();
+  for (const r of rows) {
+    let s = state.get(r.party_id);
+    if (!s) {
+      s = { bal: 0, low: 0 };
+      state.set(r.party_id, s);
+      if (r.day === '') {
+        s.bal = s.low = r.amt;
+        continue;
+      }
+    }
+    s.bal += r.amt;
+    s.low = Math.min(s.low, s.bal);
+  }
+  const out = new Map<number, number>();
+  for (const [id, s] of state) if (s.low > 0) out.set(id, s.low);
+  return out;
+}
+
+/** Advance of one employee that an entry dated `date` may recover (see recoverableAdvances). */
+export function recoverableAdvance(ctx: Ctx, employeeId: number, date: string): number {
+  return recoverableAdvances(ctx, date, employeeId).get(employeeId) ?? 0;
 }
 
 /** Salary processed but unpaid (Salary Payable credit balance, as a positive number). */
@@ -308,17 +360,30 @@ export function getEmployee(ctx: Ctx, id: number): EmployeeDetail {
   let totals: EmployeeDetail['totals'] = null;
   if (showPay) {
     const fy = fyOf(t);
-    const s = ctx.db.get<{ slips: number; net: number; last_month: string | null }>(
-      `SELECT COUNT(*) AS slips, COALESCE(SUM(CASE WHEN date >= ? AND date <= ? THEN net ELSE 0 END), 0) AS net, MAX(month) AS last_month
-         FROM salaries WHERE employee_id = ? AND status <> 'cancelled'`,
-      [fy.start, fy.end, id],
+    const s = ctx.db.get<{ slips: number; earned: number; net: number; recovered: number; paid: number; last_month: string | null }>(
+      `SELECT COUNT(*) AS slips,
+              COALESCE(SUM(CASE WHEN date >= :from AND date <= :to THEN gross + bonus - deductions ELSE 0 END), 0) AS earned,
+              COALESCE(SUM(CASE WHEN date >= :from AND date <= :to THEN net ELSE 0 END), 0) AS net,
+              COALESCE(SUM(CASE WHEN date >= :from AND date <= :to THEN advance_recovery ELSE 0 END), 0) AS recovered,
+              COALESCE(SUM(CASE WHEN date >= :from AND date <= :to THEN paid ELSE 0 END), 0) AS paid,
+              MAX(month) AS last_month
+         FROM salaries WHERE employee_id = :id AND status <> 'cancelled'`,
+      { from: fy.start, to: fy.end, id },
     )!;
     const advances = ctx.db.value<number>(
       "SELECT COALESCE(SUM(amount), 0) FROM employee_advances WHERE employee_id = ? AND status = 'active' AND date >= ? AND date <= ?",
       [id, fy.start, fy.end],
       0,
     );
-    totals = { slips: s.slips, salaryThisFy: s.net, advancesThisFy: advances, lastSalaryMonth: s.last_month };
+    totals = {
+      slips: s.slips,
+      salaryThisFy: s.earned,
+      netThisFy: s.net,
+      recoveredThisFy: s.recovered,
+      paidThisFy: s.paid,
+      advancesThisFy: advances,
+      lastSalaryMonth: s.last_month,
+    };
   }
   return {
     ...toEmployee(r, showPay),
@@ -426,11 +491,16 @@ function setOpeningAdvance(ctx: Ctx, emp: EmployeeRow, name: string, amount: num
   const current = openingAdvanceOf(ctx, emp);
   if (current === amount) return;
   if (amount < current) {
-    const outstanding = outstandingAdvance(ctx, emp.id);
-    if (outstanding - current + amount < 0) {
+    // Lowering the opening advance lowers the advance balance on every day from the books start, so it
+    // must not take any day below zero (a salary may have recovered it before a later advance was given).
+    const openedOn =
+      ctx.db.value<string | null>('SELECT date FROM journal_entries WHERE id = ?', [emp.opening_entry_id], null) ?? getSection(ctx, 'accounts').booksStartDate;
+    const spare = recoverableAdvance(ctx, emp.id, openedOn);
+    if (current - amount > spare) {
+      const recovered = current - spare;
       throw fail.validation(
-        `${formatINR(current - outstanding)} of the opening advance has already been recovered from salary, so it cannot be less than ${formatINR(current - outstanding)}.`,
-        { openingAdvance: `At least ${formatINR(current - outstanding)}` },
+        `${formatINR(recovered)} of the opening advance has already been recovered from salary, so it cannot be less than ${formatINR(recovered)}.`,
+        { openingAdvance: `At least ${formatINR(recovered)}` },
       );
     }
   }

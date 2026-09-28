@@ -1,9 +1,10 @@
 import { useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
-import { NavLink, useLocation, useNavigate } from 'react-router';
+import { NavLink, useLocation } from 'react-router';
 import { ChevronDown, KeyRound, Lock, LogOut, Plus, UserCircle2 } from 'lucide-react';
 import { NAV, NEW_BILL_PATH, type NavGroup } from '../nav';
 import { useAuth } from '../auth';
 import { useHotkeys } from '../hooks';
+import { confirmLeave, useGuardedNavigate } from '../guards';
 import { ROLE_LABELS } from '../../shared/constants';
 import { fyOf, formatDateLong, todayISO } from '../../shared/dates';
 import { ChangePasswordModal } from './ChangePassword';
@@ -17,6 +18,7 @@ function allowed(can: (p: Permission) => boolean, perm?: Permission | Permission
 function Sidebar() {
   const { can } = useAuth();
   const location = useLocation();
+  const { onLinkClick } = useGuardedNavigate();
   const groups = useMemo(
     () =>
       NAV.map((g) => ({ ...g, items: g.items?.filter((i) => allowed(can, i.perm)) }))
@@ -44,7 +46,7 @@ function Sidebar() {
     const Icon = g.icon;
     if (g.to) {
       return (
-        <NavLink key={g.key} to={g.to} end className={({ isActive }) => `nav-top${isActive ? ' active' : ''}`}>
+        <NavLink key={g.key} to={g.to} end className={({ isActive }) => `nav-top${isActive ? ' active' : ''}`} onClick={onLinkClick(g.to)}>
           <Icon size={18} />
           <span>{g.label}</span>
         </NavLink>
@@ -61,7 +63,7 @@ function Sidebar() {
         {isOpen && (
           <div className="nav-items">
             {g.items!.map((i) => (
-              <NavLink key={i.to} to={i.to} end className={({ isActive }) => `nav-item${isActive ? ' active' : ''}`}>
+              <NavLink key={i.to} to={i.to} end className={({ isActive }) => `nav-item${isActive ? ' active' : ''}`} onClick={onLinkClick(i.to)}>
                 {i.label}
               </NavLink>
             ))}
@@ -78,7 +80,7 @@ function Sidebar() {
         <div className="brand-name">Billforce</div>
       </div>
       {can('billing.create') && (
-        <NavLink to={NEW_BILL_PATH} className="new-bill-btn">
+        <NavLink to={NEW_BILL_PATH} className="new-bill-btn" onClick={onLinkClick(NEW_BILL_PATH)}>
           <Plus size={18} />
           <span>New bill</span>
           <kbd>F2</kbd>
@@ -118,7 +120,7 @@ function UserMenu() {
           <button role="menuitem" onClick={() => (setOpen(false), lock())}>
             <Lock size={15} /> Lock screen
           </button>
-          <button role="menuitem" onClick={() => (setOpen(false), void logout())}>
+          <button role="menuitem" onClick={() => (setOpen(false), void confirmLeave().then((ok) => (ok ? logout() : undefined)))}>
             <LogOut size={15} /> Log out / switch user
           </button>
         </div>
@@ -130,10 +132,10 @@ function UserMenu() {
 
 export function Shell({ children, fullBleed }: { children: ReactNode; fullBleed?: boolean }) {
   const { status, can } = useAuth();
-  const navigate = useNavigate();
+  const { go } = useGuardedNavigate();
   const today = todayISO();
   useHotkeys({
-    F2: () => can('billing.create') && navigate(NEW_BILL_PATH),
+    F2: () => can('billing.create') && void go(NEW_BILL_PATH),
   });
   return (
     <div className="shell">

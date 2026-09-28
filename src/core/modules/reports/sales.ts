@@ -4,10 +4,14 @@
  * payments, credit notes) because they need items and payment modes; only
  * ACTIVE documents count, so cancelled bills and returns are left out.
  *
- *   Gross sales  = sum of qty x rate on the bills
- *   Discounts    = item discounts + bill discounts
- *   Net sales    = bill totals (after discounts and round off) - returns / credit notes
+ *   Gross sales                = sum of qty x rate on the bills
+ *   Discounts                  = item discounts + bill discounts
+ *   Net sales after discounts  = bill totals (after discounts and round off) - returns / credit notes
  * Returns are counted on the date of the return, not the date of the original bill.
+ *
+ * The Profit & loss "Net sales" is a different figure: Sales - Sales returns from the ledger, with
+ * discounts and round off shown under indirect expenses. So these reports call theirs
+ * "Net sales after discounts" and say so in their notes.
  */
 import type { Ctx } from '../../context';
 import { PAYMENT_MODE_LABELS, PAYMENT_MODES, type PaymentMode } from '../../../shared/constants';
@@ -104,12 +108,15 @@ function addBill(a: Agg, b: BillRow): void {
   a.billed += b.total;
 }
 
+/** Label of bill totals less returns (not the P&L's "Net sales", which is before discounts). */
+export const NET_SALES_LABEL = 'Net sales after discounts';
+
 const AGG_COLUMNS: ReportColumn[] = [
   { key: 'bills', label: 'Bills', type: 'number', width: 8 },
   { key: 'gross', label: 'Gross sales', type: 'money', width: 15 },
   { key: 'discounts', label: 'Discounts', type: 'money', width: 13 },
   { key: 'returns', label: 'Returns', type: 'money', width: 13 },
-  { key: 'net', label: 'Net sales', type: 'money', width: 15 },
+  { key: 'net', label: NET_SALES_LABEL, type: 'money', width: 18 },
   { key: 'avg', label: 'Average bill', type: 'money', width: 13 },
 ];
 
@@ -117,7 +124,9 @@ function aggCells(a: Agg): Record<string, number | null> {
   return { bills: a.bills, gross: a.gross, discounts: a.discounts || null, returns: a.returns || null, net: netOf(a), avg: a.bills ? avgOf(a) : null };
 }
 
-const NET_NOTE = 'Net sales = gross sales - discounts ± round off - returns. Cancelled bills and cancelled returns are not counted.';
+const NET_NOTE =
+  'Net sales after discounts = gross sales - discounts ± round off - returns. Cancelled bills and cancelled returns are not counted. ' +
+  'The Profit & loss "Net sales" is sales less returns only: it shows discounts and round off under indirect expenses.';
 
 function totalAgg(list: Agg[]): Agg {
   const t = emptyAgg();
@@ -134,7 +143,7 @@ function totalAgg(list: Agg[]): Agg {
 
 function summaryItems(t: Agg): ReportData['summary'] {
   return [
-    { label: 'Net sales', value: netOf(t), type: 'money' },
+    { label: NET_SALES_LABEL, value: netOf(t), type: 'money' },
     { label: 'Bills', value: t.bills, type: 'number' },
     { label: 'Average bill', value: avgOf(t), type: 'money' },
     { label: 'Discounts', value: t.discounts, type: 'money' },
@@ -220,7 +229,7 @@ export function salesByDay(ctx: Ctx, r: SalesRange): SalesInsight {
       notes: [NET_NOTE],
       landscape: true,
     },
-    chart: { labels: days.map(dayLabel), series: [{ name: 'Net sales', values: [...map.values()].map(netOf) }] },
+    chart: { labels: days.map(dayLabel), series: [{ name: NET_SALES_LABEL, values: [...map.values()].map(netOf) }] },
   };
 }
 
@@ -258,7 +267,7 @@ export function salesByMonth(ctx: Ctx, r: SalesRange): SalesInsight {
       notes: [NET_NOTE, 'The first and last months count only the days inside the chosen period.'],
       landscape: true,
     },
-    chart: { labels: months.map((m) => monthLabel(m)), series: [{ name: 'Net sales', values: [...map.values()].map(netOf) }] },
+    chart: { labels: months.map((m) => monthLabel(m)), series: [{ name: NET_SALES_LABEL, values: [...map.values()].map(netOf) }] },
   };
 }
 
@@ -358,11 +367,11 @@ export function salesByItem(ctx: Ctx, r: SalesRange): SalesInsight {
       summary: [
         { label: 'Items sold', value: list.filter((v) => v.qtySold > 0).length, type: 'number' },
         { label: 'Total of items', value: totalAmount, type: 'money' },
-        { label: 'Net sales (all bills)', value: s.netSales, type: 'money' },
+        { label: `${NET_SALES_LABEL} (all bills)`, value: s.netSales, type: 'money' },
       ],
       notes: [
-        'Amount = quantity x rate less item discounts, less items returned. Discounts on the whole bill and round off are not split across items, so the total of items can differ a little from net sales.',
-        'Credit notes without items (price adjustments) are not in this list but are included in net sales.',
+        'Amount = quantity x rate less item discounts, less items returned. Discounts on the whole bill and round off are not split across items, so the total of items can differ a little from net sales after discounts.',
+        'Credit notes without items (price adjustments) are not in this list but are included in net sales after discounts.',
       ],
       landscape: true,
     },
@@ -423,7 +432,7 @@ export function salesByCustomer(ctx: Ctx, r: SalesRange): SalesInsight {
       notes: [NET_NOTE, 'Bills without a customer are grouped as "Walk-in customers".'],
       landscape: true,
     },
-    chart: { labels: top.map((x) => x.name), series: [{ name: 'Net sales', values: top.map((x) => netOf(x.a)) }] },
+    chart: { labels: top.map((x) => x.name), series: [{ name: NET_SALES_LABEL, values: top.map((x) => netOf(x.a)) }] },
   };
 }
 

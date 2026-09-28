@@ -7,11 +7,11 @@ import { currentUserId, now, today } from '../../context';
 import { fail } from '../../errors';
 import { listRevisions, logActivity, recordRevision, type RevisionRow } from '../../audit';
 import { nextDocNumber } from '../../numbering';
-import { getEntryLines, partyBalances, paymentAccountId, postEntry, voidEntry } from '../../accounting/ledger';
+import { getEntryLines, negativeBalanceWarning, partyBalances, paymentAccountId, postEntry, voidEntry } from '../../accounting/ledger';
 import { formatINR } from '../../../shared/money';
 import { formatDate } from '../../../shared/dates';
 import { PAYMENT_MODE_LABELS, type SettlementMode } from '../../../shared/constants';
-import { getEmployeeRow, outstandingAdvance, salaryDue } from './service';
+import { getEmployeeRow, outstandingAdvance, recoverableAdvance, salaryDue } from './service';
 
 interface AdvanceRow {
   id: number;
@@ -120,7 +120,10 @@ export interface AdvanceInput {
   remarks?: string | null;
 }
 
-export function createAdvance(ctx: Ctx, input: AdvanceInput): AdvanceDetail {
+/** An advance just given, with warnings to show (e.g. cash going below zero). */
+export type SavedAdvance = AdvanceDetail & { warnings: string[] };
+
+export function createAdvance(ctx: Ctx, input: AdvanceInput): SavedAdvance {
   const emp = getEmployeeRow(ctx, input.employeeId);
   if (!emp.is_active) {
     throw fail.validation(`${emp.name} is marked as left${emp.leave_date ? ` (${formatDate(emp.leave_date)})` : ''}. Re-activate the employee to give an advance.`, {
@@ -133,6 +136,8 @@ export function createAdvance(ctx: Ctx, input: AdvanceInput): AdvanceDetail {
   if (!(input.amount > 0)) throw fail.validation('Enter the advance amount', { amount: 'Enter the amount' });
   const accountId = paymentAccountId(ctx, input.mode, input.accountId);
   const remarks = input.remarks?.trim() || null;
+  // Worked out before posting: the advance is still given (the shop may not have entered a receipt yet).
+  const short = negativeBalanceWarning(ctx, accountId, input.amount, date);
   const num = nextDocNumber(ctx, 'advance', date);
   const id = ctx.db.insert('employee_advances', {
     advance_no: num.number,
@@ -168,7 +173,7 @@ export function createAdvance(ctx: Ctx, input: AdvanceInput): AdvanceDetail {
     `Gave advance ${num.number} of ${formatINR(input.amount)} to ${emp.name} by ${PAYMENT_MODE_LABELS[input.mode]}; outstanding now ${formatINR(outstanding)}`,
     { entityType: 'advance', entityId: id, details: { employeeId: emp.id, amount: input.amount, mode: input.mode, date, remarks } },
   );
-  return getAdvance(ctx, id);
+  return { ...getAdvance(ctx, id), warnings: short ? [short] : [] };
 }
 
 export function cancelAdvance(ctx: Ctx, id: number, reason: string): AdvanceDetail {
@@ -176,9 +181,11 @@ export function cancelAdvance(ctx: Ctx, id: number, reason: string): AdvanceDeta
   if (!why) throw fail.validation('Enter the reason for cancelling', { reason: 'Enter a reason' });
   const r = getRow(ctx, id);
   if (r.status === 'cancelled') throw fail.validation(`Advance ${r.advance_no} is already cancelled.`);
-  const outstanding = outstandingAdvance(ctx, r.employee_id);
-  if (outstanding - r.amount < 0) {
-    const recovered = r.amount - Math.max(outstanding, 0);
+  // Cancelling lowers the advance balance on every day from the advance's date. If a salary recovered
+  // it (even when a later advance makes today's balance look big enough), some day would go negative.
+  const spare = recoverableAdvance(ctx, r.employee_id, r.date);
+  if (spare < r.amount) {
+    const recovered = r.amount - spare;
     throw fail.validation(
       `${formatINR(recovered)} of this advance has already been recovered from ${r.employee_name}'s salary. Cancel that salary slip first, then cancel the advance.`,
     );

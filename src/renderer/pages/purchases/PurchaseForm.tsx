@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
+import { flushSync } from 'react-dom';
 import { Link, useNavigate, useParams, useSearchParams } from 'react-router';
 import { Plus, Save, Trash2 } from 'lucide-react';
 import { Alert, Button, Card, ErrorBox, IconButton, Loading, Page, PageHeader } from '../../components/ui';
@@ -25,7 +26,12 @@ interface Line {
   qty: number | null;
   unit: string;
   rate: number | null;
+  /** Rate of the last purchase of this description (from history), for the "check the rate" warning. */
+  lastRate?: number | null;
 }
+
+/** A rate this many times the last purchase rate is almost always a typing mistake (e.g. digits added to the old rate). */
+const RATE_CHECK_FACTOR = 10;
 
 interface PayRow {
   key: number;
@@ -207,9 +213,28 @@ function PurchaseEditor({ options, initial, existing }: { options: FormOptions; 
     // The next line may only appear after this render; try once more on the next frame.
     if (!tryFocus()) requestAnimationFrame(() => void tryFocus());
   };
-  /** Typed a description bought before: fill in the last unit and rate if they are still empty. */
+  /**
+   * Typed a description bought before: fill in the last unit and rate if they are still empty.
+   * The lookup finishes after the user has moved on, maybe into one of these boxes, and changing a box
+   * under the user puts the caret after the filled-in text, so the next keys would be appended to it.
+   * So: the rate box the user is in is left alone; an empty unit box the user is in is filled and its
+   * text selected in the same task (flushSync), before any further key press can arrive.
+   */
   const fillFromHistory = (key: number, o: { unit: string | null; rate: number }) => {
-    setS((x) => ({ ...x, lines: x.lines.map((l) => (l.key === key ? { ...l, unit: l.unit || o.unit || '', rate: l.rate ?? o.rate } : l)) }));
+    const unitEl = cells.current.get(`${key}:unit`);
+    const rateEl = cells.current.get(`${key}:rate`);
+    const active = document.activeElement;
+    const fillingUnitInUse = !!unitEl && unitEl === active && unitEl.value === '' && !!o.unit;
+    const inRate = !!rateEl && rateEl === active;
+    flushSync(() =>
+      setS((x) => ({
+        ...x,
+        lines: x.lines.map((l) =>
+          l.key === key ? { ...l, unit: l.unit || o.unit || '', rate: l.rate !== null || inRate ? l.rate : o.rate, lastRate: o.rate } : l,
+        ),
+      })),
+    );
+    if (fillingUnitInUse && unitEl && document.activeElement === unitEl && unitEl.value === o.unit) unitEl.select();
   };
 
   /** Enter moves along the line: description -> qty -> unit -> rate -> next line. */
@@ -275,12 +300,39 @@ function PurchaseEditor({ options, initial, existing }: { options: FormOptions; 
   const duplicate = hasSupplier && dBillNo ? dup.data?.duplicate : null;
 
   /* ---------- Save ---------- */
+  /** Lines whose rate is far above the last purchase rate of the same item: ask before saving. */
+  const confirmRates = async (): Promise<boolean> => {
+    const odd = filled.filter((l) => l.lastRate && l.rate !== null && l.rate > l.lastRate * RATE_CHECK_FACTOR);
+    if (!odd.length) return true;
+    const ok = await dialogs.confirm({
+      title: 'Check the rate',
+      message: (
+        <div className="stack">
+          {odd.map((l) => (
+            <div key={l.key}>
+              Line {s.lines.indexOf(l) + 1}, <b>{l.description.trim()}</b>: rate <b className="money">{formatINR(l.rate!)}</b> is more than {RATE_CHECK_FACTOR} times the last
+              purchase rate of <b className="money">{formatINR(l.lastRate!)}</b>.
+            </div>
+          ))}
+          <div>Save this purchase with {odd.length === 1 ? 'this rate' : 'these rates'}?</div>
+        </div>
+      ),
+      confirmText: 'Save anyway',
+      cancelText: 'Correct the rate',
+      // Starts on "Correct the rate", so a fast Enter never saves the wrong amount.
+      danger: true,
+    });
+    if (!ok) focusCell(s.lines.indexOf(odd[0]), 3);
+    return ok;
+  };
+
   const save = async (andNew: boolean) => {
     setShowErrors(true);
     if (problem || m.loading) {
       if (problem) toast.warning(problem);
       return;
     }
+    if (!(await confirmRates())) return;
     const input = {
       date: s.date,
       supplierId: hasSupplier ? s.supplier!.id : null,
@@ -426,8 +478,8 @@ function PurchaseEditor({ options, initial, existing }: { options: FormOptions; 
                       supplierId={hasSupplier ? s.supplier!.id : null}
                       placeholder={isBlank ? (i === 0 ? 'What did you buy?' : 'Add another item…') : ''}
                       ariaLabel={`Line ${i + 1} description`}
-                      onChange={(v) => setLine(l.key, { description: v })}
-                      onPick={(o) => setLine(l.key, { description: o.description, unit: o.unit ?? l.unit, rate: o.rate })}
+                      onChange={(v) => setLine(l.key, { description: v, lastRate: null })}
+                      onPick={(o) => setLine(l.key, { description: o.description, unit: o.unit ?? l.unit, rate: o.rate, lastRate: o.rate })}
                       onExactMatch={(o) => fillFromHistory(l.key, o)}
                       onEnter={() => advance(i, 0)}
                     />

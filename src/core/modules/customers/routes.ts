@@ -10,7 +10,8 @@ const zCustomerInput = z.object({
   phone: zPhone,
   address: zOptText(500),
   email: zOptText(120),
-  creditLimit: zPaise.nullish().transform((v) => v ?? null),
+  // null = no limit; left out = unchanged when editing. Changing it needs customers.credit (checked in the service).
+  creditLimit: zPaise.nullish(),
   notes: zOptText(1000),
   openingBalance: z
     .object({ amount: zPaise, direction: z.enum(['receivable', 'advance']) })

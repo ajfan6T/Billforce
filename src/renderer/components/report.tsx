@@ -50,7 +50,11 @@ export function AsOnPicker({ value, onChange, label = 'As on' }: { value: string
 
 /* ---------------------------- Export bar ---------------------------- */
 
-export function ExportButtons({ report, disabled }: { report: ReportData | undefined | null; disabled?: boolean }) {
+/**
+ * Excel / CSV / PDF / Print of a report. `load` fetches the full report to export when the screen
+ * shows only part of it (e.g. one page of a long cash book); by default the report on screen is used.
+ */
+export function ExportButtons({ report, disabled, load }: { report: ReportData | undefined | null; disabled?: boolean; load?: () => Promise<ReportData> }) {
   const toast = useToast();
   const { can } = useAuth();
   const [busy, setBusy] = useState<ExportFormat | 'print' | null>(null);
@@ -58,7 +62,7 @@ export function ExportButtons({ report, disabled }: { report: ReportData | undef
     if (!report) return;
     setBusy(format);
     try {
-      const path = await exportReport(report, format);
+      const path = await exportReport(load ? await load() : report, format);
       if (path) toast.success(`Saved ${format.toUpperCase()} to ${path}`, { label: 'Open', onClick: () => void call('files.open', { path }) });
     } catch (e) {
       toast.error(e);
@@ -70,7 +74,7 @@ export function ExportButtons({ report, disabled }: { report: ReportData | undef
     if (!report) return;
     setBusy('print');
     try {
-      await call('files.printReport', { report });
+      await call('files.printReport', { report: load ? await load() : report });
     } catch (e) {
       toast.error(e);
     } finally {

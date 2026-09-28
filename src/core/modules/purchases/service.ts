@@ -13,6 +13,7 @@ import { nextDocNumber } from '../../numbering';
 import { getSection } from '../../settings';
 import {
   getAccount,
+  negativeBalanceWarning,
   partyBalance,
   paymentAccountId,
   postEntry,
@@ -401,6 +402,23 @@ function duplicateWarning(ctx: Ctx, v: NormalizedPurchase, exceptId: number): st
   return `Bill no. ${v.supplierBillNo} from ${v.supplier.name} was already entered as ${dup.purchase_no} on ${formatDate(dup.date)}. Please check it is not entered twice.`;
 }
 
+/**
+ * "Cash in hand will be short by ..." for each cash / bank account the purchase is paid from.
+ * Call before posting; `already` = what the saved version of this purchase already paid out of each
+ * account (still in the balances when editing), so only the extra outflow is checked.
+ */
+function shortfallWarnings(ctx: Ctx, v: NormalizedPurchase, already: Array<{ account_id: number; amount: number }> = []): string[] {
+  const out = new Map<number, number>();
+  for (const p of v.payments) out.set(p.accountId, (out.get(p.accountId) ?? 0) + p.amount);
+  for (const p of already) if (out.has(p.account_id)) out.set(p.account_id, out.get(p.account_id)! - p.amount);
+  const warnings: string[] = [];
+  for (const [accountId, amount] of out) {
+    const w = negativeBalanceWarning(ctx, accountId, amount, v.date);
+    if (w) warnings.push(w);
+  }
+  return warnings;
+}
+
 /** Check a supplier bill number before saving (the form warns about possible duplicates). */
 export function findDuplicateBill(ctx: Ctx, supplierId: number, supplierBillNo: string, excludeId?: number | null): { id: number; purchaseNo: string; date: string; total: number } | null {
   const no = supplierBillNo.trim();
@@ -463,6 +481,7 @@ export type SavedPurchase = Purchase & { warnings: string[] };
 
 export function createPurchase(ctx: Ctx, input: PurchaseInput): SavedPurchase {
   const v = normalize(ctx, input);
+  const short = shortfallWarnings(ctx, v);
   const num = nextDocNumber(ctx, 'purchase', v.date);
   const id = ctx.db.insert('purchases', {
     purchase_no: num.number,
@@ -484,7 +503,7 @@ export function createPurchase(ctx: Ctx, input: PurchaseInput): SavedPurchase {
     { entityType: 'purchase', entityId: id, details: { total: v.total, paid: v.paid, credit: v.credit, supplierId: v.supplier?.id ?? null } },
   );
   const warning = duplicateWarning(ctx, v, id);
-  return { ...saved, warnings: warning ? [warning] : [] };
+  return { ...saved, warnings: [...(warning ? [warning] : []), ...short] };
 }
 
 export function updatePurchase(ctx: Ctx, id: number, input: PurchaseInput, reason?: string | null): SavedPurchase {
@@ -492,6 +511,7 @@ export function updatePurchase(ctx: Ctx, id: number, input: PurchaseInput, reaso
   if (before.status === 'cancelled') throw fail.validation('This purchase was cancelled and cannot be edited.');
   const beforeDoc = toPurchase(ctx, before);
   const v = normalize(ctx, input, before);
+  const short = shortfallWarnings(ctx, v, beforeDoc.payments.map((p) => ({ account_id: p.accountId, amount: p.amount })));
   ctx.db.update('purchases', id, {
     ...columns(v),
     revision: before.revision + 1,
@@ -515,7 +535,7 @@ export function updatePurchase(ctx: Ctx, id: number, input: PurchaseInput, reaso
     { entityType: 'purchase', entityId: id, details: { before: beforeDoc, after: saved, reason: reason ?? null } },
   );
   const warning = duplicateWarning(ctx, v, id);
-  return { ...saved, warnings: warning ? [warning] : [] };
+  return { ...saved, warnings: [...(warning ? [warning] : []), ...short] };
 }
 
 export function cancelPurchase(ctx: Ctx, id: number, reason: string): Purchase {

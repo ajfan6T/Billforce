@@ -32,13 +32,17 @@ export function ProcessSalaryModal({
   onSaved: (slip: Slip) => void;
 }) {
   const [month, setMonth] = useState(initialMonth);
-  const preview = useQuery('salary.preview', open && employeeId ? { employeeId, month } : null);
+  // '' = the month's default date (filled in once the preview has loaded).
+  const [date, setDate] = useState('');
+  // The advance that can be recovered depends on the salary date, so the preview follows the date.
+  const preview = useQuery('salary.preview', open && employeeId ? { employeeId, month, date: date || null } : null);
   const m = useMutation('salary.process');
   const toast = useToast();
   const [bonus, setBonus] = useState<number | null>(null);
   const [deductions, setDeductions] = useState<number | null>(null);
   const [recovery, setRecovery] = useState<number | null>(null);
-  const [date, setDate] = useState('');
+  // Until the user types a recovery it follows the suggestion for the chosen date.
+  const recoveryTouched = useRef(false);
   const [remarks, setRemarks] = useState('');
   const [payNow, setPayNow] = useState(true);
   const [pay, setPay] = useState<{ mode: SettlementMode; accountId: number | null }>({ mode: 'cash', accountId: null });
@@ -50,6 +54,7 @@ export function ProcessSalaryModal({
   useEffect(() => {
     if (open) {
       setMonth(initialMonth);
+      setDate('');
       setBonus(null);
       setDeductions(null);
       setRemarks('');
@@ -63,17 +68,20 @@ export function ProcessSalaryModal({
   }, [open, initialMonth, employeeId]);
 
   const p = preview.data;
-  // Fill the suggested recovery and date whenever a new month / employee is loaded.
+  // Fill the date whenever a new month / employee is loaded, and the suggested recovery whenever the
+  // preview changes (a different salary date can change how much advance may be recovered).
   useEffect(() => {
     if (!p) return;
     const key = `${p.employeeId}:${p.month}`;
-    if (loadedFor.current === key) return;
-    loadedFor.current = key;
-    setRecovery(p.suggestedRecovery || null);
-    setDate(p.defaultDate);
-    setPayTouched(false);
-    // The form appears once the preview has loaded: start typing in Bonus.
-    setTimeout(() => bonusRef.current?.focus(), 30);
+    if (loadedFor.current !== key) {
+      loadedFor.current = key;
+      recoveryTouched.current = false;
+      setDate(p.date);
+      setPayTouched(false);
+      // The form appears once the preview has loaded: start typing in Bonus.
+      setTimeout(() => bonusRef.current?.focus(), 30);
+    }
+    if (!recoveryTouched.current) setRecovery(p.suggestedRecovery || null);
   }, [p]);
 
   const gross = p?.gross ?? 0;
@@ -81,7 +89,11 @@ export function ProcessSalaryModal({
   // Until the user types an amount, "pay now" follows the net salary (derived, so Enter right after typing a bonus is safe).
   const payNowAmount = payTouched ? payAmount : net > 0 ? net : null;
 
-  const recoveryTooHigh = !!p && (recovery ?? 0) > Math.max(p.outstandingAdvance, 0);
+  // Advance given after the salary date cannot be recovered in this salary.
+  const laterAdvance = p ? Math.max(p.outstandingAdvance, 0) - p.recoverableAdvance : 0;
+  const recoveryTooHigh = !!p && (recovery ?? 0) > p.recoverableAdvance;
+  // The preview is being worked out again for a newly chosen date.
+  const checking = !!p && !!date && p.date !== date;
   // "Nothing earned" can still be saved when a bonus is given; every other problem blocks.
   const blocking = !!p?.problemKind && p.problemKind !== 'zero';
   const expense = gross + (bonus ?? 0) - (deductions ?? 0);
@@ -89,15 +101,19 @@ export function ProcessSalaryModal({
     ? 'Loading…'
     : blocking
       ? p.problem
-      : recoveryTooHigh
-        ? `Only ${formatINR(p.outstandingAdvance)} advance is outstanding`
-        : net < 0
-          ? 'Deductions and recovery are more than the salary'
-          : expense === 0
-            ? (p.problem ?? 'Nothing to record')
-            : payNow && net > 0 && (!payNowAmount || payNowAmount > net)
-              ? `Pay between ₹0.01 and ${formatINR(net)}`
-              : null;
+      : checking
+        ? 'Checking the advance for this date…'
+        : recoveryTooHigh
+          ? laterAdvance > 0
+            ? `Only ${formatINR(p.recoverableAdvance)} of the advance was outstanding on ${formatDate(p.date)}`
+            : `Only ${formatINR(Math.max(p.outstandingAdvance, 0))} advance is outstanding`
+          : net < 0
+            ? 'Deductions and recovery are more than the salary'
+            : expense === 0
+              ? (p.problem ?? 'Nothing to record')
+              : payNow && net > 0 && (!payNowAmount || payNowAmount > net)
+                ? `Pay between ₹0.01 and ${formatINR(net)}`
+                : null;
 
   const save = async (e?: FormEvent) => {
     e?.preventDefault();
@@ -114,6 +130,7 @@ export function ProcessSalaryModal({
         payNow: payNow && net > 0 && payNowAmount ? { mode: pay.mode, accountId: pay.accountId, amount: payNowAmount } : null,
       });
       toast.success(`Salary ${slip.salaryNo} saved for ${slip.employeeName}${slip.paid ? ` · paid ${formatINR(slip.paid)}` : ''}`);
+      for (const w of slip.warnings) toast.warning(w);
       onSaved(slip);
     } catch {
       /* shown below */
@@ -142,7 +159,14 @@ export function ProcessSalaryModal({
     >
       <form onSubmit={save} className="stack">
         <div className="row-between">
-          <MonthPicker value={month} onChange={setMonth} compact />
+          <MonthPicker
+            value={month}
+            onChange={(v) => {
+              setMonth(v);
+              setDate('');
+            }}
+            compact
+          />
           {p && (
             <span className="muted small">
               {p.designation ? `${p.designation} · ` : ''}
@@ -155,6 +179,12 @@ export function ProcessSalaryModal({
         {p && (
           <>
             {p.problem && <Alert tone="amber">{p.problem}{p.problemKind === 'zero' ? ' You can still record a bonus.' : ''}</Alert>}
+            {!blocking && p.noAttendance && p.salaryType === 'monthly' && (
+              <Alert tone="amber" title={`No attendance marked for ${p.monthLabel}`}>
+                Days that are not marked are paid, so this is a full month&apos;s salary. If {p.employeeName} was absent on any day, mark attendance
+                first.
+              </Alert>
+            )}
             <div className="process-grid">
               <div className="stack-sm">
                 <div className="process-box">
@@ -207,11 +237,25 @@ export function ProcessSalaryModal({
                 </div>
                 <Field
                   label="Recover from advance"
-                  error={recoveryTooHigh ? `At most ${formatINR(Math.max(p.outstandingAdvance, 0))}` : m.fields.advanceRecovery}
+                  error={recoveryTooHigh ? `At most ${formatINR(p.recoverableAdvance)}` : m.fields.advanceRecovery}
                   hint={p.outstandingAdvance > 0 ? `Advance outstanding ${formatINR(p.outstandingAdvance)}` : 'No advance outstanding'}
                 >
-                  <MoneyInput value={recovery} onChange={setRecovery} placeholder="0.00" disabled={p.outstandingAdvance <= 0} />
+                  <MoneyInput
+                    value={recovery}
+                    onChange={(v) => {
+                      recoveryTouched.current = true;
+                      setRecovery(v);
+                    }}
+                    placeholder="0.00"
+                    disabled={p.recoverableAdvance <= 0 && !recovery}
+                  />
                 </Field>
+                {laterAdvance > 0 && (
+                  <div className="emp-note-amber small">
+                    {formatINR(laterAdvance)} of the advance was given after {formatDate(p.date)}, so it cannot be recovered from a salary dated then. Recover it
+                    from a later salary, or choose a later salary date.
+                  </div>
+                )}
                 <div className={`net-line${net < 0 ? ' bad' : ''}`}>
                   <span>Net salary</span>
                   <span className="money">{formatINR(net)}</span>

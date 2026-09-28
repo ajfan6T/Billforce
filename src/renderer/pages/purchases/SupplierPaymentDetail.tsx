@@ -32,12 +32,16 @@ export function SupplierPaymentDetailPage() {
     void preview.reload();
   };
 
+  // Same rule as bills: the first print is free, printing again needs "Reprint bills" and is marked DUPLICATE.
+  const reprint = !!d && d.printCount > 0;
+  const canPrint = !reprint || can('billing.reprint');
+
   const print = async () => {
-    if (!d) return;
+    if (!d || !canPrint) return;
     setPrinting(true);
     try {
       const res = await call('supplierPayments.print', { id: d.id });
-      if (res.printed) toast.success(`Printed voucher ${d.paymentNo}`);
+      if (res.printed) toast.success(res.duplicate ? `Printed a duplicate of voucher ${d.paymentNo}` : `Printed voucher ${d.paymentNo}`);
       else if (res.message) toast.warning(res.message);
       reload();
     } catch (e) {
@@ -46,7 +50,7 @@ export function SupplierPaymentDetailPage() {
       setPrinting(false);
     }
   };
-  useHotkeys({ 'ctrl+p': () => void print() }, [d?.id]);
+  useHotkeys({ 'ctrl+p': () => void print() }, [d?.id, d?.printCount]);
 
   if (!valid) return <Page><ErrorBox error="This payment link is not valid." /></Page>;
   if (q.error) return <Page><PageHeader title="Payment" back="/purchases/payments" /><ErrorBox error={q.error} onRetry={q.reload} /></Page>;
@@ -90,9 +94,11 @@ export function SupplierPaymentDetailPage() {
         }
         actions={
           <>
-            <Button icon={<Printer size={16} />} kbd="Ctrl+P" loading={printing} onClick={print}>
-              {d.printCount ? 'Reprint voucher' : 'Print voucher'}
-            </Button>
+            {canPrint && (
+              <Button icon={<Printer size={16} />} kbd="Ctrl+P" loading={printing} onClick={print}>
+                {reprint ? 'Reprint voucher' : 'Print voucher'}
+              </Button>
+            )}
             {can('suppliers.pay') && active && (
               <>
                 <Button icon={<Pencil size={16} />} onClick={() => setEditing(true)}>
@@ -146,6 +152,7 @@ export function SupplierPaymentDetailPage() {
         </div>
         <Card title="Payment voucher" actions={<span className="small muted">printed {d.printCount}×</span>}>
           <ReceiptPreview html={preview.data?.html} height={520} />
+          {!canPrint && <p className="faint small mt-1">This voucher was already printed. Reprinting needs permission.</p>}
         </Card>
       </div>
       <SupplierPaymentModal open={editing} payment={d} onClose={() => setEditing(false)} onSaved={reload} />

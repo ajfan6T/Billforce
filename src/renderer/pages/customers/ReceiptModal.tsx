@@ -58,6 +58,10 @@ function ReceiptForm({ onClose, customer: presetCustomer, receipt, onSaved }: Pr
   const update = useMutation('receipts.update');
   const m = editing ? update : create;
   const canBackdate = can('billing.backdate');
+  // A settlement discount writes off dues, so it needs "Give discounts" (like a discount on a bill).
+  const canDiscount = can('billing.discount');
+  // Printing an edited payment that was printed before is a reprint.
+  const canPrint = !receipt?.printCount || can('billing.reprint');
 
   // When editing, load the customer so the picker shows the current balance.
   useEffect(() => {
@@ -116,7 +120,7 @@ function ReceiptForm({ onClose, customer: presetCustomer, receipt, onSaved }: Pr
     onClose();
   };
 
-  useHotkeys({ 'ctrl+p': () => void save(true), 'ctrl+s': () => void save(false) });
+  useHotkeys({ 'ctrl+p': () => void save(canPrint), 'ctrl+s': () => void save(false) });
 
   const ref = REFERENCE_LABEL[settle.mode];
   return (
@@ -131,9 +135,11 @@ function ReceiptForm({ onClose, customer: presetCustomer, receipt, onSaved }: Pr
           <Button variant="ghost" onClick={onClose}>
             Cancel
           </Button>
-          <Button icon={<Printer size={16} />} kbd="Ctrl+P" loading={printing} disabled={!!problem || m.loading} onClick={() => void save(true)}>
-            Save &amp; print
-          </Button>
+          {canPrint && (
+            <Button icon={<Printer size={16} />} kbd="Ctrl+P" loading={printing} disabled={!!problem || m.loading} onClick={() => void save(true)}>
+              Save &amp; print
+            </Button>
+          )}
           <Button variant="primary" type="submit" form="receipt-form" kbd="Enter" loading={m.loading && !printing} disabled={!!problem}>
             Save
           </Button>
@@ -188,9 +194,17 @@ function ReceiptForm({ onClose, customer: presetCustomer, receipt, onSaved }: Pr
               }}
             />
           </Field>
-          <Field label="Discount allowed" hint="Settlement discount, if any" error={discountTooBig ? `At most ${formatINR(maxDiscount)}` : m.fields.discount}>
-            <MoneyInput value={discount} onChange={setDiscount} placeholder="0.00" />
-          </Field>
+          {canDiscount ? (
+            <Field label="Discount allowed" hint="Settlement discount, if any" error={discountTooBig ? `At most ${formatINR(maxDiscount)}` : m.fields.discount}>
+              <MoneyInput value={discount} onChange={setDiscount} placeholder="0.00" />
+            </Field>
+          ) : (
+            <BoxField label="Discount allowed" hint="Giving discounts needs permission from the owner" error={discountTooBig ? `At most ${formatINR(maxDiscount)}` : m.fields.discount}>
+              <div className="readonly-date" aria-label="Discount allowed">
+                {discount ? formatINR(discount) : 'None'}
+              </div>
+            </BoxField>
+          )}
         </FormGrid>
         <BoxField label="Received by">
           <SettlementPicker value={settle} onChange={setSettle} />

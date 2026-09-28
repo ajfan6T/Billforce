@@ -132,6 +132,7 @@ export function ChartOfAccountsPage() {
                       <GroupRows
                         key={g.code}
                         group={g}
+                        profitAndLoss={t.type === 'income' || t.type === 'expense'}
                         canEdit={canEdit}
                         onAdd={() => setEditing({ id: null, groupCode: g.code })}
                         onOpen={(a) => navigate(`/accounts/ledger?account=${a.id}`)}
@@ -176,6 +177,7 @@ export function ChartOfAccountsPage() {
           initialGroup={editing.groupCode}
           groups={groups.data}
           booksStartDate={chart.data?.booksStartDate ?? ''}
+          openingLockedReason={chart.data?.openingLockedReason ?? null}
           onClose={() => setEditing(null)}
           onSaved={() => {
             setEditing(null);
@@ -189,6 +191,7 @@ export function ChartOfAccountsPage() {
 
 function GroupRows({
   group,
+  profitAndLoss,
   canEdit,
   onAdd,
   onOpen,
@@ -197,6 +200,8 @@ function GroupRows({
   onDelete,
 }: {
   group: Chart['types'][number]['groups'][number];
+  /** Income / expense heads can be deactivated with a balance (they stay in the reports). */
+  profitAndLoss: boolean;
   canEdit: boolean;
   onAdd: () => void;
   onOpen: (a: ChartAccount) => void;
@@ -224,14 +229,14 @@ function GroupRows({
       )}
       {group.accounts.map((a) => {
         const canDelete = !a.isSystem && !a.loanId && a.entryCount === 0 && a.defaultFor.length === 0;
-        const canToggle = !a.isSystem && !a.loanId && a.defaultFor.length === 0 && (!a.isActive || a.balance === 0);
+        const canToggle = !a.isSystem && !a.loanId && a.defaultFor.length === 0 && (!a.isActive || a.balance === 0 || profitAndLoss);
         const toggleTitle = a.isSystem
           ? 'Built-in accounts cannot be deactivated'
           : a.loanId
             ? 'Close the loan from Accounts > Loans'
             : a.defaultFor.length
               ? 'Used for payments: choose another payment account first'
-              : a.isActive && a.balance !== 0
+              : a.isActive && a.balance !== 0 && !profitAndLoss
                 ? 'Only accounts with a zero balance can be deactivated'
                 : a.isActive
                   ? 'Deactivate'
@@ -273,6 +278,7 @@ function AccountFormModal({
   initialGroup,
   groups,
   booksStartDate,
+  openingLockedReason,
   onClose,
   onSaved,
 }: {
@@ -280,6 +286,8 @@ function AccountFormModal({
   initialGroup?: string;
   groups: Group[];
   booksStartDate: string;
+  /** Set when the first financial year is closed: opening balances can no longer be entered. */
+  openingLockedReason: string | null;
   onClose: () => void;
   onSaved: () => void;
 }) {
@@ -312,7 +320,9 @@ function AccountFormModal({
   useEffect(() => {
     if (!accountId && group && !touchedSide) setSide(DEBIT_NATURE[group.type] ? 'debit' : 'credit');
   }, [accountId, group, touchedSide]);
-  const openingAllowed = accountId ? d?.openingBalance !== null && d?.openingBalance !== undefined : type === 'asset' || type === 'liability' || type === 'equity';
+  const canHaveOpening = accountId ? d?.openingBalance !== null && d?.openingBalance !== undefined : type === 'asset' || type === 'liability' || type === 'equity';
+  const locked = canHaveOpening ? (accountId ? (d?.openingLockedReason ?? null) : openingLockedReason) : null;
+  const openingAllowed = canHaveOpening && !locked;
   const busy = create.loading || update.loading;
   const error = create.error || update.error;
   const fields = { ...create.fields, ...update.fields };
@@ -415,6 +425,15 @@ function AccountFormModal({
                 />
               </div>
             </Field>
+          ) : locked ? (
+            <div className="small muted">
+              {d?.openingBalance ? (
+                <>
+                  Opening balance on {formatDate(d.booksStartDate)}: <b>{formatDrCr(d.openingBalance)}</b>.{' '}
+                </>
+              ) : null}
+              {locked}
+            </div>
           ) : (
             d?.openingBlockedReason && <div className="small muted">{d.openingBlockedReason}</div>
           )}

@@ -17,12 +17,8 @@ type Status = ApiOutput<'backup.status'>;
 type BackupRow = Status['backups'][number];
 type Inspection = ApiOutput<'backup.inspect'>;
 
-const KIND: Record<BackupRow['kind'], { label: string; tone: Tone }> = {
-  auto: { label: 'Automatic', tone: 'blue' },
-  manual: { label: 'Manual', tone: 'green' },
-  safety: { label: 'Before restore', tone: 'amber' },
-  other: { label: 'Backup file', tone: 'neutral' },
-};
+/** Colour per kind; the words come from the backup itself (b.label), e.g. "Before year-end close" for a safety copy. */
+const KIND_TONE: Record<BackupRow['kind'], Tone> = { auto: 'blue', manual: 'green', safety: 'amber', other: 'neutral' };
 
 const CONFIRM_WORD = 'RESTORE';
 
@@ -235,7 +231,17 @@ export function BackupPage() {
 
   const columns: Array<Column<BackupRow>> = [
     { key: 'at', label: 'Date & time', render: (b) => <WhenText ts={b.at} /> },
-    { key: 'kind', label: 'Type', value: (b) => KIND[b.kind].label, render: (b) => <Badge tone={KIND[b.kind].tone}>{KIND[b.kind].label}</Badge> },
+    {
+      key: 'kind',
+      label: 'Type',
+      value: (b) => (b.damaged ? `${b.label} (damaged)` : b.label),
+      render: (b) => (
+        <div className="status-list">
+          <Badge tone={KIND_TONE[b.kind]}>{b.label}</Badge>
+          {b.damaged && <Badge tone="red">Damaged</Badge>}
+        </div>
+      ),
+    },
     { key: 'sizeBytes', label: 'Size', align: 'right', className: 'nowrap', render: (b) => formatBytes(b.sizeBytes) },
     {
       key: 'fileName',
@@ -245,6 +251,7 @@ export function BackupPage() {
           <span className="path-text">{b.fileName}</span>
           {!b.inFolder && <span className="cell-note">Saved in {folderOf(b.path)}</span>}
           {b.note && <span className="cell-note">{b.note}</span>}
+          {b.damaged && <span className="cell-note danger">This file is incomplete (for example the disk was full when it was saved) and cannot be restored.</span>}
         </div>
       ),
     },
@@ -256,7 +263,7 @@ export function BackupPage() {
       render: (b) => (
         <div className="admin-actions">
           <IconButton label="Show in folder" icon={<FolderSearch size={16} />} onClick={() => void call('files.showInFolder', { path: b.path }).catch((e) => toast.error(e))} />
-          {canRestore && s.canRestore && (
+          {canRestore && s.canRestore && !b.damaged && (
             <Button size="sm" icon={<RotateCcw size={14} />} onClick={() => setRestorePath(b.path)}>
               Restore
             </Button>
@@ -297,6 +304,7 @@ export function BackupPage() {
                   <div className="muted">{formatDateTime(s.lastBackup.at)}</div>
                   {s.lastBackup.path && <div className="path-text mt-1">{s.lastBackup.path}</div>}
                   {!s.lastBackup.exists && <Alert tone="amber">That backup file is no longer there (it may have been on a pen drive that was removed).</Alert>}
+                  {s.lastBackup.exists && s.lastBackup.damaged && <Alert tone="red">That backup file is incomplete and cannot be restored. Press "Back up now".</Alert>}
                 </>
               ) : (
                 <>

@@ -4,7 +4,7 @@ import { Db } from './db/database';
 import { migrate } from './db/migrate';
 import { seedReferenceData } from './seed';
 import type { AppHooks, AppInfo, Ctx, Session } from './context';
-import type { Platform } from './platform';
+import { withSafeguards, type Platform } from './platform';
 import { dispatch } from './api/router';
 import { routes } from './api/routes';
 import { serializeError, type SerializedError } from './errors';
@@ -39,7 +39,8 @@ export class BillforceApp {
   private listeners = new Set<(event: string) => void>();
 
   constructor(opts: AppOptions) {
-    this.platform = opts.platform;
+    // Every service sees the platform through the same safeguards (saved-file registry, printer check).
+    this.platform = withSafeguards(opts.platform);
     this.clock = opts.clock ?? (() => new Date());
     const dbPath = opts.dbPath ?? path.join(opts.dataDir, 'billforce.db');
     if (dbPath !== ':memory:') fs.mkdirSync(path.dirname(dbPath), { recursive: true });

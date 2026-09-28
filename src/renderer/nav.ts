@@ -38,7 +38,7 @@ export const NAV: NavGroup[] = [
     items: [
       { label: 'New bill', to: '/billing/new', perm: 'billing.create' },
       { label: 'Bills', to: '/sales/bills', perm: ['billing.create', 'billing.view'] },
-      { label: 'Returns & credit notes', to: '/sales/returns', perm: 'returns.create' },
+      { label: 'Returns & credit notes', to: '/sales/returns', perm: ['returns.create', 'returns.adjust'] },
       { label: 'Items & rates', to: '/sales/items', perm: ['items.manage', 'billing.create'] },
     ],
   },

@@ -18,6 +18,7 @@ export function TrialBalancePage() {
       loading={q.loading}
       error={q.error}
       onRetry={q.reload}
+      linkPeriod={range}
       wide
       filters={
         <>

@@ -5,6 +5,8 @@
  *   Gross profit + Other income - Indirect expenses    = Net profit / loss
  * Computed from the ledger (non-void entries, year-end closing entries left out).
  * Stock is not tracked, so purchases are expensed when made.
+ * Discounts allowed and round off are indirect expenses here, so this "Net sales" is before discounts;
+ * Sales insights and the dashboard show bill totals as "Net sales after discounts" (a note says so).
  */
 import type { Ctx } from '../../context';
 import type { ReportColumn, ReportData, ReportRow } from '../../../shared/report';
@@ -207,6 +209,12 @@ export function profitLoss(ctx: Ctx, input: { from: string; to: string; compare?
     'Stock is not tracked; purchases are treated as expenses when made.',
     'Year-end closing entries are left out. Cancelled bills and vouchers are not included.',
   ];
+  const billingAdjustments = accounts.filter((a) => a.systemKey === 'DISCOUNT_ALLOWED' || a.systemKey === 'ROUND_OFF').some((a) => (cur.byAccount.get(a.id) ?? 0) !== 0);
+  if (billingAdjustments) {
+    notes.push(
+      'Net sales = sales - sales returns. Discount allowed and round off on bills are shown under indirect expenses, so Sales insights and the dashboard, which take them off the bills ("Net sales after discounts"), show a different figure.',
+    );
+  }
   if (cmp && cmpRange) notes.push(`Compared with ${periodLabel(cmpRange.from, cmpRange.to)} (${rangeSubtitle(cmpRange.from, cmpRange.to).toLowerCase()}). Change % is shown against the earlier period.`);
   if (!cmp && (f.grossProfit < 0 || f.netProfit < 0)) notes.push('Losses are shown as positive amounts next to the words "Gross loss" / "Net loss".');
 
@@ -221,7 +229,7 @@ export function profitLoss(ctx: Ctx, input: { from: string; to: string; compare?
       summary: [
         { label: 'Net sales', value: f.netSales, type: 'money' },
         { label: f.grossProfit >= 0 ? 'Gross profit' : 'Gross loss', value: f.grossProfit, type: 'money' },
-        { label: 'Total expenses', value: f.totalExpenses, type: 'money' },
+        { label: 'Purchases & expenses', value: f.totalExpenses, type: 'money' },
         { label: f.netProfit >= 0 ? 'Net profit' : 'Net loss', value: f.netProfit, type: 'money' },
         { label: 'Net margin', value: f.netMargin ?? '-', type: f.netMargin === null ? 'text' : 'percent' },
       ],

@@ -31,6 +31,8 @@ CREATE TABLE customers (
 );
 CREATE INDEX idx_customers_name ON customers (name COLLATE NOCASE);
 CREATE INDEX idx_customers_phone ON customers (phone);
+-- Duplicate-phone check: phoneKey() in SQL (same text as PHONE_KEY_SQL in modules/customers/common.ts).
+CREATE INDEX idx_customers_phone_key ON customers ((CASE WHEN length(REPLACE(REPLACE(REPLACE(REPLACE(REPLACE(phone, ' ', ''), '-', ''), '+', ''), '(', ''), ')', '')) > 10 AND (substr(REPLACE(REPLACE(REPLACE(REPLACE(REPLACE(phone, ' ', ''), '-', ''), '+', ''), '(', ''), ')', ''), 1, 2) = '91' OR substr(REPLACE(REPLACE(REPLACE(REPLACE(REPLACE(phone, ' ', ''), '-', ''), '+', ''), '(', ''), ')', ''), 1, 1) = '0') THEN substr(REPLACE(REPLACE(REPLACE(REPLACE(REPLACE(phone, ' ', ''), '-', ''), '+', ''), '(', ''), ')', ''), -10) ELSE REPLACE(REPLACE(REPLACE(REPLACE(REPLACE(phone, ' ', ''), '-', ''), '+', ''), '(', ''), ')', '') END));
 
 CREATE TABLE suppliers (
   id INTEGER PRIMARY KEY,

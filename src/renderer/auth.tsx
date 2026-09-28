@@ -1,5 +1,6 @@
 import { createContext, useCallback, useContext, useEffect, useMemo, useState, type ReactNode } from 'react';
 import { call, onAppEvent, type ApiOutput } from './api';
+import { setScreenLocked } from './guards';
 import type { Permission } from '../shared/permissions';
 
 type Status = ApiOutput<'app.status'>;
@@ -24,7 +25,12 @@ const AuthContext = createContext<AuthApi | null>(null);
 
 export function AuthProvider({ children }: { children: ReactNode }) {
   const [status, setStatus] = useState<Status | null>(null);
-  const [locked, setLocked] = useState(false);
+  const [locked, setLockedState] = useState(false);
+  // The module flag is set at once (not after the next render) so no shortcut slips through while locking.
+  const setLocked = useCallback((v: boolean) => {
+    setScreenLocked(v);
+    setLockedState(v);
+  }, []);
 
   const refresh = useCallback(async () => {
     const s = await call('app.status');
@@ -35,6 +41,8 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     void refresh();
     const onUnauth = () => void refresh();
     window.addEventListener('billforce:unauthenticated', onUnauth);
+    // After a restore the data underneath has changed: start again from the login screen.
+    // (The desktop app reloads the window from the main process; this covers the browser test server.)
     const off = onAppEvent((e) => {
       if (e === 'database-replaced') window.location.reload();
     });
@@ -47,6 +55,10 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   // Auto-lock after inactivity (Settings > Security).
   const minutes = status?.autoLockMinutes ?? 0;
   const hasSession = !!status?.session;
+  // A lock belongs to a session: once logged out (or the session ended) the next login starts unlocked.
+  useEffect(() => {
+    if (!hasSession) setLocked(false);
+  }, [hasSession, setLocked]);
   useEffect(() => {
     if (!minutes || !hasSession) return;
     let last = Date.now();
@@ -62,7 +74,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       events.forEach((e) => window.removeEventListener(e, bump));
       clearInterval(t);
     };
-  }, [minutes, hasSession]);
+  }, [minutes, hasSession, setLocked]);
 
   const api = useMemo<AuthApi>(() => {
     const session = status?.session ?? null;
@@ -83,7 +95,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       locked,
       unlock: () => setLocked(false),
     };
-  }, [status, locked, refresh]);
+  }, [status, locked, refresh, setLocked]);
 
   return <AuthContext.Provider value={api}>{children}</AuthContext.Provider>;
 }

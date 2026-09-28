@@ -508,7 +508,8 @@ describe('salary slips', () => {
     const b = await addEmployee({ name: 'Bala', salaryType: 'daily', salaryAmount: RS(600) });
     const c = await addEmployee({ name: 'Chetan', salaryAmount: RS(12000) });
     await addEmployee({ name: 'Dinesh', joinDate: '2026-09-01' });
-    await t.call('advances.create', { employeeId: c.id, amount: RS(3000), mode: 'cash' });
+    // given in August, so August's salary (dated 31-08) can recover it
+    await t.call('advances.create', { employeeId: c.id, amount: RS(3000), mode: 'cash', date: '2026-08-05' });
     await mark(b.id, ['2026-08-03', '2026-08-04', '2026-08-05'], 'P');
     await t.call('salary.process', { employeeId: a.id, month: '2026-08' });
     const sheet = await t.call('salary.monthSheet', { month: '2026-08' });
@@ -518,7 +519,8 @@ describe('salary slips', () => {
     expect(chetan).toMatchObject({ gross: RS(12000), outstandingAdvance: RS(3000), suggestedRecovery: RS(3000), slip: null, problem: null });
     expect(sheet.rows[0].slip).toMatchObject({ status: 'unpaid', net: RS(15000) });
 
-    const res = await t.call('salary.processAll', { month: '2026-08', recoverAdvances: true, payNow: { mode: 'cash' } });
+    // Chetan has no attendance marked: confirmed to be paid for the full month
+    const res = await t.call('salary.processAll', { month: '2026-08', recoverAdvances: true, includeUnmarked: true, payNow: { mode: 'cash' } });
     expect(res.processed.map((p) => p.name)).toEqual(['Bala', 'Chetan']);
     expect(res.skipped).toEqual([]);
     expect(res.totalNet).toBe(RS(1800) + RS(9000));
@@ -531,7 +533,7 @@ describe('salary slips', () => {
 
     // a month where someone earned nothing: skipped with the reason
     await mark(b.id, [], 'P');
-    const sep = await t.call('salary.processAll', { month: '2026-09', recoverAdvances: false });
+    const sep = await t.call('salary.processAll', { month: '2026-09', recoverAdvances: false, includeUnmarked: true });
     expect(sep.skipped.map((s) => s.name)).toEqual(['Bala']);
     expect(sep.skipped[0].reason).toMatch(/No salary is earned/);
     expect(sep.processed.map((p) => p.name)).toEqual(['Anil', 'Chetan', 'Dinesh']);
@@ -703,7 +705,226 @@ describe('advances and employee ledger', () => {
     expect(payableBalance(e.id)).toBe(-RS(3000));
     const detail = await t.call('employees.get', { id: e.id });
     expect(detail).toMatchObject({ outstandingAdvance: RS(2000), salaryDue: RS(3000), openingAdvance: RS(1000) });
-    expect(detail.totals).toMatchObject({ slips: 2, salaryThisFy: RS(27000), advancesThisFy: RS(4000), lastSalaryMonth: '2026-08' });
+    // salary earned (gross) this year; the net after advance recovery separately
+    expect(detail.totals).toMatchObject({ slips: 2, salaryThisFy: RS(30000), netThisFy: RS(27000), recoveredThisFy: RS(3000), advancesThisFy: RS(4000), lastSalaryMonth: '2026-08' });
+  });
+});
+
+/* ------------------------------ Advance recovery by date ------------------------------ */
+
+/** Lowest Employee Advances balance of an employee on any day (the account must never go negative). */
+function lowestAdvanceBalance(id: number): number {
+  const rows = t.app.db.all<{ date: string; amt: number }>(
+    `SELECT e.date, SUM(l.debit - l.credit) AS amt FROM journal_lines l JOIN journal_entries e ON e.id = l.entry_id
+      WHERE e.is_void = 0 AND l.party_type = 'employee' AND l.party_id = ? AND l.account_id = (SELECT id FROM accounts WHERE system_key = 'EMP_ADV')
+      GROUP BY e.date ORDER BY e.date`,
+    [id],
+  );
+  let bal = 0;
+  let low = 0;
+  for (const r of rows) {
+    bal += r.amt;
+    low = Math.min(low, bal);
+  }
+  return low;
+}
+
+describe('advance recovery is limited to the advance outstanding on the slip date', () => {
+  it('does not recover, in a month-end slip, an advance given after that month', async () => {
+    t = await createTestApp({ openingCash: RS(100000) });
+    const e = await addEmployee({ name: 'Pooja Shinde' });
+    await t.call('advances.create', { employeeId: e.id, amount: RS(3000), mode: 'cash', date: '2026-09-08' });
+
+    // August salary processed in September: dated 31-08, before the advance existed
+    const p = await t.call('salary.preview', { employeeId: e.id, month: '2026-08' });
+    expect(p).toMatchObject({ date: '2026-08-31', outstandingAdvance: RS(3000), recoverableAdvance: 0, suggestedRecovery: 0 });
+    // dated after the advance, it can be recovered
+    const later = await t.call('salary.preview', { employeeId: e.id, month: '2026-08', date: '2026-09-10' });
+    expect(later).toMatchObject({ date: '2026-09-10', recoverableAdvance: RS(3000), suggestedRecovery: RS(3000) });
+
+    const sheet = await t.call('salary.monthSheet', { month: '2026-08' });
+    expect(sheet.rows[0]).toMatchObject({ outstandingAdvance: RS(3000), recoverableAdvance: 0, suggestedRecovery: 0 });
+    expect((await t.call('salary.monthSheet', { month: '2026-08', date: '2026-09-10' })).rows[0].suggestedRecovery).toBe(RS(3000));
+
+    const err = await t.fails('salary.process', { employeeId: e.id, month: '2026-08', advanceRecovery: RS(3000) });
+    expect(err.message).toMatch(/given after 31-08-2026/);
+    expect(err.fields?.advanceRecovery).toBe('At most ₹0.00');
+
+    const res = await t.call('salary.processAll', { month: '2026-08', recoverAdvances: true, includeUnmarked: true });
+    expect(res.processed).toHaveLength(1);
+    const slip = await t.call('salary.get', { id: res.processed[0].salaryId });
+    expect(slip).toMatchObject({ date: '2026-08-31', advanceRecovery: 0, net: RS(15000) });
+    expect(partyBalance(t.app.ctx(), 'employee', e.id, { account: 'EMP_ADV', to: '2026-08-31' })).toBe(0);
+    expect(lowestAdvanceBalance(e.id)).toBe(0);
+    const bs = await t.call('reports.balanceSheet', { asOf: '2026-08-31' });
+    expect(JSON.stringify(bs)).not.toMatch(/-300000/);
+  });
+
+  it('recovers up to the advance outstanding on the date, and a later-dated slip can take the rest', async () => {
+    t = await createTestApp({ openingCash: RS(100000) });
+    const e = await addEmployee();
+    await t.call('advances.create', { employeeId: e.id, amount: RS(2000), mode: 'cash', date: '2026-08-20' });
+    await t.call('advances.create', { employeeId: e.id, amount: RS(3000), mode: 'cash', date: '2026-09-08' });
+    const err = await t.fails('salary.process', { employeeId: e.id, month: '2026-08', advanceRecovery: RS(2500) });
+    expect(err.message).toMatch(/Only ₹2,000.00 .* outstanding on 31-08-2026/);
+    const aug = await t.call('salary.process', { employeeId: e.id, month: '2026-08', advanceRecovery: RS(2000) });
+    expect(aug.advanceRecovery).toBe(RS(2000));
+    // the same salary dated after the second advance could have recovered both
+    const sep = await t.call('salary.preview', { employeeId: e.id, month: '2026-09' });
+    expect(sep).toMatchObject({ outstandingAdvance: RS(3000), recoverableAdvance: RS(3000), suggestedRecovery: RS(3000) });
+    expect(lowestAdvanceBalance(e.id)).toBe(0);
+  });
+
+  it('does not recover again what a later slip has already recovered', async () => {
+    t = await createTestApp({ openingCash: RS(100000) });
+    const e = await addEmployee();
+    await t.call('advances.create', { employeeId: e.id, amount: RS(5000), mode: 'cash', date: '2026-08-05' });
+    // September processed first (dated 15-09) and recovers the whole advance
+    await t.call('salary.process', { employeeId: e.id, month: '2026-09', date: '2026-09-15', advanceRecovery: RS(5000) });
+    // a new advance after that
+    await t.call('advances.create', { employeeId: e.id, amount: RS(2000), mode: 'cash', date: '2026-09-20' });
+    // August dated 31-08: 5,000 was outstanding then and 2,000 is outstanding today, but recovering
+    // anything would take the advance below zero between 15-09 and 20-09
+    const p = await t.call('salary.preview', { employeeId: e.id, month: '2026-08' });
+    expect(p).toMatchObject({ outstandingAdvance: RS(2000), recoverableAdvance: 0, suggestedRecovery: 0 });
+    expect((await t.fails('salary.process', { employeeId: e.id, month: '2026-08', advanceRecovery: RS(1) })).fields?.advanceRecovery).toBe('At most ₹0.00');
+    await t.call('salary.process', { employeeId: e.id, month: '2026-08' });
+    expect(lowestAdvanceBalance(e.id)).toBe(0);
+  });
+
+  it('cannot cancel an advance whose amount a salary has recovered, even when a later advance hides it today', async () => {
+    t = await createTestApp({ openingCash: RS(100000) });
+    const e = await addEmployee();
+    const a1 = await t.call('advances.create', { employeeId: e.id, amount: RS(5000), mode: 'cash', date: '2026-08-01' });
+    await t.call('salary.process', { employeeId: e.id, month: '2026-08', advanceRecovery: RS(5000) });
+    const a2 = await t.call('advances.create', { employeeId: e.id, amount: RS(5000), mode: 'cash', date: '2026-09-08' });
+    // today's balance is 5,000, but cancelling the first advance would leave -5,000 from 31-08 to 07-09
+    expect((await t.fails('advances.cancel', { id: a1.id, reason: 'Wrong' })).message).toMatch(/₹5,000.00 of this advance has already been recovered/);
+    await t.call('advances.cancel', { id: a2.id, reason: 'Not given' });
+    expect(lowestAdvanceBalance(e.id)).toBe(0);
+  });
+
+  it('cannot lower the opening advance below what a salary recovered before a later advance', async () => {
+    t = await createTestApp({ openingCash: RS(100000) });
+    const e = await addEmployee({ openingAdvance: RS(3000) });
+    await t.call('salary.process', { employeeId: e.id, month: '2026-08', advanceRecovery: RS(3000) });
+    await t.call('advances.create', { employeeId: e.id, amount: RS(4000), mode: 'cash', date: '2026-09-08' });
+    const base = { id: e.id, name: 'Ramesh Kumar', salaryType: 'monthly' as const, salaryAmount: RS(15000), joinDate: '2026-04-01' };
+    const err = await t.fails('employees.update', { ...base, openingAdvance: RS(1000) });
+    expect(err.message).toMatch(/₹3,000.00 of the opening advance has already been recovered/);
+    expect(lowestAdvanceBalance(e.id)).toBe(0);
+  });
+});
+
+/* ------------------------------ Money going out: balance warnings ------------------------------ */
+
+describe('cash / bank balance warnings', () => {
+  it('warns (without blocking) when an advance or salary payment takes cash or bank below zero', async () => {
+    t = await createTestApp({ openingCash: RS(10000) });
+    const e = await addEmployee();
+    const ok = await t.call('advances.create', { employeeId: e.id, amount: RS(4000), mode: 'cash' });
+    expect(ok.warnings).toEqual([]);
+    const short = await t.call('advances.create', { employeeId: e.id, amount: RS(7000), mode: 'cash' });
+    expect(short.warnings).toEqual(['Cash in Hand will be short by ₹1,000.00 after this payment. Check that all money received has been entered.']);
+    expect(systemBalance(t.app, 'CASH')).toBe(-RS(1000));
+
+    const s = await t.call('salary.process', { employeeId: e.id, month: '2026-08', payNow: { mode: 'upi', amount: RS(5000) } });
+    expect(s.warnings).toHaveLength(1);
+    expect(s.warnings[0]).toMatch(/short by ₹5,000.00/);
+    const paid = await t.call('salary.pay', { salaryId: s.id, amount: RS(2000), mode: 'upi' });
+    expect(paid.warnings[0]).toMatch(/short by ₹7,000.00/);
+    const none = await t.call('salary.process', { employeeId: e.id, month: '2026-07' });
+    expect(none.warnings).toEqual([]);
+  });
+
+  it('process all gives one warning per account, for the whole shortfall', async () => {
+    t = await createTestApp({ openingCash: RS(20000) });
+    await addEmployee({ name: 'Anil' });
+    await addEmployee({ name: 'Bala' });
+    const res = await t.call('salary.processAll', { month: '2026-08', recoverAdvances: true, includeUnmarked: true, payNow: { mode: 'cash' } });
+    expect(res.totalPaid).toBe(RS(30000));
+    expect(res.warnings).toEqual(['Cash in Hand will be short by ₹10,000.00 after this payment. Check that all money received has been entered.']);
+    const t2 = await t.call('salary.processAll', { month: '2026-07', recoverAdvances: true, includeUnmarked: true });
+    expect(t2.warnings).toEqual([]);
+  });
+});
+
+/* ------------------------------ Process all: no attendance ------------------------------ */
+
+describe('process all with no attendance marked', () => {
+  it('flags employees with no attendance and skips them unless the full-month pay is confirmed', async () => {
+    t = await createTestApp({ openingCash: RS(200000) });
+    const a = await addEmployee({ name: 'Anil' });
+    const b = await addEmployee({ name: 'Bala' });
+    const c = await addEmployee({ name: 'Chetan', salaryType: 'daily', salaryAmount: RS(500) });
+    await mark(a.id, ['2026-08-03'], 'A');
+    const sheet = await t.call('salary.monthSheet', { month: '2026-08' });
+    const by = (n: string) => sheet.rows.find((r) => r.employeeName === n)!;
+    expect(by('Anil').noAttendance).toBe(false);
+    expect(by('Bala')).toMatchObject({ noAttendance: true, gross: RS(15000), problem: null });
+    // daily wages with nothing marked earn nothing (already skipped as "No salary is earned")
+    expect(by('Chetan')).toMatchObject({ noAttendance: true, problemKind: 'zero' });
+    expect(sheet.totals).toMatchObject({ pending: 2, noAttendance: 1 });
+    const pv = await t.call('salary.preview', { employeeId: b.id, month: '2026-08' });
+    expect(pv.noAttendance).toBe(true);
+
+    const first = await t.call('salary.processAll', { month: '2026-08', recoverAdvances: true });
+    expect(first.processed.map((p) => p.name)).toEqual(['Anil']);
+    expect(first.skipped.map((s) => s.name)).toEqual(['Bala', 'Chetan']);
+    expect(first.skipped[0].reason).toMatch(/No attendance is marked for August 2026/);
+    expect(t.app.db.value<number>('SELECT COUNT(*) FROM salaries WHERE employee_id = ?', [b.id])).toBe(0);
+
+    const second = await t.call('salary.processAll', { month: '2026-08', recoverAdvances: true, includeUnmarked: true });
+    expect(second.processed.map((p) => p.name)).toEqual(['Bala']);
+    expect(second.processed[0].net).toBe(RS(15000));
+    void c;
+  });
+});
+
+/* ------------------------------ Salary slip printing ------------------------------ */
+
+describe('salary slip printing', () => {
+  it('leaves out the customer header / footer, prints one copy and marks reprints DUPLICATE', async () => {
+    t = await createTestApp();
+    await t.call('settings.update', { section: 'receipt', values: { copies: 3, header: 'Open 9 am to 9 pm', footer: 'Thank you! Visit again.' } });
+    const e = await addEmployee();
+    const s = await t.call('salary.process', { employeeId: e.id, month: '2026-08' });
+    const { html } = await t.call('salary.slipHtml', { id: s.id });
+    expect(html).toContain('SALARY SLIP');
+    expect(html).toContain('Employee signature');
+    expect(html).not.toContain('Thank you! Visit again.');
+    expect(html).not.toContain('Open 9 am to 9 pm');
+    expect(html).not.toContain('DUPLICATE');
+
+    const first = await t.call('salary.print', { id: s.id });
+    expect(first).toMatchObject({ printed: true, duplicate: false });
+    expect(t.platform.printed[0].opts.copies).toBe(1);
+    expect(t.platform.printed[0].html).not.toContain('DUPLICATE');
+    expect(t.platform.printed[0].html).not.toContain('Thank you! Visit again.');
+    const again = await t.call('salary.print', { id: s.id });
+    expect(again).toMatchObject({ printed: true, duplicate: true });
+    expect(t.platform.printed[1].opts.copies).toBe(1);
+    expect(t.platform.printed[1].html).toContain('DUPLICATE');
+    const log = t.app.db.all<{ summary: string }>("SELECT summary FROM activity_log WHERE action = 'salary.print' ORDER BY id");
+    expect(log.map((l) => l.summary)).toEqual([expect.stringMatching(/^Printed salary slip/), expect.stringMatching(/^Reprinted salary slip .*DUPLICATE/)]);
+
+    // without the DUPLICATE setting, reprints look like the original
+    await t.call('settings.update', { section: 'receipt', values: { markDuplicate: false } });
+    expect(await t.call('salary.print', { id: s.id })).toMatchObject({ printed: true, duplicate: false });
+    expect(t.platform.printed[2].html).not.toContain('DUPLICATE');
+  });
+});
+
+/* ------------------------------ Employee page totals ------------------------------ */
+
+describe('employee page totals', () => {
+  it('shows the salary earned this year (before advance recovery) with the net pay separately', async () => {
+    t = await createTestApp({ openingCash: RS(100000) });
+    const e = await addEmployee();
+    await t.call('advances.create', { employeeId: e.id, amount: RS(5000), mode: 'cash', date: '2026-08-02' });
+    await t.call('salary.process', { employeeId: e.id, month: '2026-08', bonus: RS(1000), deductions: RS(400), advanceRecovery: RS(5000), payNow: { mode: 'cash', amount: RS(2000) } });
+    const d = await t.call('employees.get', { id: e.id });
+    expect(d.totals).toMatchObject({ salaryThisFy: RS(15600), netThisFy: RS(10600), recoveredThisFy: RS(5000), paidThisFy: RS(2000) });
   });
 });
 

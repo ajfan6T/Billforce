@@ -1,5 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { call, errorMessage, type ApiInput, type ApiOutput, type RouteName } from './api';
+import { modalDepth } from './components/modal';
+import { isScreenLocked } from './guards';
 
 export interface QueryState<T> {
   data: T | undefined;
@@ -106,12 +108,23 @@ function keyName(e: KeyboardEvent): string {
 /**
  * Keyboard shortcuts, e.g. useHotkeys({ F2: newBill, 'ctrl+s': save, Escape: close }).
  * Function keys and ctrl combos work even while typing in an input.
+ *
+ * Shortcuts belong to the layer they were set up in: page shortcuts stop working while a dialog is open
+ * (so F10 cannot save the bill behind "Clear this bill?"), and a dialog's own shortcuts (set up by the
+ * component that renders the <Modal>) work only while it is the top-most one. Nothing fires while the
+ * screen is locked.
  */
 export function useHotkeys(map: HotkeyMap, deps: unknown[] = []): void {
   const ref = useRef(map);
   ref.current = map;
+  // Modal depth when this component first set up its shortcuts. A component rendering <Modal open> sets up
+  // its shortcuts after the modal opened (child effects run first), so it lands on the modal's layer.
+  const layer = useRef<number | null>(null);
   useEffect(() => {
+    if (layer.current === null) layer.current = modalDepth();
     const handler = (e: KeyboardEvent) => {
+      if (isScreenLocked()) return;
+      if (modalDepth() > (layer.current ?? 0)) return;
       const name = keyName(e);
       const fn = ref.current[name];
       if (!fn) return;

@@ -195,11 +195,18 @@ interface NormalizedReceipt {
   remarks: string | null;
 }
 
-/** Validate amounts against what the customer owes (dueBefore excludes the receipt being edited). */
-function normalize(ctx: Ctx, input: ReceiptInput, customerName: string, dueBefore: number): NormalizedReceipt {
+const DISCOUNT_DENIED = 'You are not allowed to give discounts. Ask the owner or manager to allow "Give discounts", or record the payment without a discount.';
+
+/**
+ * Validate amounts against what the customer owes (dueBefore excludes the receipt being edited).
+ * A settlement discount writes off part of the dues, so it needs "Give discounts" (billing.discount),
+ * like a discount on a bill. `allowedDiscount` is what the user may keep without it (the saved discount, when editing).
+ */
+function normalize(ctx: Ctx, input: ReceiptInput, customerName: string, dueBefore: number, allowedDiscount = 0): NormalizedReceipt {
   const amount = input.amount;
   const discount = input.discount ?? 0;
   if (amount + discount <= 0) throw fail.validation('Enter the amount received', { amount: 'Enter the amount received' });
+  if (discount > allowedDiscount) assertCan(ctx, 'billing.discount', DISCOUNT_DENIED);
   // A discount settles what is left unpaid; it can never turn into an advance.
   const maxDiscount = Math.max(dueBefore - amount, 0);
   if (discount > maxDiscount) {
@@ -266,7 +273,8 @@ export function updateReceipt(ctx: Ctx, id: number, input: ReceiptInput, reason?
   assertSameFinancialYear(before.date, date, `Payment ${before.receipt_no}`);
   const due =
     partyBalance(ctx, 'customer', customer.id, { account: 'AR' }) + (before.customer_id === customer.id ? before.amount + before.discount : 0);
-  const v = normalize(ctx, input, customer.name, due);
+  // Keeping (or lowering) the saved discount for the same customer is fine; a bigger or moved discount needs permission.
+  const v = normalize(ctx, input, customer.name, due, before.customer_id === customer.id ? before.discount : 0);
   const revision = before.revision + 1;
   ctx.db.update('customer_receipts', id, {
     date,
@@ -427,23 +435,35 @@ export function receiptHtml(ctx: Ctx, id: number, opts: { duplicate?: boolean } 
   );
 }
 
-/** Print on the receipt printer. Not a transaction (printing is async); the print count is updated afterwards. */
-export async function printReceipt(ctx: Ctx, id: number): Promise<{ printed: boolean; message?: string }> {
+/**
+ * Print on the receipt printer. Not a transaction (printing is async); the print count is updated afterwards.
+ * Same rule as bills: the first print is the original; printing again is a reprint, which needs
+ * "Reprint bills" (billing.reprint), is marked DUPLICATE (receipt setting) and prints one copy.
+ */
+export async function printReceipt(ctx: Ctx, id: number): Promise<{ printed: boolean; duplicate: boolean; message?: string }> {
   const r = getReceipt(ctx, id);
+  const reprint = r.printCount > 0;
+  if (reprint) assertCan(ctx, 'billing.reprint', 'This payment receipt was already printed. You are not allowed to reprint it. Ask the owner for permission.');
   const settings = getSection(ctx, 'receipt');
-  const html = receiptHtml(ctx, id);
+  const duplicate = reprint && settings.markDuplicate;
+  const html = receiptHtml(ctx, id, { duplicate });
+  const printerName = settings.printerName?.trim() || undefined;
   const result = await ctx.platform.printHtml(html, {
-    printerName: settings.printerName || undefined,
-    silent: !!settings.printerName,
+    printerName,
+    silent: !!printerName,
     paperWidthMm: settings.paperWidth,
-    copies: settings.copies,
+    copies: reprint ? 1 : Math.max(1, settings.copies || 1),
   });
   if (result.printed) {
     ctx.db.tx(() => {
       ctx.db.run('UPDATE customer_receipts SET print_count = print_count + 1 WHERE id = ?', [id]);
-      logActivity(ctx, 'receipt.print', `${r.printCount > 0 ? 'Reprinted' : 'Printed'} payment receipt ${r.receiptNo}`, { entityType: 'receipt', entityId: id });
+      logActivity(ctx, 'receipt.print', `${reprint ? 'Reprinted' : 'Printed'} payment receipt ${r.receiptNo}${duplicate ? ' marked DUPLICATE' : ''}`, {
+        entityType: 'receipt',
+        entityId: id,
+        details: { printCount: r.printCount + 1 },
+      });
     });
   }
-  return result;
+  return { ...result, duplicate };
 }
 

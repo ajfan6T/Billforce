@@ -198,15 +198,16 @@ export function partyStatement(ctx: Ctx, opts: StatementOptions): ReportData {
       { key: 'type', label: 'Type', width: 16 },
       { key: 'number', label: 'Number', width: 16 },
       { key: 'particulars', label: 'Particulars', width: 40 },
-      { key: 'debit', label: isCustomer ? 'Debit (billed)' : 'Debit (paid)', type: 'money', width: 14 },
-      { key: 'credit', label: isCustomer ? 'Credit (received)' : 'Credit (billed)', type: 'money', width: 14 },
+      { key: 'debit', label: isCustomer ? 'Debit (owed)' : 'Debit (paid)', type: 'money', width: 14 },
+      { key: 'credit', label: isCustomer ? 'Credit (paid / returned)' : 'Credit (billed)', type: 'money', width: 14 },
       { key: 'balance', label: 'Balance', type: 'drcr', width: 16 },
     ],
     rows,
     summary: [
       { label: 'Brought forward', value: opening, type: 'drcr' },
-      { label: isCustomer ? 'Bills & charges' : 'Paid (incl. discounts)', value: totalDr, type: 'money' },
-      { label: isCustomer ? 'Payments & returns' : 'Purchase bills', value: totalCr, type: 'money' },
+      // Same wording as the customer page: the account holds only the unpaid part of each bill.
+      { label: isCustomer ? 'Billed on credit & other dues' : 'Paid (incl. discounts)', value: totalDr, type: 'money' },
+      { label: isCustomer ? 'Payments, discounts & returns' : 'Purchase bills on credit', value: totalCr, type: 'money' },
       { label: 'Closing balance', value: running, type: 'drcr' },
       { label: 'Status', value: balanceText(running, partyType), type: 'text' },
     ],
@@ -215,6 +216,9 @@ export function partyStatement(ctx: Ctx, opts: StatementOptions): ReportData {
       isCustomer
         ? 'Dr = amount the customer owes you. Cr = advance paid by the customer.'
         : 'Cr = amount you owe the supplier. Dr = advance paid to the supplier.',
+      isCustomer
+        ? 'Only the unpaid part of a bill is added to the account; money paid at the counter and cash refunds are not shown. The Bills tab lists full bill totals.'
+        : 'Only the unpaid part of a purchase bill is added to the account; money paid at the time of purchase is not shown.',
     ],
   };
 }

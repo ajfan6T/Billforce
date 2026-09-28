@@ -157,6 +157,83 @@ export const BILL_PAYMENT_MODE_LABELS: Record<BillPaymentMode, string> = {
   split: 'Split',
 };
 
+/**
+ * Label shown for a bill's payment: "Part paid" when part of the bill is on
+ * credit (a shopkeeper reads "Split" as "paid in two modes").
+ */
+export function billPaymentLabel(mode: BillPaymentMode, credit = 0): string {
+  if (mode === 'split' && credit > 0) return 'Part paid';
+  return BILL_PAYMENT_MODE_LABELS[mode];
+}
+
+/* ------------------------------------------------------------------ */
+/* Sales returns                                                        */
+/* ------------------------------------------------------------------ */
+
+/**
+ * What the customer actually paid for each line of a bill: the line amount
+ * (after its line discount) less its share of the bill discount and of the
+ * bill's round off. The shares are exact, so the result adds up to the bill
+ * total to the paisa.
+ */
+export function netLineAmounts(amounts: number[], total: number): number[] {
+  const base = amounts.map((a) => Math.max(a, 0));
+  const diff = base.reduce((s, a) => s + a, 0) - total; // bill discount - round off
+  if (diff === 0) return base;
+  const shares = shareDiscount(base, Math.abs(diff));
+  return base.map((a, i) => (diff > 0 ? a - shares[i] : a + shares[i]));
+}
+
+/** A bill line as far as returns are concerned (see returns.billReturnable). */
+export interface ReturnLineState {
+  qtyBilled: number;
+  /** Quantity that can still be returned. */
+  returnable: number;
+  /** Per unit paid by the customer (rounded to the paisa); the highest refund rate allowed. */
+  netRate: number;
+  /** What the customer paid for the whole line. */
+  netAmount: number;
+  /** Already refunded for this line on active returns. */
+  returnedAmount: number;
+}
+
+/**
+ * Refund value of returning `qty` of a bill line at `rate` per unit. Never more
+ * than what is left of the line; returning all that is left at the paid rate
+ * refunds exactly what is left, so per-unit rounding never leaves stray paise.
+ */
+export function returnLineAmount(line: ReturnLineState, qty: number, rate: number): number {
+  const left = Math.max(0, line.netAmount - line.returnedAmount);
+  let amount = lineAmount(qty, rate);
+  if (roundQty(qty) >= line.returnable && rate === line.netRate && Math.abs(left - amount) <= Math.ceil(line.qtyBilled) + 1) amount = left;
+  return Math.min(amount, left);
+}
+
+export interface ReturnTotalInput {
+  billTotal: number;
+  /** Totals of the active returns already made against the bill. */
+  returnedTotal: number;
+  /** Item value (before rounding) of those returns. */
+  returnedValue: number;
+  /** Item value of this return. */
+  value: number;
+  /** Round to the nearest rupee (settings.billing.roundOff). */
+  roundOff: boolean;
+}
+
+/**
+ * Total of a return against a bill. Rounding is applied to the running total
+ * of all returns on the bill (never note by note), refunds never add up to
+ * more than the bill total, and the return that takes back everything left
+ * refunds exactly what is left of the bill.
+ */
+export function returnNoteTotal(r: ReturnTotalInput): number {
+  const cumulative = r.returnedValue + r.value;
+  let target = cumulative;
+  if (r.roundOff && cumulative < r.billTotal) target = cumulative + roundOffAdjustment(cumulative);
+  return Math.min(target, r.billTotal) - r.returnedTotal;
+}
+
 /** Round a quantity to 3 decimals (avoids 0.1 + 0.2 style drift when adding quantities). */
 export function roundQty(q: number): number {
   return Math.round(q * 1000) / 1000;

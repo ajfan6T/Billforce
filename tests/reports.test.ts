@@ -7,6 +7,9 @@ import { profitLoss, profitLossFigures } from '../src/core/modules/reports/profi
 import { trialBalanceData } from '../src/core/modules/reports/trialBalance';
 import { cashFlow } from '../src/core/modules/reports/cashFlow';
 import { allocate, comparePeriod } from '../src/core/modules/reports/common';
+import { cellText } from '../src/core/export/format';
+import { formatDate } from '../src/shared/dates';
+import { linkPath, periodFromParams, withPeriod } from '../src/renderer/links';
 import type { ReportData } from '../src/shared/report';
 
 const R = (rupees: number) => Math.round(rupees * 100);
@@ -307,7 +310,8 @@ describe('profit & loss', () => {
     expect([...amounts].sort((a, b) => b - a)).toEqual(amounts);
     expect(row(rep, f.netProfit >= 0 ? 'Net profit' : 'Net loss').cells.amount).toBe(Math.abs(f.netProfit));
     expect(rep.notes?.[0]).toMatch(/Stock is not tracked/);
-    expect(rep.summary?.map((s) => s.label)).toEqual(['Net sales', f.grossProfit >= 0 ? 'Gross profit' : 'Gross loss', 'Total expenses', f.netProfit >= 0 ? 'Net profit' : 'Net loss', 'Net margin']);
+    // "Purchases & expenses": this total includes purchases, unlike the Expenses page's "Total expenses".
+    expect(rep.summary?.map((s) => s.label)).toEqual(['Net sales', f.grossProfit >= 0 ? 'Gross profit' : 'Gross loss', 'Purchases & expenses', f.netProfit >= 0 ? 'Net profit' : 'Net loss', 'Net margin']);
   });
 
   it('excludes closing entries and compares with the previous period / year', async () => {
@@ -503,6 +507,86 @@ describe('sales insights', () => {
     expect(s.netSales).toBe(R(100));
     expect(profitLossFigures(t.app.ctx(), '2026-09-01', '2026-09-30').salesReturns).toBe(0);
     expect(ledgerProblems(t.app)).toEqual([]);
+  });
+});
+
+describe('same words, same figures', () => {
+  it('prints the Sales by day total row as "Total" on screen, in CSV, PDF and print (not "undefined-undefined-Total")', async () => {
+    const { t } = await dataset();
+    const range = { from: '2026-09-01', to: '2026-09-28' };
+    const day = (await t.call('reports.salesByDay', range)).report;
+    const total = day.rows[day.rows.length - 1];
+    expect(total.style).toBe('total');
+    const dateCol = day.columns.find((c) => c.key === 'date')!;
+    // The screen (formatCell -> formatDate) and CSV / PDF / print (cellText) show the label as it is.
+    expect(formatDate(total.cells.date as string)).toBe('Total');
+    expect(cellText(dateCol, total.cells.date ?? null)).toBe('Total');
+    expect(formatDate('2026-09-28')).toBe('28-09-2026');
+    expect(formatDate('2026-09-28 14:05:00')).toBe('28-09-2026');
+    for (const format of ['csv', 'pdf'] as const) await t.call('files.exportReport', { report: day, format });
+    await t.call('files.printReport', { report: day });
+    const csv = String(t.platform.saved.find((f) => f.name.endsWith('.csv'))!.data);
+    const pdf = t.platform.saved.find((f) => f.name.endsWith('.pdf'))!.data;
+    const printed = t.platform.printed[t.platform.printed.length - 1].html;
+    expect(csv).toMatch(/\nTotal,/);
+    for (const text of [csv, typeof pdf === 'string' ? pdf : Buffer.from(pdf).toString('latin1'), printed]) expect(text).not.toContain('undefined');
+    expect(printed).toContain('>Total<');
+  });
+
+  it('calls bill totals less returns "Net sales after discounts" and explains how the P&L "Net sales" differs', async () => {
+    const { t } = await dataset();
+    const range = { from: '2026-04-01', to: '2026-09-28' };
+    const pl = await t.call('reports.profitLoss', range);
+    const s = await t.call('reports.salesSummary', range);
+    // Same data, two different figures: they must not share a name.
+    expect(pl.figures.netSales).not.toBe(s.netSales);
+    expect(pl.report.summary?.[0]).toMatchObject({ label: 'Net sales', value: pl.figures.netSales });
+    expect(pl.report.notes?.some((n) => /Net sales = sales - sales returns/.test(n) && /Net sales after discounts/.test(n))).toBe(true);
+    for (const route of ['reports.salesByDay', 'reports.salesByMonth', 'reports.salesByCustomer'] as const) {
+      const r = await t.call(route, range);
+      expect(r.report.summary?.[0], route).toMatchObject({ label: 'Net sales after discounts', value: s.netSales });
+      expect(r.report.columns.find((c) => c.key === 'net')?.label, route).toBe('Net sales after discounts');
+      expect(r.report.columns.some((c) => c.label === 'Net sales'), route).toBe(false);
+      expect(r.report.notes?.[0], route).toMatch(/Profit & loss "Net sales" is sales less returns/);
+      expect(r.chart.series[0].name, route).toBe('Net sales after discounts');
+    }
+    const items = await t.call('reports.salesByItem', range);
+    expect(items.report.summary?.map((x) => x.label)).toContain('Net sales after discounts (all bills)');
+    // No discounts or round off in the period: no need for the note.
+    const plain = await createTestApp();
+    new Books(plain).bill({ date: '2026-09-01', lines: [{ item: 'Tea', qty: 10, rate: R(10) }], payments: [{ mode: 'cash', amount: R(100) }] });
+    const plainPl = await plain.call('reports.profitLoss', { from: '2026-09-01', to: '2026-09-30' });
+    expect(plainPl.report.notes?.some((n) => /Net sales after discounts/.test(n))).toBe(false);
+    expect(plainPl.figures.netSales).toBe((await plain.call('reports.salesSummary', { from: '2026-09-01', to: '2026-09-30' })).netSales);
+  });
+
+  it('drill-down links carry the report period to ledgers and party accounts, and pages read it back', () => {
+    const sep = { from: '2026-09-01', to: '2026-09-28', preset: 'this_month' as const };
+    expect(linkPath({ kind: 'account', id: 7 }, sep)).toBe('/accounts/ledger?account=7&from=2026-09-01&to=2026-09-28&preset=this_month');
+    expect(linkPath({ kind: 'customer', id: 3 }, { from: '2026-04-01', to: '2026-06-30' })).toBe('/customers/3?from=2026-04-01&to=2026-06-30');
+    expect(linkPath({ kind: 'supplier', id: 4 }, sep)).toMatch(/^\/suppliers\/4\?from=2026-09-01&to=2026-09-28/);
+    expect(linkPath({ kind: 'employee', id: 5 }, sep)).toMatch(/^\/employees\/5\?from=/);
+    // Documents are not periods; links without a period are unchanged.
+    expect(linkPath({ kind: 'bill', id: 9 }, sep)).toBe('/sales/bills/9');
+    expect(linkPath({ kind: 'account', id: 7 })).toBe('/accounts/ledger?account=7');
+    expect(withPeriod('/reports/sales?tab=day', { from: '2026-09-28', to: '2026-09-28', preset: 'today' })).toBe('/reports/sales?tab=day&from=2026-09-28&to=2026-09-28&preset=today');
+    expect(withPeriod('/accounts/cash-book', { from: '2026-09-01', to: '2026-09-28', preset: 'custom' })).toBe('/accounts/cash-book?from=2026-09-01&to=2026-09-28');
+
+    const read = (q: string) => periodFromParams(new URLSearchParams(q), '2026-09-28');
+    // The preset is kept while it gives the same dates; otherwise the dates are a custom range.
+    expect(read('account=7&from=2026-09-01&to=2026-09-28&preset=this_month')).toEqual({ preset: 'this_month', from: '2026-09-01', to: '2026-09-28' });
+    expect(periodFromParams(new URLSearchParams('from=2026-09-01&to=2026-09-28&preset=this_month'), '2026-10-02')).toEqual({ preset: 'custom', from: '2026-09-01', to: '2026-09-28' });
+    expect(read('from=2026-08-01&to=2026-08-31')).toEqual({ preset: 'custom', from: '2026-08-01', to: '2026-08-31' });
+    expect(read('preset=this_fy')).toEqual({ preset: 'this_fy', from: '2026-04-01', to: '2026-09-28' });
+    // Nothing (or nonsense) in the address: the page uses its remembered period.
+    expect(read('account=7')).toBeNull();
+    expect(read('from=2026-09-30&to=2026-09-01')).toBeNull();
+    expect(read('from=2026-02-30&to=2026-03-01')).toBeNull();
+    expect(read('from=yesterday&to=2026-09-01')).toBeNull();
+    expect(read('preset=__proto__')).toBeNull();
+    // Round trip: what a report row puts in the address is what the ledger reads.
+    const path = linkPath({ kind: 'account', id: 7 }, { from: '2026-08-01', to: '2026-08-31', preset: 'last_month' });
+    expect(read(path.split('?')[1])).toEqual({ preset: 'last_month', from: '2026-08-01', to: '2026-08-31' });
   });
 });
 

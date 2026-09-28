@@ -7,7 +7,7 @@ import { DateRangePicker, ExportButtons, ReportView, rangeFromPreset, type Range
 import { useHotkeys, useQuery, useStoredState } from '../../hooks';
 import { useAuth } from '../../auth';
 import { useDialogs, useToast } from '../../feedback';
-import { useOpenLink } from '../../links';
+import { useLinkedPeriod, useOpenLink } from '../../links';
 import { call, type ApiOutput } from '../../api';
 import { formatINR } from '../../../shared/money';
 import { describeRange, formatDate, monthLabel } from '../../../shared/dates';
@@ -34,7 +34,9 @@ export function EmployeeDetailPage() {
   const dialogs = useDialogs();
   const canSalary = can('employees.salary');
   const [tab, setTab] = useStoredState<Tab>('employee.tab', 'slips');
-  const [range, setRange] = useState<RangeValue>(() => rangeFromPreset('this_fy'));
+  // A trial balance row opens the employee on the report's period.
+  const linkedPeriod = useLinkedPeriod();
+  const [range, setRange] = useState<RangeValue>(() => linkedPeriod ?? rangeFromPreset('this_fy'));
   const [editing, setEditing] = useState(false);
   const [leaving, setLeaving] = useState(false);
   const [giving, setGiving] = useState(false);
@@ -207,7 +209,18 @@ export function EmployeeDetailPage() {
             <Stat
               label="Salary this year"
               value={formatINR(e.totals.salaryThisFy)}
-              hint={e.totals.lastSalaryMonth ? `Last processed: ${monthLabel(e.totals.lastSalaryMonth, true)}` : 'No salary processed yet'}
+              hint={
+                e.totals.lastSalaryMonth ? (
+                  <>
+                    Net pay {formatINR(e.totals.netThisFy)}
+                    {e.totals.recoveredThisFy ? ` · ${formatINR(e.totals.recoveredThisFy)} advance recovered` : ''}
+                    <br />
+                    Last processed: {monthLabel(e.totals.lastSalaryMonth, true)}
+                  </>
+                ) : (
+                  'No salary processed yet'
+                )
+              }
             />
           )}
         </StatGrid>

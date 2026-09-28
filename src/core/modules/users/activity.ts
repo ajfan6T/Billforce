@@ -8,7 +8,7 @@ import { listRevisions, type RevisionRow } from '../../audit';
 import type { LinkKind } from '../../accounting/links';
 import type { Permission } from '../../../shared/permissions';
 import type { ReportData, ReportRow } from '../../../shared/report';
-import { activityLabel, isDeleteAction } from '../../../shared/activity';
+import { activityLabel, describeActivityDetails, isDeleteAction, type ActivityDetailsView } from '../../../shared/activity';
 import { addDays, describeRange, isValidISODate } from '../../../shared/dates';
 import { formatIndianNumber } from '../../../shared/money';
 
@@ -42,7 +42,10 @@ export interface ActivityItem {
 }
 
 export interface ActivityDetail extends ActivityItem {
+  /** The details as stored (for "Technical details"). */
   details: unknown;
+  /** The details in plain words: formatted money, dates and labels, without internal fields. */
+  view: ActivityDetailsView;
 }
 
 const LINKABLE = new Set<string>([
@@ -149,7 +152,7 @@ export function getActivity(ctx: Ctx, id: number): ActivityDetail {
       details = r.details;
     }
   }
-  return { ...toItem(r), details };
+  return { ...toItem(r), details, view: describeActivityDetails(r.action, details) };
 }
 
 export const ACTIVITY_REPORT_LIMIT = 5000;

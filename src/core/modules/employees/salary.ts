@@ -21,8 +21,9 @@ import { AppError, fail } from '../../errors';
 import { listRevisions, logActivity, recordRevision, type RevisionRow } from '../../audit';
 import { nextDocNumber } from '../../numbering';
 import { getSection } from '../../settings';
-import { getEntryLines, partyBalances, paymentAccountId, postEntry, voidEntry } from '../../accounting/ledger';
+import { getEntryLines, negativeBalanceWarning, partyBalances, paymentAccountId, postEntry, voidEntry } from '../../accounting/ledger';
 import { renderReceiptHtml } from '../../print/receipt';
+import type { ReceiptSettings } from '../../../shared/settings';
 import { amountInWords, formatINR, formatIndianNumber } from '../../../shared/money';
 import { datesBetween, endOfMonth, formatDate, monthKey, monthLabel } from '../../../shared/dates';
 import { PAYMENT_MODE_LABELS, type AttendanceStatus, type SettlementMode } from '../../../shared/constants';
@@ -32,6 +33,8 @@ import {
   employmentWindow,
   getEmployeeRow,
   outstandingAdvance,
+  recoverableAdvance,
+  recoverableAdvances,
   salaryText,
   type AttendanceCounts,
   type EmployeeRow,
@@ -161,6 +164,8 @@ interface SalaryRow {
   remarks: string | null;
   details: string | null;
   journal_entry_id: number | null;
+  /** Times the slip was printed (later prints are marked DUPLICATE). */
+  print_count: number;
   created_by: number | null;
   created_at: string;
   updated_by: number | null;
@@ -399,12 +404,24 @@ export interface SalaryPreview extends SalaryCalc {
   monthLabel: string;
   /** Advance outstanding today. */
   outstandingAdvance: number;
-  /** Recovery we suggest: the whole outstanding advance, up to the gross salary. */
+  /**
+   * The most a salary dated `date` may recover: the advance outstanding on that day (advances given
+   * later are not counted), and never more than stays outstanding on any later day.
+   */
+  recoverableAdvance: number;
+  /** Recovery we suggest: the whole recoverable advance, up to the gross salary. */
   suggestedRecovery: number;
+  /**
+   * Nothing is marked for the month (while employed). Monthly staff are then paid for every day,
+   * which is a full month's salary if the owner simply forgot to mark attendance.
+   */
+  noAttendance: boolean;
   rule: string;
   working: string;
   /** Posting date used when none is chosen. */
   defaultDate: string;
+  /** Salary date the advance figures are worked out for (the chosen date, or defaultDate). */
+  date: string;
   existing: { id: number; salaryNo: string; status: SalaryStatus; net: number; paid: number } | null;
   /** Why the salary cannot be processed (null = it can). */
   problem: string | null;
@@ -412,7 +429,19 @@ export interface SalaryPreview extends SalaryCalc {
   problemKind: 'month' | 'not_employed' | 'processed' | 'zero' | null;
 }
 
-function buildPreview(ctx: Ctx, emp: EmployeeRow, month: string, advance: number, existing: SalaryPreview['existing']): SalaryPreview {
+interface AdvanceFacts {
+  /** Outstanding today. */
+  outstanding: number;
+  /** Recoverable by a salary dated `date`. */
+  recoverable: number;
+  date: string;
+}
+
+function advanceFacts(ctx: Ctx, employeeId: number, date: string): AdvanceFacts {
+  return { outstanding: outstandingAdvance(ctx, employeeId), recoverable: recoverableAdvance(ctx, employeeId, date), date };
+}
+
+function buildPreview(ctx: Ctx, emp: EmployeeRow, month: string, advance: AdvanceFacts, existing: SalaryPreview['existing']): SalaryPreview {
   const calc = calculateSalary(emp, month, marksFor(ctx, emp.id, month));
   const text = salaryRuleText(calc);
   let problem = monthProblem(ctx, month);
@@ -437,11 +466,14 @@ function buildPreview(ctx: Ctx, emp: EmployeeRow, month: string, advance: number
     isActive: !!emp.is_active,
     month,
     monthLabel: monthLabel(month, true),
-    outstandingAdvance: advance,
-    suggestedRecovery: Math.max(Math.min(advance, calc.gross), 0),
+    outstandingAdvance: advance.outstanding,
+    recoverableAdvance: advance.recoverable,
+    suggestedRecovery: Math.max(Math.min(advance.recoverable, calc.gross), 0),
+    noAttendance: calc.daysEmployed > 0 && calc.counts.unmarked === calc.daysEmployed,
     rule: text.rule,
     working: text.working,
     defaultDate: defaultSlipDate(ctx, month),
+    date: advance.date,
     existing,
     problem,
     problemKind,
@@ -456,10 +488,12 @@ function existingSlip(ctx: Ctx, employeeId: number, month: string): SalaryPrevie
   return r ? { id: r.id, salaryNo: r.salary_no, status: r.status, net: r.net, paid: r.paid } : null;
 }
 
-export function previewSalary(ctx: Ctx, employeeId: number, month: string): SalaryPreview {
+/** Preview a month's salary. `date` = the salary date being considered (default: month end, or today). */
+export function previewSalary(ctx: Ctx, employeeId: number, month: string, date?: string | null): SalaryPreview {
   monthRange(month);
   const emp = getEmployeeRow(ctx, employeeId);
-  return buildPreview(ctx, emp, month, outstandingAdvance(ctx, emp.id), existingSlip(ctx, emp.id, month));
+  const on = date || defaultSlipDate(ctx, month);
+  return buildPreview(ctx, emp, month, advanceFacts(ctx, emp.id, on), existingSlip(ctx, emp.id, month));
 }
 
 /* ------------------------------ Month sheet ------------------------------ */
@@ -485,6 +519,8 @@ export interface MonthSheet {
   month: string;
   monthLabel: string;
   defaultDate: string;
+  /** Salary date the suggested advance recoveries are worked out for. */
+  date: string;
   /** Why no salary can be processed for this month (null = it can). */
   problem: string | null;
   rows: MonthSheetRow[];
@@ -493,6 +529,8 @@ export interface MonthSheet {
     processed: number;
     /** Employees whose salary can still be processed. */
     pending: number;
+    /** Of those, employees with no attendance marked for the month. */
+    noAttendance: number;
     /** Gross of processed slips + estimated gross of the rest. */
     gross: number;
     net: number;
@@ -501,16 +539,20 @@ export interface MonthSheet {
   };
 }
 
-export function salaryMonthSheet(ctx: Ctx, month: string): MonthSheet {
+/** Salary sheet of a month. `date` = the salary date the suggested recoveries are for (default: month end, or today). */
+export function salaryMonthSheet(ctx: Ctx, month: string, date?: string | null): MonthSheet {
   const { from, to } = monthRange(month);
+  const on = date || defaultSlipDate(ctx, month);
   const slips = ctx.db.all<SalaryRow>("SELECT * FROM salaries WHERE month = ? AND status <> 'cancelled'", [month]);
   const byEmp = new Map(slips.map((s) => [s.employee_id, s]));
   const emps = employeesInPeriod(ctx, from, to, slips.map((s) => s.employee_id));
   const advances = partyBalances(ctx, 'employee', { account: 'EMP_ADV' });
+  const recoverable = recoverableAdvances(ctx, on);
   const rows: MonthSheetRow[] = emps.map((emp) => {
     const s = byEmp.get(emp.id);
     const existing = s ? { id: s.id, salaryNo: s.salary_no, status: s.status, net: s.net, paid: s.paid } : null;
-    const preview = buildPreview(ctx, emp, month, advances.get(emp.id) ?? 0, existing);
+    const adv = { outstanding: advances.get(emp.id) ?? 0, recoverable: recoverable.get(emp.id) ?? 0, date: on };
+    const preview = buildPreview(ctx, emp, month, adv, existing);
     return {
       ...preview,
       slip: s
@@ -531,7 +573,7 @@ export function salaryMonthSheet(ctx: Ctx, month: string): MonthSheet {
         : null,
     };
   });
-  const totals = { employees: rows.length, processed: 0, pending: 0, gross: 0, net: 0, paid: 0, due: 0 };
+  const totals = { employees: rows.length, processed: 0, pending: 0, noAttendance: 0, gross: 0, net: 0, paid: 0, due: 0 };
   for (const r of rows) {
     if (r.slip) {
       totals.processed++;
@@ -540,12 +582,15 @@ export function salaryMonthSheet(ctx: Ctx, month: string): MonthSheet {
       totals.paid += r.slip.paid;
       totals.due += r.slip.balance;
     } else {
-      if (!r.problem) totals.pending++;
+      if (!r.problem) {
+        totals.pending++;
+        if (r.noAttendance) totals.noAttendance++;
+      }
       totals.gross += r.gross;
       totals.net += r.gross - r.suggestedRecovery;
     }
   }
-  return { month, monthLabel: monthLabel(month, true), defaultDate: defaultSlipDate(ctx, month), problem: monthProblem(ctx, month), rows, totals };
+  return { month, monthLabel: monthLabel(month, true), defaultDate: defaultSlipDate(ctx, month), date: on, problem: monthProblem(ctx, month), rows, totals };
 }
 
 /* ------------------------------ Process ------------------------------ */
@@ -584,7 +629,42 @@ function resolveSlipDate(ctx: Ctx, month: string, date: string | null | undefine
   return d;
 }
 
-export function processSalary(ctx: Ctx, input: ProcessInput): SalaryDetail {
+/** A salary slip just saved or paid, with warnings to show (e.g. cash going below zero). */
+export type SalaryResult = SalaryDetail & { warnings: string[] };
+
+/** Money paid out by a new payment, with the warning when it takes the account below zero. */
+interface PaidOut {
+  accountId: number;
+  warning: string | null;
+}
+
+export function processSalary(ctx: Ctx, input: ProcessInput): SalaryResult {
+  const { id, payment } = saveSalary(ctx, input);
+  return { ...getSalaryDetail(ctx, id), warnings: payment?.warning ? [payment.warning] : [] };
+}
+
+/** Why an advance recovery is too large for a salary dated `date` (null = it is fine). */
+function recoveryProblem(name: string, recovery: number, adv: AdvanceFacts): { message: string; field: string } | null {
+  if (recovery <= adv.recoverable) return null;
+  const field = `At most ${formatINR(adv.recoverable)}`;
+  if (adv.outstanding <= 0) return { message: `${name} has no advance outstanding, so nothing can be recovered.`, field };
+  if (adv.recoverable >= adv.outstanding) {
+    return { message: `Only ${formatINR(adv.outstanding)} advance is outstanding for ${name}, so you cannot recover more than that.`, field };
+  }
+  const on = formatDate(adv.date);
+  if (adv.recoverable <= 0) {
+    return {
+      message: `${name}'s advance of ${formatINR(adv.outstanding)} was given after ${on}, so it cannot be recovered from a salary dated ${on}. Recover it from a later salary, or date this salary on or after the day the advance was given.`,
+      field,
+    };
+  }
+  return {
+    message: `Only ${formatINR(adv.recoverable)} of ${name}'s advance was outstanding on ${on} (the rest was given after that day), so a salary dated ${on} can recover at most ${formatINR(adv.recoverable)}. Recover the rest from a later salary.`,
+    field,
+  };
+}
+
+function saveSalary(ctx: Ctx, input: ProcessInput): { id: number; payment: PaidOut | null } {
   const emp = getEmployeeRow(ctx, input.employeeId);
   const month = input.month;
   monthRange(month);
@@ -594,20 +674,16 @@ export function processSalary(ctx: Ctx, input: ProcessInput): SalaryDetail {
   }
   const mp = monthProblem(ctx, month);
   if (mp) throw fail.validation(mp);
-  const p = buildPreview(ctx, emp, month, outstandingAdvance(ctx, emp.id), null);
-  if (!p.daysEmployed) throw fail.validation(`${emp.name} did not work here in ${monthLabel(month, true)}.`);
   const date = resolveSlipDate(ctx, month, input.date);
+  // Only the advance outstanding on the salary date can be recovered: an advance given later must not be
+  // taken back in an earlier-dated slip (Employee Advances would go negative in between).
+  const p = buildPreview(ctx, emp, month, advanceFacts(ctx, emp.id, date), null);
+  if (!p.daysEmployed) throw fail.validation(`${emp.name} did not work here in ${monthLabel(month, true)}.`);
   const bonus = input.bonus ?? 0;
   const deductions = input.deductions ?? 0;
   const recovery = input.advanceRecovery ?? 0;
-  if (recovery > p.outstandingAdvance) {
-    throw fail.validation(
-      p.outstandingAdvance > 0
-        ? `Only ${formatINR(p.outstandingAdvance)} advance is outstanding for ${emp.name}, so you cannot recover more than that.`
-        : `${emp.name} has no advance outstanding, so nothing can be recovered.`,
-      { advanceRecovery: `At most ${formatINR(Math.max(p.outstandingAdvance, 0))}` },
-    );
-  }
+  const tooMuch = recoveryProblem(emp.name, recovery, { outstanding: p.outstandingAdvance, recoverable: p.recoverableAdvance, date });
+  if (tooMuch) throw fail.validation(tooMuch.message, { advanceRecovery: tooMuch.field });
   const earned = p.gross + bonus;
   const expense = earned - deductions;
   const net = expense - recovery;
@@ -669,8 +745,9 @@ export function processSalary(ctx: Ctx, input: ProcessInput): SalaryDetail {
   });
   ctx.db.update('salaries', id, { journal_entry_id: entryId });
   let paidNote = '';
+  let payment: PaidOut | null = null;
   if (input.payNow && input.payNow.amount > 0) {
-    insertPayment(ctx, getRow(ctx, id), { date, amount: input.payNow.amount, mode: input.payNow.mode, accountId: input.payNow.accountId, remarks: null });
+    payment = insertPayment(ctx, getRow(ctx, id), { date, amount: input.payNow.amount, mode: input.payNow.mode, accountId: input.payNow.accountId, remarks: null });
     paidNote = `, paid ${formatINR(input.payNow.amount)} by ${PAYMENT_MODE_LABELS[input.payNow.mode]}`;
   }
   recordRevision(ctx, 'salary', id, 'created', snapshot(ctx, id));
@@ -680,14 +757,19 @@ export function processSalary(ctx: Ctx, input: ProcessInput): SalaryDetail {
     `Processed salary ${num.number} for ${emp.name}, ${monthLabel(month, true)}: gross ${formatINR(p.gross)}${bonus ? `, bonus ${formatINR(bonus)}` : ''}${deductions ? `, deductions ${formatINR(deductions)}` : ''}${recovery ? `, advance recovered ${formatINR(recovery)}` : ''}, net ${formatINR(net)}${paidNote}`,
     { entityType: 'salary', entityId: id, details: { employeeId: emp.id, month, date, paidDays: p.paidDays, gross: p.gross, bonus, deductions, advanceRecovery: recovery, net, payNow: input.payNow ?? null } },
   );
-  return getSalaryDetail(ctx, id);
+  return { id, payment };
 }
 
 export interface ProcessAllInput {
   month: string;
   date?: string | null;
-  /** Recover the suggested advance amount from each salary. */
+  /** Recover the suggested advance amount (outstanding on the salary date, up to the salary) from each salary. */
   recoverAdvances: boolean;
+  /**
+   * Also process employees with no attendance marked for the month. Monthly staff are then paid for every
+   * day, so this must be confirmed; otherwise they are skipped with the reason.
+   */
+  includeUnmarked?: boolean;
   /** Pay every net salary in full right away. */
   payNow?: { mode: SettlementMode; accountId?: number | null } | null;
 }
@@ -697,24 +779,36 @@ export interface ProcessAllResult {
   skipped: Array<{ employeeId: number; name: string; reason: string }>;
   totalNet: number;
   totalPaid: number;
+  /** E.g. cash going below zero: one per account, for the whole amount paid from it. */
+  warnings: string[];
 }
 
 /** Process every remaining salary of a month. Employees that cannot be processed are skipped with the reason. */
 export function processAllSalaries(ctx: Ctx, input: ProcessAllInput): ProcessAllResult {
-  const sheet = salaryMonthSheet(ctx, input.month);
+  const sheet = salaryMonthSheet(ctx, input.month, input.date);
   if (sheet.problem) throw fail.validation(sheet.problem);
-  const res: ProcessAllResult = { processed: [], skipped: [], totalNet: 0, totalPaid: 0 };
+  const res: ProcessAllResult = { processed: [], skipped: [], totalNet: 0, totalPaid: 0, warnings: [] };
+  // Each payment's warning counts the payments before it, so the last one per account is the whole shortfall.
+  const shortfalls = new Map<number, string>();
   for (const r of sheet.rows) {
     if (r.slip) continue;
     if (r.problem) {
       res.skipped.push({ employeeId: r.employeeId, name: r.employeeName, reason: r.problem });
       continue;
     }
+    if (r.noAttendance && !input.includeUnmarked) {
+      res.skipped.push({
+        employeeId: r.employeeId,
+        name: r.employeeName,
+        reason: `No attendance is marked for ${sheet.monthLabel}, so the whole month would be paid. Mark attendance first, or process them for the full month.`,
+      });
+      continue;
+    }
     try {
       const recovery = input.recoverAdvances ? r.suggestedRecovery : 0;
       const net = r.gross - recovery;
-      const slip = ctx.db.tx(() =>
-        processSalary(ctx, {
+      const saved = ctx.db.tx(() =>
+        saveSalary(ctx, {
           employeeId: r.employeeId,
           month: input.month,
           date: input.date,
@@ -722,6 +816,8 @@ export function processAllSalaries(ctx: Ctx, input: ProcessAllInput): ProcessAll
           payNow: input.payNow && net > 0 ? { mode: input.payNow.mode, accountId: input.payNow.accountId, amount: net } : null,
         }),
       );
+      if (saved.payment?.warning) shortfalls.set(saved.payment.accountId, saved.payment.warning);
+      const slip = getSalary(ctx, saved.id);
       res.processed.push({ employeeId: r.employeeId, name: r.employeeName, salaryId: slip.id, salaryNo: slip.salaryNo, net: slip.net });
       res.totalNet += slip.net;
       res.totalPaid += slip.paid;
@@ -730,6 +826,7 @@ export function processAllSalaries(ctx: Ctx, input: ProcessAllInput): ProcessAll
       res.skipped.push({ employeeId: r.employeeId, name: r.employeeName, reason: e.message });
     }
   }
+  res.warnings = [...shortfalls.values()];
   if (res.processed.length) {
     logActivity(
       ctx,
@@ -751,8 +848,10 @@ interface PaymentValues {
   remarks: string | null;
 }
 
-function insertPayment(ctx: Ctx, slip: JoinedSalaryRow, v: PaymentValues): number {
+function insertPayment(ctx: Ctx, slip: JoinedSalaryRow, v: PaymentValues): PaidOut {
   const accountId = paymentAccountId(ctx, v.mode, v.accountId);
+  // Worked out before posting; the salary is still paid (a receipt may not have been entered yet).
+  const warning = negativeBalanceWarning(ctx, accountId, v.amount, v.date);
   const pid = ctx.db.insert('salary_payments', {
     salary_id: slip.id,
     date: v.date,
@@ -778,7 +877,7 @@ function insertPayment(ctx: Ctx, slip: JoinedSalaryRow, v: PaymentValues): numbe
   ctx.db.update('salary_payments', pid, { journal_entry_id: entryId });
   const paid = slip.paid + v.amount;
   ctx.db.update('salaries', slip.id, { paid, status: statusFor(slip.net, paid), updated_by: currentUserId(ctx), updated_at: now(ctx) });
-  return pid;
+  return { accountId, warning };
 }
 
 export interface PayInput {
@@ -790,7 +889,7 @@ export interface PayInput {
   remarks?: string | null;
 }
 
-export function paySalary(ctx: Ctx, input: PayInput): SalaryDetail {
+export function paySalary(ctx: Ctx, input: PayInput): SalaryResult {
   const slip = getRow(ctx, input.salaryId);
   if (slip.status === 'cancelled') throw fail.validation(`Salary slip ${slip.salary_no} is cancelled.`);
   const remaining = slip.net - slip.paid;
@@ -805,7 +904,7 @@ export function paySalary(ctx: Ctx, input: PayInput): SalaryDetail {
     throw fail.validation(`A payment cannot be dated before the salary slip (${formatDate(slip.date)}).`, { date: 'Before the salary slip date' });
   }
   const remarks = input.remarks?.trim() || null;
-  insertPayment(ctx, slip, { date, amount: input.amount, mode: input.mode, accountId: input.accountId, remarks });
+  const { warning } = insertPayment(ctx, slip, { date, amount: input.amount, mode: input.mode, accountId: input.accountId, remarks });
   const after = getRow(ctx, slip.id);
   const what = `Paid ${formatINR(input.amount)} by ${PAYMENT_MODE_LABELS[input.mode]} on ${formatDate(date)}`;
   recordRevision(ctx, 'salary', slip.id, 'edited', snapshot(ctx, slip.id), what);
@@ -815,7 +914,7 @@ export function paySalary(ctx: Ctx, input: PayInput): SalaryDetail {
     `Paid salary ${formatINR(input.amount)} to ${slip.employee_name} by ${PAYMENT_MODE_LABELS[input.mode]} against ${slip.salary_no} (${monthLabel(slip.month, true)})${after.net - after.paid > 0 ? `, ${formatINR(after.net - after.paid)} still due` : ', fully paid'}`,
     { entityType: 'salary', entityId: slip.id, details: { amount: input.amount, mode: input.mode, date, remarks } },
   );
-  return getSalaryDetail(ctx, slip.id);
+  return { ...getSalaryDetail(ctx, slip.id), warnings: warning ? [warning] : [] };
 }
 
 export function cancelSalaryPayment(ctx: Ctx, paymentId: number, reason: string): SalaryDetail {
@@ -930,10 +1029,20 @@ function fmtDays(n: number): string {
   return formatIndianNumber(n, Number.isInteger(n) ? 0 : 1);
 }
 
-export function salarySlipHtml(ctx: Ctx, id: number): string {
+/**
+ * Print settings for salary slips. They go to the receipt printer (same paper, font and printer), but a
+ * salary slip is not a customer receipt: the receipt's extra header lines (timings, tagline) and footer
+ * ("Thank you! Visit again.") are left out, and one copy is printed whatever the bill copies setting is.
+ */
+function slipPrintSettings(ctx: Ctx): ReceiptSettings {
+  return { ...getSection(ctx, 'receipt'), header: '', footer: '', copies: 1 };
+}
+
+/** Salary slip as receipt HTML. `duplicate` marks a reprint. */
+export function salarySlipHtml(ctx: Ctx, id: number, opts: { duplicate?: boolean } = {}): string {
   const s = getSalaryDetail(ctx, id);
   const business = getSection(ctx, 'business');
-  const settings = getSection(ctx, 'receipt');
+  const settings = slipPrintSettings(ctx);
   const meta: Array<[string, string]> = [
     ['Slip No', s.salaryNo],
     ['Month', s.monthLabel],
@@ -975,6 +1084,7 @@ export function salarySlipHtml(ctx: Ctx, id: number): string {
   return renderReceiptHtml(
     {
       title: 'SALARY SLIP',
+      duplicate: !!opts.duplicate,
       cancelled: s.status === 'cancelled',
       meta,
       party: { label: 'Employee', name: s.employeeName, phone: s.employeePhone, extra: s.designation },
@@ -987,21 +1097,32 @@ export function salarySlipHtml(ctx: Ctx, id: number): string {
   );
 }
 
-/** Print a salary slip on the receipt printer (not a transaction: printing is async). */
-export async function printSalarySlip(ctx: Ctx, id: number): Promise<{ printed: boolean; message?: string }> {
-  const s = getSalary(ctx, id);
-  const settings = getSection(ctx, 'receipt');
-  const html = salarySlipHtml(ctx, id);
+/**
+ * Print a salary slip on the receipt printer (not a transaction: printing is async). One copy; every
+ * print after the first is a reprint, marked DUPLICATE when the receipt setting says so (like bills).
+ */
+export async function printSalarySlip(ctx: Ctx, id: number): Promise<{ printed: boolean; duplicate: boolean; message?: string }> {
+  const row = getRow(ctx, id);
+  const settings = slipPrintSettings(ctx);
+  const reprint = row.print_count > 0;
+  const duplicate = reprint && settings.markDuplicate;
+  const html = salarySlipHtml(ctx, id, { duplicate });
+  const printerName = settings.printerName?.trim() || undefined;
   const result = await ctx.platform.printHtml(html, {
-    printerName: settings.printerName || undefined,
-    silent: !!settings.printerName,
+    printerName,
+    silent: !!printerName,
     paperWidthMm: settings.paperWidth,
     copies: settings.copies,
   });
-  if (result.printed) {
-    ctx.db.tx(() =>
-      logActivity(ctx, 'salary.print', `Printed salary slip ${s.salaryNo} of ${s.employeeName} (${s.monthLabel})`, { entityType: 'salary', entityId: id }),
+  if (!result.printed) return { printed: false, duplicate, message: result.message };
+  ctx.db.tx(() => {
+    ctx.db.run('UPDATE salaries SET print_count = print_count + 1 WHERE id = ?', [id]);
+    logActivity(
+      ctx,
+      'salary.print',
+      `${reprint ? 'Reprinted' : 'Printed'} salary slip ${row.salary_no} of ${row.employee_name} (${monthLabel(row.month, true)})${duplicate ? ' marked DUPLICATE' : ''}`,
+      { entityType: 'salary', entityId: id, details: { printCount: row.print_count + 1 } },
     );
-  }
-  return result;
+  });
+  return { printed: true, duplicate, message: result.message };
 }

@@ -6,10 +6,11 @@ import { SegmentedControl } from '../../components/forms';
 import { AccountSelect, CustomerPicker, EmployeeSelect, SupplierPicker, type CustomerOption, type SupplierOption } from '../../components/pickers';
 import { DateRangePicker, ExportButtons, ReportView } from '../../components/report';
 import { useQuery } from '../../hooks';
-import { useOpenLink } from '../../links';
+import { keepPeriod, useOpenLink } from '../../links';
+import { call } from '../../api';
 import { formatDrCr } from '../../../shared/money';
 import type { PartyType } from '../../../shared/constants';
-import { useRange } from './common';
+import { PageBar, usePage, useRange } from './common';
 
 type Kind = 'account' | PartyType;
 
@@ -26,41 +27,49 @@ export function LedgerPage() {
   const party = pType && ['customer', 'supplier', 'employee'].includes(pType) && Number(pId) > 0 ? { type: pType, id: Number(pId) } : null;
   const kind: Kind = (params.get('kind') as Kind | null) ?? (party ? party.type : 'account');
   const selected = accountId || party;
-  const q = useQuery('books.ledger', selected ? { from: range.from, to: range.to, accountId: accountId ?? null, partyType: party?.type ?? null, partyId: party?.id ?? null } : null);
+  const [page, setPage] = usePage(`${range.from}|${range.to}|${accountId}|${partyParam}`);
+  const input = { from: range.from, to: range.to, accountId: accountId ?? null, partyType: party?.type ?? null, partyId: party?.id ?? null, page };
+  const q = useQuery('books.ledger', selected ? input : null);
   const accounts = useQuery('accounts.list', {});
   const quick = useMemo(() => (accounts.data ?? []).filter((a) => a.systemKey && QUICK_KEYS.includes(a.systemKey)), [accounts.data]);
 
   const go = (next: { account?: number | null; party?: { type: PartyType; id: number } | null; kind?: Kind }) => {
-    const p = new URLSearchParams();
+    // Keep a drill-down's period (?from=&to=) when switching to another account or party.
+    const p = keepPeriod(params, new URLSearchParams());
     if (next.account) p.set('account', String(next.account));
     if (next.party) p.set('party', `${next.party.type}:${next.party.id}`);
     if (next.kind && !next.account && !next.party) p.set('kind', next.kind);
     setParams(p);
   };
 
-  const d = q.data;
-  const pickedParty = d?.party && party ? d.party : null;
+  // The account / party shown (kept while another period loads) ...
+  const meta = q.data && (q.data.account?.id ?? null) === (accountId ?? null) && (q.data.party?.id ?? null) === (party?.id ?? null) ? q.data : undefined;
+  // ... and its figures: while another ledger, period or page loads, show none rather than the old figures under the new heading.
+  const d = meta && !q.loading && meta.from === range.from && meta.to === range.to ? meta : undefined;
+  const loadAll = d && d.pageCount > 1 ? async () => (await call('books.ledger', { ...input, page: null, all: true })).report : undefined;
+  const pickedParty = meta?.party && party ? meta.party : null;
+  const closing = d ? <b>{formatDrCr(d.closing)}</b> : <span className="faint">…</span>;
 
   return (
     <Page>
       <PageHeader
-        title={d ? `Ledger: ${d.title}` : 'Ledgers'}
+        title={meta ? `Ledger: ${meta.title}` : 'Ledgers'}
         subtitle={
-          d?.account ? (
+          meta?.account ? (
             <>
-              {d.account.code ? `${d.account.code} · ` : ''}
-              {d.account.groupName} · Closing balance <b>{formatDrCr(d.closing)}</b>
+              {meta.account.code ? `${meta.account.code} · ` : ''}
+              {meta.account.groupName} · Closing balance {closing}
             </>
-          ) : d?.party ? (
+          ) : meta?.party ? (
             <>
-              {d.party.phone ? `${d.party.phone} · ` : ''}Closing balance <b>{formatDrCr(d.closing)}</b> ·{' '}
-              <Link to={`/${d.party.type === 'customer' ? 'customers' : d.party.type === 'supplier' ? 'suppliers' : 'employees'}/${d.party.id}`}>Open {d.party.type}</Link>
+              {meta.party.phone ? `${meta.party.phone} · ` : ''}Closing balance {closing} ·{' '}
+              <Link to={`/${meta.party.type === 'customer' ? 'customers' : meta.party.type === 'supplier' ? 'suppliers' : 'employees'}/${meta.party.id}`}>Open {meta.party.type}</Link>
             </>
           ) : (
             'The full history of any account, customer, supplier or employee'
           )
         }
-        actions={<ExportButtons report={d?.report} />}
+        actions={<ExportButtons report={d?.report} load={loadAll} />}
       />
       <Card padded={false} className="ac-report-card ac-book">
         <div className="ac-filters">
@@ -81,7 +90,7 @@ export function LedgerPage() {
                 <AccountSelect value={accountId} onChange={(id) => go({ account: id })} placeholder="Choose an account…" />
               ) : kind === 'customer' ? (
                 <CustomerPicker
-                  value={pickedParty ? ({ id: pickedParty.id, name: pickedParty.name, phone: pickedParty.phone, balance: d!.closing, creditLimit: null } as unknown as CustomerOption) : null}
+                  value={pickedParty ? ({ id: pickedParty.id, name: pickedParty.name, phone: pickedParty.phone, balance: meta!.closing, creditLimit: null } as unknown as CustomerOption) : null}
                   onChange={(c) => go(c ? { party: { type: 'customer', id: c.id } } : { kind: 'customer' })}
                   allowCreate={false}
                   showBalance={false}
@@ -102,7 +111,11 @@ export function LedgerPage() {
           </Toolbar>
         </div>
         {selected ? (
-          <ReportView report={d?.report} loading={q.loading} error={q.error} onRetry={q.reload} onLink={openLink} hideTitle maxHeight="calc(100vh - 300px)" />
+          <>
+            <PageBar info={d} total={d?.entryCount ?? 0} what="entries" onPage={setPage} />
+            <ReportView report={d?.report} loading={q.loading} error={q.error} onRetry={q.reload} onLink={openLink} hideTitle maxHeight="calc(100vh - 300px)" />
+            <PageBar info={d} total={d?.entryCount ?? 0} what="entries" onPage={setPage} bottom />
+          </>
         ) : (
           <EmptyState
             icon={<BookOpenText size={34} />}

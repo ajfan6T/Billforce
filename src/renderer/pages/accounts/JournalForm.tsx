@@ -142,6 +142,7 @@ export function JournalFormPage() {
       const res = editing ? await update.run({ ...payload, entryId: entryId!, reason: reason.trim() || null }) : await create.run(payload);
       setDirty(false);
       toast.success(editing ? `Saved ${res.voucherNo}` : `Saved journal ${res.voucherNo} for ${formatINR(res.totalDebit)}`);
+      for (const w of res.warnings) toast.warning(w);
       navigate(`/accounts/journals/${res.id}`, { replace: editing });
     } catch {
       /* shown below */

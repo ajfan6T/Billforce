@@ -167,3 +167,17 @@
   color: var(--text-2);
   line-height: 1.4;
 }
+
+/* A label whose figure is defined differently elsewhere: point at it for the explanation. */
+.rp-defined {
+  text-decoration: underline dotted;
+  text-decoration-color: currentColor;
+  text-underline-offset: 3px;
+  cursor: help;
+}
+
+/* Long column names ("Net sales after discounts") wrap instead of pushing the last columns out of view. */
+.rp-card .report-table th {
+  white-space: normal;
+  vertical-align: bottom;
+}

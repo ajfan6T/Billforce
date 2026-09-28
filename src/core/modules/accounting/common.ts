@@ -7,8 +7,20 @@ import { today } from '../../context';
 import { AppError, fail } from '../../errors';
 import { formatDate, fyOf, isValidISODate } from '../../../shared/dates';
 import { VOUCHER_TYPE_LABELS, type PartyType, type VoucherType } from '../../../shared/constants';
-import { getEntry, getEntryLines, type AccountRow, getAccount, type JournalEntryRow } from '../../accounting/ledger';
+import {
+  accountBalance,
+  getEntry,
+  getEntryLines,
+  getAccount,
+  negativeBalanceWarning,
+  systemAccountId,
+  voidEntry,
+  type AccountRow,
+  type EntryLineInput,
+  type JournalEntryRow,
+} from '../../accounting/ledger';
 import { isDateInClosedYear } from '../../accounting/periods';
+import { getSection } from '../../settings';
 
 /** Source types whose entries can be edited / cancelled from the Accounts pages. */
 export const EDITABLE_SOURCES = ['manual', 'loan'] as const;
@@ -184,4 +196,81 @@ export function lineName(l: { account_name: string; party_name: string | null })
 /** In-clause helper. */
 export function inList(n: number): string {
   return Array.from({ length: n }, () => '?').join(', ');
+}
+
+/* ------------------------------ Money going out, and entries touching closed accounts ------------------------------ */
+
+function lineAccountId(ctx: Ctx, l: EntryLineInput): number {
+  return typeof l.account === 'number' ? l.account : systemAccountId(ctx, l.account);
+}
+
+/** Net (debit - credit) per account of some ledger lines. */
+function netByAccount(ctx: Ctx, lines: EntryLineInput[]): Map<number, number> {
+  const out = new Map<number, number>();
+  for (const l of lines) {
+    const id = lineAccountId(ctx, l);
+    out.set(id, (out.get(id) ?? 0) + (l.debit ?? 0) - (l.credit ?? 0));
+  }
+  return out;
+}
+
+/**
+ * Warnings (not errors) for money these lines take out of cash / bank / UPI
+ * accounts when that would leave the account below zero on `date` or today.
+ * Call before posting. For an edit pass the entry id: its old version is
+ * cancelled first so it is not counted twice (the caller then replaces it,
+ * which brings the entry back with its new lines).
+ */
+export function outflowWarnings(ctx: Ctx, lines: EntryLineInput[], date: string, editedEntryId?: number): string[] {
+  const outflows = [...netByAccount(ctx, lines)].filter(([, net]) => net < 0);
+  if (!outflows.length) return [];
+  if (editedEntryId && !getEntry(ctx, editedEntryId).is_void) voidEntry(ctx, editedEntryId, 'Being edited');
+  return outflows.map(([id, net]) => negativeBalanceWarning(ctx, id, -net, date)).filter((w): w is string => !!w);
+}
+
+/** A closed loan's transactions cannot be cancelled or changed until the loan is re-opened. */
+export function assertLoanOpen(ctx: Ctx, e: Pick<JournalEntryRow, 'source_type' | 'source_id'>, action: 'cancel' | 'change'): void {
+  if (e.source_type !== 'loan' || !e.source_id) return;
+  const loan = ctx.db.get<{ name: string; is_active: number }>('SELECT name, is_active FROM loans WHERE id = ?', [e.source_id]);
+  if (loan && !loan.is_active) {
+    throw fail.validation(`The loan "${loan.name}" is closed. Re-open it from Accounts > Loans before ${action === 'cancel' ? 'cancelling' : 'changing'} this entry.`);
+  }
+}
+
+/**
+ * Refuse to cancel an entry (newLines = null) or change its lines when that
+ * would move money in or out of a closed loan or an inactive balance-sheet
+ * account: a loan is only closed, and an account only deactivated, at a zero
+ * balance. Income and expense accounts may be inactive with a balance.
+ */
+export function assertClosedAccountsUntouched(ctx: Ctx, entryId: number, newLines: EntryLineInput[] | null, action: 'cancel' | 'change'): void {
+  const e = getEntry(ctx, entryId);
+  const verb = action === 'cancel' ? 'cancelling' : 'changing';
+  assertLoanOpen(ctx, e, action);
+  const before = new Map(
+    ctx.db
+      .all<{ account_id: number; net: number }>('SELECT account_id, SUM(debit - credit) AS net FROM journal_lines WHERE entry_id = ? GROUP BY account_id', [entryId])
+      .map((r) => [r.account_id, e.is_void ? 0 : r.net]),
+  );
+  const after = newLines ? netByAccount(ctx, newLines) : new Map<number, number>();
+  for (const id of new Set([...before.keys(), ...after.keys()])) {
+    const change = (after.get(id) ?? 0) - (before.get(id) ?? 0);
+    if (!change) continue;
+    const acct = getAccount(ctx, id);
+    if (acct.is_active || acct.type === 'income' || acct.type === 'expense') continue;
+    if (accountBalance(ctx, id) + change === 0) continue;
+    const loan = ctx.db.get<{ name: string }>('SELECT name FROM loans WHERE account_id = ?', [id]);
+    throw fail.validation(
+      loan
+        ? `The loan "${loan.name}" is closed, and ${verb} this entry would change what is outstanding on it. Re-open the loan from Accounts > Loans first.`
+        : `"${acct.name}" is inactive, and ${verb} this entry would give it a balance. Re-activate it in the chart of accounts first.`,
+    );
+  }
+}
+
+/** Why opening balances can no longer be entered (the first financial year is closed); null when they can. */
+export function openingLockedReason(ctx: Ctx): string | null {
+  const start = getSection(ctx, 'accounts').booksStartDate;
+  if (!start || !isDateInClosedYear(ctx, start)) return null;
+  return `Financial year ${fyOf(start).name}, when your books start, is closed, so opening balances can no longer be added or changed. Record money brought into the business as capital, a transfer or a loan received instead.`;
 }

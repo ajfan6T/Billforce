@@ -167,6 +167,7 @@ function EditExpenseModal({ expense, onClose, onSaved }: { expense: Expense; onC
     try {
       const r = await m.run({ ...expensePayload(draft), id: expense.id, reason: reason.trim() || null });
       toast.success(`Saved expense ${r.expenseNo}`);
+      for (const w of r.warnings) toast.warning(w);
       onSaved();
     } catch {
       /* shown below */

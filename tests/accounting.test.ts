@@ -1,6 +1,8 @@
 import { describe, expect, it } from 'vitest';
 import { createTestApp, ledgerProblems, systemBalance, type TestApp } from './helpers';
 import { accountBalance, partyBalance, paymentAccountId, postEntry, systemAccountId } from '../src/core/accounting/ledger';
+import { BOOK_PAGE_SIZE, DAY_BOOK_PAGE_SIZE } from '../src/core/modules/accounting/books';
+import { addDays } from '../src/shared/dates';
 
 const acctId = (t: TestApp, name: string) => t.app.db.value<number>('SELECT id FROM accounts WHERE name = ?', [name]);
 const sysId = (t: TestApp, key: Parameters<typeof systemAccountId>[1]) => systemAccountId(t.app.ctx(), key);
@@ -595,7 +597,7 @@ describe('capital, drawings and transfers', () => {
     expect(w.entry.narration).toBe('Cash withdrawn from Bank Account');
     const u = await t.call('accounts.transfer', { fromAccountId: upi, toAccountId: bank, amount: 30000 });
     expect(u.entry.narration).toBe('Transfer from UPI Account to Bank Account');
-    expect(u.warnings[0]).toMatch(/UPI Account shows a balance of ₹300.00 Cr/);
+    expect(u.warnings[0]).toMatch(/UPI Account will be short by ₹300.00/);
 
     expect((await t.fails('accounts.transfer', { fromAccountId: cash, toAccountId: cash, amount: 100 })).message).toMatch(/two different accounts/);
     expect((await t.fails('accounts.transfer', { fromAccountId: cash, toAccountId: acctId(t, 'Rent'), amount: 100 })).message).toMatch(/not a cash, bank or UPI account/);
@@ -869,5 +871,302 @@ describe('books', () => {
     expect(onlyExp.voucherCount).toBe(4);
     expect(onlyExp.report.title).toBe('Day book - Expense');
     expect(d.byType.find((x) => x.type === 'expense')?.count).toBe(4);
+  });
+});
+
+/* ------------------------------ Long periods, speed, and the rules found in review ------------------------------ */
+
+/**
+ * Many sales written straight into the ledger tables (thousands of postEntry calls would make the
+ * test slow): Dr cash or UPI, Cr Sales, spread evenly over `days` days from `from`.
+ */
+function bulkSales(t: TestApp, opts: { count: number; from: string; days: number; cashShare?: number }): { cash: number; upi: number } {
+  const cash = sysId(t, 'CASH');
+  const upi = sysId(t, 'UPI');
+  const sales = sysId(t, 'SALES');
+  const share = opts.cashShare ?? 1;
+  const sums = { cash: 0, upi: 0 };
+  t.app.db.tx(() => {
+    for (let i = 0; i < opts.count; i++) {
+      const date = addDays(opts.from, Math.floor((i * opts.days) / opts.count));
+      const amount = 1000 + (i % 7) * 100;
+      const toCash = i % 100 < share * 100;
+      const id = t.app.db.insert('journal_entries', { date, voucher_type: 'sale', voucher_no: `INV/${i + 1}`, narration: `Bill ${i + 1}`, created_at: `${date} 10:00:00` });
+      t.app.db.run('INSERT INTO journal_lines (entry_id, line_no, account_id, debit, credit) VALUES (?, 1, ?, ?, 0), (?, 2, ?, 0, ?)', [id, toCash ? cash : upi, amount, id, sales, amount]);
+      sums[toCash ? 'cash' : 'upi'] += amount;
+    }
+  });
+  return sums;
+}
+
+const plain = <R extends { style?: string }>(rows: R[]) => rows.filter((r) => !r.style || r.style === 'normal');
+
+describe('books over long periods', () => {
+  it('computes opening, totals and closing over the whole period and shows the rows a page at a time', async () => {
+    const t = await createTestApp({ openingCash: 1000000 });
+    const cash = sysId(t, 'CASH');
+    const count = 5200; // more than the old 5,000-entry cut-off
+    const sums = bulkSales(t, { count, from: '2026-04-01', days: 170 });
+    await t.call('expenses.create', { date: '2026-09-25', accountId: acctId(t, 'Rent'), amount: 250000, mode: 'cash' });
+    const range = { from: '2026-04-01', to: '2026-09-28' };
+
+    const p1 = await t.call('books.cashBook', range);
+    expect(p1.entryCount).toBe(count + 1);
+    expect(p1).toMatchObject({ page: 1, pageCount: Math.ceil((count + 1) / BOOK_PAGE_SIZE), firstShown: 1, lastShown: BOOK_PAGE_SIZE });
+    expect(p1.opening).toBe(1000000);
+    expect(p1.totalIn).toBe(sums.cash);
+    expect(p1.totalOut).toBe(250000);
+    expect(p1.closing).toBe(bal(t, cash, '2026-09-28'));
+    expect(p1.opening + p1.totalIn - p1.totalOut).toBe(p1.closing);
+    expect(p1.report.summary?.at(-1)).toMatchObject({ label: 'Closing balance', value: p1.closing });
+    expect(p1.report.notes?.[0]).toMatch(/^Showing entries 1–2,000 of 5,201 \(page 1 of 3\)\. Opening balance, totals and closing balance are for the whole period\./);
+    expect(plain(p1.report.rows)).toHaveLength(BOOK_PAGE_SIZE);
+    expect(p1.report.rows[0].cells).toMatchObject({ particulars: 'Opening balance', balance: 1000000 });
+    const cf1 = p1.report.rows.at(-1)!;
+    expect(cf1.cells.particulars).toBe('Carried forward to the next page');
+    expect(p1.report.rows.some((r) => r.cells.particulars === 'Closing balance')).toBe(false);
+
+    const p2 = await t.call('books.cashBook', { ...range, page: 2 });
+    expect(p2).toMatchObject({ page: 2, firstShown: BOOK_PAGE_SIZE + 1, lastShown: 2 * BOOK_PAGE_SIZE, closing: p1.closing, totalIn: p1.totalIn });
+    expect(p2.report.rows[0].cells).toMatchObject({ particulars: 'Brought forward from the previous page', in: cf1.cells.in, out: cf1.cells.out, balance: cf1.cells.balance });
+    // The running balance continues across the page break.
+    const firstOf2 = plain(p2.report.rows)[0].cells;
+    expect(firstOf2.balance).toBe((cf1.cells.balance as number) + ((firstOf2.in as number) ?? 0) - ((firstOf2.out as number) ?? 0));
+
+    const last = await t.call('books.cashBook', { ...range, page: 99 }); // past the end: the last page
+    expect(last.page).toBe(3);
+    expect(last.report.rows.at(-1)!.cells).toMatchObject({ date: '2026-09-28', particulars: 'Closing balance', in: sums.cash, out: 250000, balance: p1.closing });
+
+    // Every row, for exports: one page, same figures, every entry.
+    const all = await t.call('books.cashBook', { ...range, all: true });
+    expect(all).toMatchObject({ page: 1, pageCount: 1, entryCount: count + 1, closing: p1.closing });
+    expect(plain(all.report.rows)).toHaveLength(count + 1);
+    expect(all.report.notes?.some((n) => /Showing entries/.test(n))).toBe(false);
+    expect(plain(all.report.rows).at(-1)!.cells.balance).toBe(p1.closing);
+    // Day totals are for the whole day, even for a day split between two pages.
+    const subtotals = (rows: typeof all.report.rows) => rows.filter((r) => String(r.cells.particulars ?? '').startsWith('Total for')).map((r) => r.cells);
+    expect([...subtotals(p1.report.rows), ...subtotals(p2.report.rows), ...subtotals(last.report.rows)]).toEqual(subtotals(all.report.rows));
+
+    // Day book and ledger follow the same rule.
+    const day = await t.call('books.dayBook', range);
+    expect(day.voucherCount).toBe(count + 2); // + the opening-balance voucher
+    expect(day.totalDebit).toBe(sums.cash + 250000 + 1000000);
+    expect(day.pageCount).toBe(Math.ceil((count + 2) / DAY_BOOK_PAGE_SIZE));
+    expect(day.report.rows.some((r) => r.cells.particulars === 'Total')).toBe(false);
+    const dayLast = await t.call('books.dayBook', { ...range, page: day.pageCount });
+    expect(dayLast.report.rows.at(-1)!.cells).toMatchObject({ particulars: 'Total', debit: day.totalDebit, credit: day.totalDebit });
+    const sales = await t.call('books.ledger', { ...range, accountId: sysId(t, 'SALES') });
+    expect(sales).toMatchObject({ entryCount: count, totalOut: sums.cash, closing: -sums.cash, pageCount: 3 });
+
+    // The journal list pages through everything; the export asks for all of it.
+    const j1 = await t.call('journals.list', range);
+    expect(j1).toMatchObject({ total: count + 2, page: 1, pageCount: Math.ceil((count + 2) / 500), firstShown: 1, lastShown: 500, truncated: true });
+    const j2 = await t.call('journals.list', { ...range, page: 2 });
+    expect(j2.firstShown).toBe(501);
+    expect(j2.rows[0].date <= j1.rows.at(-1)!.date).toBe(true);
+    expect(new Set([...j1.rows, ...j2.rows].map((r) => r.id)).size).toBe(1000);
+    const jAll = await t.call('journals.list', { ...range, all: true });
+    expect(jAll.rows).toHaveLength(count + 2);
+    expect(jAll.truncated).toBe(false);
+    expect(ledgerProblems(t.app)).toEqual([]);
+  });
+
+  async function busyShop(oldIndexes: boolean) {
+    const t = await createTestApp({ booksStart: '2025-04-01', openingCash: 1000000 });
+    // Two years of a busy shop: 36,000 sales, 40% of them in cash.
+    bulkSales(t, { count: 36000, from: '2025-04-01', days: 546, cashShare: 0.4 });
+    if (oldIndexes) {
+      // A data file created before the covering indexes were added.
+      t.app.db.exec(`DROP INDEX idx_jl_account_entry; DROP INDEX idx_jl_party;
+        CREATE INDEX idx_jl_account ON journal_lines (account_id); CREATE INDEX idx_jl_party ON journal_lines (party_type, party_id);`);
+    }
+    return t;
+  }
+
+  for (const oldIndexes of [false, true]) {
+    it(`stays fast on two years of a busy shop${oldIndexes ? ' (data file from before the new indexes)' : ''}`, async () => {
+      const t = await busyShop(oldIndexes);
+      const cash = sysId(t, 'CASH');
+      // The old query walked every line of the account once per entry of the period: 10-60 s on data like this,
+      // with the whole app frozen meanwhile. Now each takes well under 200 ms; the limit is generous for slow machines.
+      const LIMIT_MS = 1500;
+      const checks: Array<[string, () => Promise<unknown>]> = [
+        ['cash book, this month', () => t.call('books.cashBook', { from: '2026-09-01', to: '2026-09-28' })],
+        ['cash book, this financial year', () => t.call('books.cashBook', { from: '2026-04-01', to: '2027-03-31' })],
+        ['cash book, last financial year, page 3', () => t.call('books.cashBook', { from: '2025-04-01', to: '2026-03-31', page: 3 })],
+        ['cash ledger, two years', () => t.call('books.ledger', { from: '2025-04-01', to: '2026-09-28', accountId: cash })],
+        ['sales ledger, this financial year', () => t.call('books.ledger', { from: '2026-04-01', to: '2027-03-31', accountId: sysId(t, 'SALES') })],
+        ['UPI book, this financial year', () => t.call('books.bankBook', { from: '2026-04-01', to: '2027-03-31', accountId: sysId(t, 'UPI') })],
+        ['day book, this financial year', () => t.call('books.dayBook', { from: '2026-04-01', to: '2027-03-31' })],
+        ['journal list filtered by cash, this financial year', () => t.call('journals.list', { from: '2026-04-01', to: '2027-03-31', accountId: cash })],
+        ['cash book for export, this financial year', () => t.call('books.cashBook', { from: '2026-04-01', to: '2027-03-31', all: true })],
+      ];
+      for (const [label, fn] of checks) {
+        const start = performance.now();
+        await fn();
+        const ms = performance.now() - start;
+        expect(ms, `${label} took ${Math.round(ms)} ms`).toBeLessThan(LIMIT_MS);
+      }
+      const fy = await t.call('books.cashBook', { from: '2026-04-01', to: '2027-03-31' });
+      expect(fy.closing).toBe(bal(t, cash));
+      expect(fy.opening).toBe(bal(t, cash, '2026-03-31'));
+      const month = await t.call('journals.list', { from: '2026-09-01', to: '2026-09-30', accountId: cash });
+      expect(month.total).toBe(
+        t.app.db.value<number>("SELECT COUNT(DISTINCT l.entry_id) FROM journal_lines l JOIN journal_entries e ON e.id = l.entry_id WHERE l.account_id = ? AND e.date >= '2026-09-01'", [cash]),
+      );
+    }, 60000);
+  }
+});
+
+describe('ledger opening balances', () => {
+  it('starts income and expense ledgers at zero each financial year; balance-sheet ledgers carry forward', async () => {
+    const t = await createTestApp({ booksStart: '2025-04-01', openingCash: 0 });
+    const sale = (date: string, amount: number) =>
+      postEntry(t.app.ctx(), { date, voucherType: 'sale', narration: `Sale ${date}`, lines: [{ account: 'CASH', debit: amount }, { account: 'SALES', credit: amount }] });
+    sale('2026-03-20', 500000);
+    sale('2026-04-15', 100000);
+    const salesId = sysId(t, 'SALES');
+    // FY 2025-26 is not closed, yet April's Sales ledger opens at zero, like the trial balance.
+    const april = await t.call('books.ledger', { accountId: salesId, from: '2026-04-01', to: '2026-04-15' });
+    expect(april).toMatchObject({ opening: 0, totalOut: 100000, closing: -100000 });
+    expect(april.report.notes?.some((n) => /start every financial year at zero/.test(n))).toBe(true);
+    const tb = await t.call('reports.trialBalance', { from: '2026-04-01', to: '2026-04-15' });
+    expect(tb.rows.find((r) => r.cells.account === 'Sales' && r.link)!.cells).toMatchObject({ openingCr: null, closingCr: 100000 });
+    // Mid-year, the year's own earlier entries count.
+    expect((await t.call('books.ledger', { accountId: salesId, from: '2026-04-16', to: '2026-04-30' })).opening).toBe(-100000);
+    // Across the year end, the new year restarts at zero.
+    const both = await t.call('books.ledger', { accountId: salesId, from: '2025-04-01', to: '2026-04-15' });
+    expect(both).toMatchObject({ opening: 0, totalOut: 600000, closing: -100000 });
+    const restart = both.report.rows.findIndex((r) => String(r.cells.particulars ?? '').startsWith('Opening balance of financial year 2026-27'));
+    expect(restart).toBeGreaterThan(0);
+    expect(both.report.rows[restart - 1].cells.balance).toBe(-500000);
+    expect(both.report.rows[restart].cells.balance).toBe(0);
+    expect(both.report.rows.at(-1)!.cells).toMatchObject({ particulars: 'Closing balance', balance: -100000 });
+    expect(both.report.notes?.some((n) => /closing balance is for 2026-27 only/.test(n))).toBe(true);
+    // A new year without entries of its own still starts at zero.
+    expect((await t.call('books.ledger', { accountId: salesId, from: '2026-03-01', to: '2026-04-10' })).closing).toBe(0);
+    // Cash (an asset) carries its balance forward.
+    expect(await t.call('books.ledger', { accountId: sysId(t, 'CASH'), from: '2026-04-01', to: '2026-04-15' })).toMatchObject({ opening: 500000, closing: 600000 });
+  });
+
+  it('counts opening-balance vouchers as the opening balance in the cash book, ledger, trial balance and cash flow', async () => {
+    const t = await createTestApp({ openingCash: 1000000 }); // books start 01-04-2026
+    postEntry(t.app.ctx(), { date: '2026-04-05', voucherType: 'sale', narration: 'Cash sale', lines: [{ account: 'CASH', debit: 50000 }, { account: 'SALES', credit: 50000 }] });
+    const range = { from: '2026-04-01', to: '2026-09-28' };
+    const cb = await t.call('books.cashBook', range);
+    expect(cb).toMatchObject({ opening: 1000000, totalIn: 50000, totalOut: 0, closing: 1050000, entryCount: 1 });
+    expect(cb.accounts[0]).toMatchObject({ opening: 1000000, closing: 1050000 });
+    expect(plain(cb.report.rows).map((r) => r.cells.voucher)).toEqual(['Sales Bill']);
+    const flow = await t.call('reports.cashFlow', range);
+    expect(flow.figures.opening).toBe(cb.opening);
+    const tb = await t.call('reports.trialBalance', range);
+    const cell = (name: string) => tb.rows.find((r) => r.cells.account === name && r.link)!.cells;
+    expect(cell('Cash in Hand')).toMatchObject({ openingDr: 1000000, debit: 50000, closingDr: 1050000 });
+    expect(cell('Opening Balance Adjustment')).toMatchObject({ openingCr: 1000000, credit: null, closingCr: 1000000 });
+    const eq = await t.call('books.ledger', { ...range, accountId: sysId(t, 'OPENING_EQUITY') });
+    expect(eq).toMatchObject({ opening: -1000000, entryCount: 0, closing: -1000000 });
+    // Later periods: the voucher is simply part of the history before "from".
+    expect((await t.call('books.cashBook', { from: '2026-05-01', to: '2026-09-28' })).opening).toBe(1050000);
+  });
+});
+
+describe('money going out of cash and bank', () => {
+  it('warns (but saves) when an expense, drawings, loan or journal leaves cash or bank below zero', async () => {
+    const t = await createTestApp({ openingCash: 1000000 }); // ₹10,000 in cash, nothing in the bank or UPI
+    const cash = sysId(t, 'CASH');
+    const rent = acctId(t, 'Rent');
+    const x = await t.call('expenses.create', { accountId: rent, amount: 800000, mode: 'cash' });
+    expect(x.warnings).toEqual([]);
+    // An edit counts the new amount once (the old version is replaced, not added to it).
+    const e1 = await t.call('expenses.update', { id: x.id, accountId: rent, amount: 900000, mode: 'cash' });
+    expect(e1.warnings).toEqual([]);
+    expect(bal(t, cash)).toBe(100000);
+    const e2 = await t.call('expenses.update', { id: x.id, accountId: rent, amount: 1200000, mode: 'cash' });
+    expect(e2.warnings).toEqual(['Cash in Hand will be short by ₹2,000.00 after this payment. Check that all money received has been entered.']);
+    expect(e2.amount).toBe(1200000);
+    expect(t.app.db.value('SELECT is_void FROM journal_entries WHERE id = ?', [e2.journalEntryId])).toBe(0);
+    expect(bal(t, cash)).toBe(-200000);
+
+    const upi = await t.call('expenses.create', { accountId: acctId(t, 'Electricity'), amount: 50000, mode: 'upi' });
+    expect(upi.warnings[0]).toMatch(/^UPI Account will be short by ₹500.00/);
+    expect((await t.call('expenses.create', { accountId: rent, amount: 50000, mode: 'credit', supplierId: addSupplier(t, 'Landlord') })).warnings).toEqual([]);
+
+    const d = await t.call('accounts.drawings', { amount: 100000, mode: 'cash' });
+    expect(d.warnings[0]).toMatch(/^Cash in Hand will be short by ₹3,000.00/);
+    expect((await t.call('accounts.drawings', { amount: 100000, goods: true })).warnings).toEqual([]);
+    expect((await t.call('accounts.capital', { amount: 100000, mode: 'bank' })).warnings).toEqual([]);
+
+    const j = await t.call('journals.create', { narration: 'Tea', lines: [{ accountId: acctId(t, 'Tea & Refreshments'), debit: 1000 }, { accountId: cash, credit: 1000 }] });
+    expect(j.warnings[0]).toMatch(/^Cash in Hand will be short by ₹3,010.00/);
+
+    const loan = await t.call('loans.create', { name: 'Mama ji', direction: 'taken', principal: 500000, startDate: '2026-09-01', disburse: { mode: 'bank', amount: 500000 } });
+    expect(loan.warnings).toEqual([]);
+    const repay = await t.call('loans.transaction', { loanId: loan.id, kind: 'repay', principal: 500000, interest: 110000, mode: 'bank' });
+    expect(repay.warnings[0]).toMatch(/^Bank Account will be short by ₹100.00/);
+    const given = await t.call('loans.create', { name: 'Ramesh', direction: 'given', principal: 20000, startDate: '2026-09-01', disburse: { mode: 'cash', amount: 20000 } });
+    expect(given.warnings[0]).toMatch(/^Cash in Hand will be short by ₹3,210.00/);
+    expect(ledgerProblems(t.app)).toEqual([]);
+  });
+});
+
+describe('closed loans and inactive accounts', () => {
+  it('refuses to cancel or change an entry of a closed loan until it is re-opened', async () => {
+    const t = await createTestApp();
+    const loan = await t.call('loans.create', { name: 'HDFC', direction: 'taken', principal: 1000000, startDate: '2026-09-01', disburse: { mode: 'bank', amount: 1000000 } });
+    const repay = await t.call('loans.transaction', { loanId: loan.id, kind: 'repay', principal: 1000000, interest: 0, mode: 'bank' });
+    await t.call('loans.update', { id: loan.id, name: 'HDFC', isActive: false });
+    // The voucher and the loan page say so up front.
+    expect(await t.call('journals.get', { entryId: repay.entry.id })).toMatchObject({
+      canEdit: false,
+      lockedReason: 'The loan "HDFC" is closed. Re-open it from Accounts > Loans to change this entry.',
+    });
+    expect((await t.call('loans.get', { id: loan.id })).transactions.every((x) => !x.editable)).toBe(true);
+    const err = await t.fails('journals.cancel', { entryId: repay.entry.id, reason: 'Entered twice' });
+    expect(err.code).toBe('VALIDATION');
+    expect(err.message).toBe('The loan "HDFC" is closed. Re-open it from Accounts > Loans before cancelling this entry.');
+    const half = repay.entry.lines.map((l) => ({ accountId: l.accountId, debit: l.debit / 2, credit: l.credit / 2 }));
+    expect((await t.fails('journals.update', { entryId: repay.entry.id, narration: 'Half', lines: half })).message).toMatch(/closed\. Re-open it .* before changing this entry/);
+    expect((await t.call('loans.get', { id: loan.id })).outstanding).toBe(0);
+    await t.call('loans.update', { id: loan.id, name: 'HDFC', isActive: true });
+    await t.call('journals.cancel', { entryId: repay.entry.id, reason: 'Entered twice' });
+    expect((await t.call('loans.get', { id: loan.id })).outstanding).toBe(1000000);
+    expect(ledgerProblems(t.app)).toEqual([]);
+  });
+
+  it('refuses a cancel that would give an inactive cash or bank account a balance', async () => {
+    const t = await createTestApp({ openingCash: 1000000 });
+    const cash = sysId(t, 'CASH');
+    const petty = await t.call('accounts.create', { name: 'Petty Cash', groupCode: 'cash' });
+    const out = await t.call('accounts.transfer', { fromAccountId: cash, toAccountId: petty.id, amount: 50000 });
+    const spent = await t.call('expenses.create', { accountId: acctId(t, 'Tea & Refreshments'), amount: 50000, mode: 'cash', payAccountId: petty.id });
+    await t.call('accounts.setActive', { id: petty.id, active: false });
+    const e1 = await t.fails('journals.cancel', { entryId: out.entry.id, reason: 'Wrong' });
+    expect(e1.message).toBe('"Petty Cash" is inactive, and cancelling this entry would give it a balance. Re-activate it in the chart of accounts first.');
+    expect((await t.fails('expenses.cancel', { id: spent.id, reason: 'Wrong' })).message).toMatch(/"Petty Cash" is inactive/);
+    expect(bal(t, petty.id)).toBe(0);
+    // Inactive income / expense heads may keep a balance, so their entries can still be cancelled.
+    await t.call('accounts.setActive', { id: acctId(t, 'Tea & Refreshments'), active: false });
+    await t.call('accounts.setActive', { id: petty.id, active: true });
+    await t.call('expenses.cancel', { id: spent.id, reason: 'Wrong' });
+    await t.call('journals.cancel', { entryId: out.entry.id, reason: 'Wrong' });
+    expect(bal(t, petty.id)).toBe(0);
+    expect(ledgerProblems(t.app)).toEqual([]);
+  });
+
+  it('lets an income or expense head be deactivated with a balance, but not a balance-sheet account', async () => {
+    const t = await createTestApp({ openingCash: 1000000 });
+    const rent = acctId(t, 'Rent');
+    await t.call('expenses.create', { accountId: rent, amount: 900000, mode: 'cash' });
+    const hdfc = await t.call('accounts.create', { name: 'HDFC Current', groupCode: 'bank' });
+    await t.call('accounts.transfer', { fromAccountId: sysId(t, 'CASH'), toAccountId: hdfc.id, amount: 10000 });
+    expect((await t.call('accounts.get', { id: rent })).canDeactivate).toBe(true);
+    expect(await t.call('accounts.setActive', { id: rent, active: false })).toMatchObject({ isActive: false, balance: 900000 });
+    expect((await t.fails('expenses.create', { accountId: rent, amount: 100, mode: 'cash' })).message).toMatch(/"Rent" is inactive/);
+    // It still shows in the chart with its balance, so the totals agree.
+    const chart = await t.call('accounts.chart', {});
+    const rentRow = chart.types.flatMap((x) => x.groups).flatMap((g) => g.accounts).find((a) => a.id === rent);
+    expect(rentRow).toMatchObject({ isActive: false, balance: 900000 });
+    expect(chart.totalDebit).toBe(chart.totalCredit);
+    expect((await t.fails('accounts.setActive', { id: hdfc.id, active: false })).message).toMatch(/balance of ₹100.00 Dr/);
   });
 });

@@ -51,9 +51,10 @@ export function trialBalanceData(ctx: Ctx, input: TrialBalanceInput): { report: 
   const excludeClosingFrom = fyTo.start;
 
   // Opening: balance-sheet accounts carry forward; P&L accounts only from the start of from's year.
-  const bsOpeningFilter: LedgerFilter = { before: from, excludeClosingFrom, types: ['asset', 'liability', 'equity'] };
+  // Opening-balance vouchers (dated the books start) are opening, not movement, as in the cash flow and cash book.
+  const bsOpeningFilter: LedgerFilter = { before: from, openingThrough: to, excludeClosingFrom, types: ['asset', 'liability', 'equity'] };
   const plOpeningFilter: LedgerFilter = { from: fyFrom.start, before: from, excludeClosingFrom, types: PL_TYPES };
-  const moveFilter: LedgerFilter = { from, to, excludeClosingFrom };
+  const moveFilter: LedgerFilter = { from, to, excludeClosingFrom, excludeOpeningThrough: to };
   const bsOpening = accountSums(ctx, bsOpeningFilter);
   const plOpening = accountSums(ctx, plOpeningFilter);
   const movement = accountSums(ctx, moveFilter);

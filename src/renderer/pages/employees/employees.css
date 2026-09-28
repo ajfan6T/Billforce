@@ -23,6 +23,22 @@
 .emp-nil {
   color: var(--text-3);
 }
+/* Attendance not marked for the month (monthly staff would be paid in full). */
+.emp-warn {
+  color: var(--warning);
+  font-weight: 600;
+}
+.emp-note-amber {
+  color: var(--warning);
+  background: var(--warning-soft);
+  border-radius: 6px;
+  padding: 6px 10px;
+  line-height: 1.4;
+}
+.emp-unmarked-list {
+  margin: 4px 0 0;
+  padding-left: 18px;
+}
 tr.emp-inactive td {
   color: var(--text-3);
 }

@@ -18,7 +18,7 @@ import { partyBalance, paymentAccountId, postEntry, replaceEntry, voidEntry, typ
 import { assertDateOpen } from '../../accounting/periods';
 import { touchItemUsage } from '../items/service';
 import { renderReceiptHtml, upiLink, type ReceiptDoc, type ReceiptTotal } from '../../print/receipt';
-import { BILL_PAYMENT_MODE_LABELS, billPaymentMode, calcBill, roundQty, type BillPaymentMode } from '../../../shared/billing';
+import { billPaymentLabel, billPaymentMode, calcBill, roundQty, type BillPaymentMode } from '../../../shared/billing';
 import { amountInWords, formatAmount, formatINR, formatQty } from '../../../shared/money';
 import { formatDate, formatTime, fyOf, isValidISODate } from '../../../shared/dates';
 import { PAYMENT_MODE_LABELS, type PaymentMode, type SettlementMode } from '../../../shared/constants';
@@ -380,6 +380,8 @@ interface PreparedBill {
   payments: PreparedPayment[];
   remarks: string | null;
   warnings: string[];
+  /** Catalogue items billed at other than their list rate (for the activity log). */
+  rateChanges: Array<{ itemName: string; listRate: number; rate: number }>;
 }
 
 const clean = (s: string | null | undefined): string | null => {
@@ -430,6 +432,12 @@ function prepareBill(ctx: Ctx, input: BillInput, existing: BillRow | null): Prep
   /* Lines */
   if (!input.items?.length) throw fail.validation('Add at least one item to the bill.', { items: 'Add an item' });
   const base: Array<Omit<PreparedLine, 'discount' | 'discountPct' | 'amount'> & { inDiscount: number | null; inPct: number | null }> = [];
+  const rateChanges: PreparedBill['rateChanges'] = [];
+  const canChangeRate = can(ctx, 'billing.rate');
+  // Rates already saved on the bill being edited may stay as they are without the permission.
+  const savedRates = existing
+    ? ctx.db.all<{ item_id: number; rate: number }>('SELECT item_id, rate FROM bill_items WHERE bill_id = ? AND item_id IS NOT NULL', [existing.id])
+    : [];
   input.items.forEach((l, i) => {
     const name = (l.itemName ?? '').trim();
     if (!name) throw fail.validation(`Enter the item name on line ${i + 1}.`, { [`items.${i}.itemName`]: 'Enter the item name' });
@@ -439,10 +447,21 @@ function prepareBill(ctx: Ctx, input: BillInput, existing: BillRow | null): Prep
     let unit = clean(l.unit);
     let itemId: number | null = null;
     if (l.itemId) {
-      const item = ctx.db.get<{ id: number; unit: string }>('SELECT id, unit FROM items WHERE id = ?', [l.itemId]);
+      const item = ctx.db.get<{ id: number; unit: string; rate: number }>('SELECT id, unit, rate FROM items WHERE id = ?', [l.itemId]);
       if (!item) throw fail.validation(`Item "${name}" was not found in the item list. Remove the line and add it again.`, { [`items.${i}.itemId`]: 'Item not found' });
       itemId = item.id;
       unit = unit ?? item.unit;
+      // A catalogue item is billed at its list rate unless the user may change rates. Items without
+      // a list rate (0) take the rate typed at the counter; one-time (free-text) lines are not checked.
+      if (item.rate > 0 && l.rate !== item.rate) {
+        const saved = savedRates.some((r) => r.item_id === item.id && r.rate === l.rate);
+        if (!canChangeRate && !saved) {
+          throw new AppError('FORBIDDEN', `You are not allowed to change the rate of "${name}" (list rate ${formatINR(item.rate)}). Bill it at the list rate or ask the owner for permission.`, {
+            [`items.${i}.rate`]: 'Rate changes need permission',
+          });
+        }
+        if (!saved) rateChanges.push({ itemName: name, listRate: item.rate, rate: l.rate });
+      }
     }
     base.push({ itemId, itemName: name, unit, qty: roundQty(l.qty), rate: l.rate, inDiscount: l.discount ?? null, inPct: l.discountPct ?? null });
   });
@@ -487,11 +506,27 @@ function prepareBill(ctx: Ctx, input: BillInput, existing: BillRow | null): Prep
   if (calc.total <= 0) throw fail.validation('The bill total must be more than zero. Check the rates and discounts.', { total: 'Total is zero' });
 
   /* Payments */
+  // Editing: a payment row sent without an account keeps the account (and reference) it was saved with
+  // when its mode and amount are unchanged, so an edit never moves old receipts to today's default account.
+  const oldPayments = existing
+    ? ctx.db.all<{ mode: SettlementMode; account_id: number; amount: number; reference: string | null }>(
+        'SELECT mode, account_id, amount, reference FROM bill_payments WHERE bill_id = ? ORDER BY id',
+        [existing.id],
+      )
+    : [];
   const payments: PreparedPayment[] = (input.payments ?? []).map((p, i) => {
     if (!Number.isInteger(p.amount) || p.amount <= 0) {
       throw fail.validation(`Payment ${i + 1}: amount must be more than zero.`, { [`payments.${i}.amount`]: 'Must be more than zero' });
     }
-    return { mode: p.mode, accountId: paymentAccountId(ctx, p.mode, p.accountId), amount: p.amount, reference: clean(p.reference) };
+    let accountId = p.accountId ?? null;
+    let reference = clean(p.reference);
+    const same = oldPayments.findIndex((o) => o.mode === p.mode && o.amount === p.amount && (!accountId || o.account_id === accountId));
+    if (same >= 0) {
+      accountId = accountId ?? oldPayments[same].account_id;
+      reference = reference ?? oldPayments[same].reference;
+      oldPayments.splice(same, 1);
+    }
+    return { mode: p.mode, accountId: paymentAccountId(ctx, p.mode, accountId), amount: p.amount, reference };
   });
   const paid = payments.reduce((s, p) => s + p.amount, 0);
   if (paid > calc.total) {
@@ -540,6 +575,7 @@ function prepareBill(ctx: Ctx, input: BillInput, existing: BillRow | null): Prep
     payments,
     remarks: clean(input.remarks),
     warnings,
+    rateChanges,
   };
 }
 
@@ -781,11 +817,12 @@ export function createBill(ctx: Ctx, input: BillInput): BillResult {
   for (const itemId of new Set(p.lines.map((l) => l.itemId).filter((x): x is number => !!x))) touchItemUsage(ctx, itemId);
 
   recordRevision(ctx, 'bill', id, 'created', billSnapshot(getBill(ctx, id)));
-  const mode = BILL_PAYMENT_MODE_LABELS[p.paymentMode];
-  logActivity(ctx, 'bill.create', `Created bill ${num.number} for ${formatINR(p.total)} (${mode})${p.customerName ? ` - ${p.customerName}` : ''}`, {
+  const mode = billPaymentLabel(p.paymentMode, p.credit);
+  const rates = rateChangesText(p.rateChanges);
+  logActivity(ctx, 'bill.create', `Created bill ${num.number} for ${formatINR(p.total)} (${mode})${p.customerName ? ` - ${p.customerName}` : ''}${rates}`, {
     entityType: 'bill',
     entityId: id,
-    details: { total: p.total, paymentMode: p.paymentMode, customerId: p.customer?.id ?? null, items: p.lines.length },
+    details: { total: p.total, paymentMode: p.paymentMode, customerId: p.customer?.id ?? null, items: p.lines.length, ...(p.rateChanges.length ? { rateChanges: p.rateChanges } : {}) },
   });
   return { ...getBill(ctx, id), warnings: p.warnings };
 }
@@ -827,12 +864,18 @@ export function updateBill(ctx: Ctx, id: number, input: BillInput, reason: strin
   const after = billSnapshot(getBill(ctx, id));
   recordRevision(ctx, 'bill', id, 'edited', after, reason);
   const changes = diffBills(before, after);
-  logActivity(ctx, 'bill.edit', `Edited bill ${bill.bill_no}: ${changeSummary(changes)}${reason ? `. Reason: ${reason}` : ''}`, {
+  logActivity(ctx, 'bill.edit', `Edited bill ${bill.bill_no}: ${changeSummary(changes)}${rateChangesText(p.rateChanges)}${reason ? `. Reason: ${reason}` : ''}`, {
     entityType: 'bill',
     entityId: id,
-    details: { reason, changes },
+    details: { reason, changes, ...(p.rateChanges.length ? { rateChanges: p.rateChanges } : {}) },
   });
   return { ...getBill(ctx, id), warnings: p.warnings };
+}
+
+/** ". Rate changed: Sugar ₹45.00 (list ₹48.00)" for the activity log. */
+function rateChangesText(list: PreparedBill['rateChanges']): string {
+  if (!list.length) return '';
+  return `. Rate changed: ${list.map((r) => `${r.itemName} ${formatINR(r.rate)} (list ${formatINR(r.listRate)})`).join(', ')}`;
 }
 
 export function cancelBill(ctx: Ctx, id: number, reason: string): BillDetail {
@@ -1030,6 +1073,8 @@ export interface RepeatData {
 export function repeatData(ctx: Ctx, billId: number): RepeatData {
   const b = getBill(ctx, billId);
   const allowDiscount = can(ctx, 'billing.discount');
+  // Users who may not change rates get today's list rate for catalogue items.
+  const allowRate = can(ctx, 'billing.rate');
   let rateChanges = 0;
   const lines = b.items.map((i): RepeatLine => {
     const item = i.itemId ? ctx.db.get<{ rate: number; unit: string }>('SELECT rate, unit FROM items WHERE id = ?', [i.itemId]) : undefined;
@@ -1039,7 +1084,7 @@ export function repeatData(ctx: Ctx, billId: number): RepeatData {
       itemName: i.itemName,
       unit: i.unit,
       qty: i.qty,
-      rate: i.rate,
+      rate: item && item.rate > 0 && !allowRate ? item.rate : i.rate,
       defaultRate: item ? item.rate : null,
       discount: allowDiscount && !i.discountPct && i.discount ? i.discount : null,
       discountPct: allowDiscount && i.discountPct ? i.discountPct : null,
@@ -1159,6 +1204,14 @@ export function itemCountLine(items: Array<{ qty: number; unit: string | null }>
   return `Items: ${items.length}    Qty: ${formatQty(roundQty(items.reduce((s, i) => s + i.qty, 0)))}${unit ? ' ' + unit : ''}`;
 }
 
+/** The customer's balance on a receipt: due, advance or nothing (bills and credit notes print it the same way). */
+export function customerBalanceLine(balance: number, asOn: string): string {
+  const when = ` (as on ${formatDate(asOn)})`;
+  if (balance > 0) return `Total due from you: ${formatINR(balance)}${when}`;
+  if (balance < 0) return `Advance with us: ${formatINR(-balance)}${when}`;
+  return `Nothing due${when}`;
+}
+
 export function billReceiptDoc(ctx: Ctx, b: BillDetail, opts: { duplicate?: boolean } = {}): ReceiptDoc {
   const receipt = getSection(ctx, 'receipt');
   const business = getSection(ctx, 'business');
@@ -1191,9 +1244,7 @@ export function billReceiptDoc(ctx: Ctx, b: BillDetail, opts: { duplicate?: bool
   lines.push(itemCountLine(b.items));
   if (b.itemDiscount + b.billDiscount > 0) lines.push(`You saved ${formatINR(b.itemDiscount + b.billDiscount)} on this bill`);
   if (receipt.showAmountInWords) lines.push(amountInWords(b.total));
-  if (b.credit > 0 && b.customer && b.status === 'active') {
-    lines.push(`Total due from you: ${formatINR(b.customer.balance)} (as on ${formatDate(today(ctx))})`);
-  }
+  if (b.credit > 0 && b.customer && b.status === 'active') lines.push(customerBalanceLine(b.customer.balance, today(ctx)));
   const returns = b.creditNotes.filter((c) => c.status === 'active');
   for (const c of returns) lines.push(`${c.kind === 'return' ? 'Goods returned' : 'Credit note'} ${c.cnNo}: -${formatINR(c.total)}`);
   if (b.remarks) lines.push(`Remarks: ${b.remarks}`);

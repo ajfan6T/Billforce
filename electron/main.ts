@@ -1,16 +1,21 @@
-import { app, BrowserWindow, dialog, ipcMain, Menu, shell } from 'electron';
+import { app, BrowserWindow, dialog, ipcMain, Menu, powerMonitor, session, shell } from 'electron';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { BillforceApp } from '../src/core/app';
 import { ElectronPlatform } from './platform';
 import { startBackupScheduler, type BackupScheduler } from '../src/core/modules/data/scheduler';
+import { BACKUP_FILE_FILTERS } from '../src/core/modules/data/backup';
+import { backupFolderFromDamagedFile, describeOpenFailure, findBackups, RecoveryError, restoreDamagedDatabase } from '../src/core/recovery';
 import { runSmokeTest } from '../src/core/smoke';
+import { formatDateTime } from '../src/shared/dates';
 
 const DEV_URL = process.env.BILLFORCE_DEV_URL;
 let mainWindow: BrowserWindow | null = null;
 let core: BillforceApp | null = null;
 let scheduler: BackupScheduler | null = null;
+/** Set while the window reloads after a restore: the "unsaved changes" question is skipped then. */
+let reloadingAfterRestore = false;
 
 // Indian locale: dd/mm/yyyy in date pickers, en-IN number formatting.
 app.commandLine.appendSwitch('lang', 'en-IN');
@@ -33,6 +38,52 @@ function logError(where: string, err: unknown): void {
 
 process.on('uncaughtException', (e) => logError('uncaughtException', e));
 process.on('unhandledRejection', (e) => logError('unhandledRejection', e));
+
+function documentsDir(): string {
+  try {
+    return app.getPath('documents');
+  } catch {
+    return os.homedir();
+  }
+}
+
+/**
+ * The app works fully offline: Chromium's spell checker would otherwise download a dictionary from
+ * Google at every start (webPreferences.spellcheck only hides it in the page).
+ */
+function keepOffline(): void {
+  const ses = session.defaultSession;
+  ses.setSpellCheckerEnabled(false);
+  try {
+    ses.setSpellCheckerLanguages([]);
+  } catch {
+    /* not supported on this platform */
+  }
+  // If anything still asks for a dictionary, it goes nowhere instead of to the internet.
+  ses.setSpellCheckerDictionaryDownloadURL('http://127.0.0.1:9/');
+}
+
+/**
+ * Last backup and a clean close of the database. Runs once, when Billforce really quits: after all
+ * windows closed (not when a close was cancelled by "Stay"), or when Windows shuts down / logs off
+ * ('before-quit' does not fire then).
+ */
+function shutDownCore(reason: string): void {
+  if (!core) return;
+  try {
+    scheduler?.backupOnExit();
+    scheduler?.stop();
+  } catch (e) {
+    logError(`backup on exit (${reason})`, e);
+  }
+  try {
+    core.close();
+  } catch (e) {
+    logError(`close database (${reason})`, e);
+  }
+  core = null;
+  scheduler = null;
+}
 
 function createWindow(): void {
   mainWindow = new BrowserWindow({
@@ -60,6 +111,40 @@ function createWindow(): void {
   mainWindow.on('closed', () => {
     mainWindow = null;
   });
+  // Windows shutdown / restart / log-off: take the exit backup while there is still time, then close
+  // the database cleanly. (No 'before-quit' / 'will-quit' in this case.)
+  mainWindow.on('query-session-end', () => {
+    try {
+      scheduler?.backupOnExit();
+    } catch (e) {
+      logError('backup before session end', e);
+    }
+  });
+  mainWindow.on('session-end', () => shutDownCore('session end'));
+  // A form with unsaved changes blocks the close with 'beforeunload'; Electron then does nothing unless asked.
+  mainWindow.webContents.on('will-prevent-unload', (e) => {
+    if (reloadingAfterRestore) {
+      e.preventDefault();
+      return;
+    }
+    const win = mainWindow;
+    const opts: Electron.MessageBoxSyncOptions = {
+      type: 'question',
+      title: 'Unsaved changes',
+      message: 'You have unsaved changes. Leave without saving?',
+      detail: 'If you leave now, the changes you have not saved will be lost.',
+      buttons: ['Leave', 'Stay'],
+      defaultId: 1,
+      cancelId: 1,
+      noLink: true,
+    };
+    const choice = win && !win.isDestroyed() ? dialog.showMessageBoxSync(win, opts) : dialog.showMessageBoxSync(opts);
+    // preventDefault() here means "ignore the page's beforeunload and leave".
+    if (choice === 0) e.preventDefault();
+  });
+  mainWindow.webContents.on('did-finish-load', () => {
+    reloadingAfterRestore = false;
+  });
   // The app never navigates away or opens pop-ups; external links open in the browser.
   mainWindow.webContents.setWindowOpenHandler(({ url }) => {
     if (/^https?:\/\//.test(url)) shell.openExternal(url);
@@ -67,6 +152,9 @@ function createWindow(): void {
   });
   mainWindow.webContents.on('will-navigate', (e, url) => {
     if (DEV_URL && url.startsWith(DEV_URL)) return;
+    // A reload of the app's own page (e.g. location.reload()) is fine; going anywhere else is not.
+    const current = mainWindow?.webContents.getURL() ?? '';
+    if (current && url.split('#')[0] === current.split('#')[0]) return;
     e.preventDefault();
   });
   if (DEV_URL) mainWindow.loadURL(DEV_URL);
@@ -143,48 +231,117 @@ if (smokeArg) {
     }
   });
 
-  app.whenReady().then(() => {
+  app.whenReady().then(async () => {
+    keepOffline();
     const dataDir = process.env.BILLFORCE_DATA_DIR || app.getPath('userData');
     const platform = new ElectronPlatform(() => mainWindow);
     try {
       core = new BillforceApp({ dataDir, platform, version: app.getVersion() });
     } catch (e) {
       logError('open database', e);
-      const choice = dialog.showMessageBoxSync({
-        type: 'error',
-        title: 'Billforce could not open your data',
-        message: 'Billforce could not open your data file.',
-        detail: `${(e as Error).message}\n\nData folder: ${dataDir}\n\nYou can restore a backup by replacing billforce.db in the data folder with a backup copy.`,
-        buttons: ['Open data folder', 'Exit'],
-        defaultId: 1,
-      });
-      if (choice === 0) shell.openPath(dataDir);
-      app.exit(1);
+      await recoverFromOpenFailure(e, dataDir, path.join(dataDir, 'billforce.db'));
       return;
     }
-    core.onEvent((event) => mainWindow?.webContents.send('bf:event', event));
-    ipcMain.handle('bf:invoke', (_e, name: string, input: unknown) => core!.invoke(name, input));
+    core.onEvent((event) => {
+      if (event === 'database-replaced') {
+        // After a restore the page must start again on the new data. Reload from here: a reload the page
+        // starts itself can be held up, and this also resets every cached screen. The short delay lets the
+        // restore screen show "restored" first.
+        setTimeout(() => {
+          if (!mainWindow || mainWindow.isDestroyed()) return;
+          reloadingAfterRestore = true;
+          mainWindow.webContents.reload();
+        }, 1500);
+        return;
+      }
+      mainWindow?.webContents.send('bf:event', event);
+    });
+    ipcMain.handle('bf:invoke', (_e, name: string, input: unknown) =>
+      core ? core.invoke(name, input) : { ok: false, error: { code: 'INTERNAL', message: 'Billforce is closing.' } },
+    );
     buildMenu();
     createWindow();
     scheduler = startBackupScheduler(core);
+    // Linux / macOS shutdown (Windows uses the window's session-end event above).
+    powerMonitor.on('shutdown', () => shutDownCore('system shutdown'));
   });
 
   app.on('window-all-closed', () => {
     app.quit();
   });
 
-  app.on('before-quit', () => {
-    try {
-      scheduler?.backupOnExit();
-      scheduler?.stop();
-    } catch (e) {
-      logError('backup on exit', e);
+  // Not 'before-quit': that also fires when File > Exit is then cancelled by "Stay" on unsaved changes,
+  // which would close the database under a window that is still open.
+  app.on('will-quit', () => shutDownCore('quit'));
+}
+
+/** Start Billforce again (e.g. after restoring a backup at start-up); the portable exe restarts itself. */
+function relaunch(): void {
+  const portableExe = process.env.PORTABLE_EXECUTABLE_FILE;
+  app.relaunch(portableExe ? { execPath: portableExe } : undefined);
+  app.exit(0);
+}
+
+/**
+ * billforce.db could not be opened, so the app (and its Backup & restore screen) cannot start.
+ * Explain what happened and offer a real way back: restore a .bfbackup here, open the data folder, or exit.
+ */
+async function recoverFromOpenFailure(error: unknown, dataDir: string, dbPath: string): Promise<void> {
+  const failure = describeOpenFailure(error);
+  // The folder chosen in Settings if it can still be read from the file, else the default one.
+  const defaultDir = path.join(documentsDir(), 'Billforce Backups');
+  const chosenDir = failure.canRestore ? backupFolderFromDamagedFile(dbPath) : null;
+  for (;;) {
+    const newest = failure.canRestore ? [...(chosenDir ? findBackups(chosenDir) : []), ...findBackups(defaultDir)].sort((a, b) => (a.at < b.at ? 1 : -1))[0] : undefined;
+    const backupDir = chosenDir && fs.existsSync(chosenDir) ? chosenDir : defaultDir;
+    const buttons = failure.canRestore ? ['Restore from a backup…', 'Open data folder', 'Exit'] : ['Open data folder', 'Exit'];
+    const hint = newest ? `\n\nNewest backup found: ${newest.fileName} (${formatDateTime(newest.at)})` : '';
+    const { response } = await dialog.showMessageBox({
+      type: failure.kind === 'newer-version' ? 'warning' : 'error',
+      title: 'Billforce could not open your data',
+      message: failure.title,
+      detail: `${failure.detail}\n\nData folder: ${dataDir}${hint}`,
+      buttons,
+      defaultId: 0,
+      cancelId: buttons.length - 1,
+      noLink: true,
+    });
+    const choice = buttons[response];
+    if (choice === 'Exit' || choice === undefined) break;
+    if (choice === 'Open data folder') {
+      await shell.openPath(dataDir);
+      continue;
     }
+    const picked = await dialog.showOpenDialog({
+      title: 'Choose the Billforce backup to restore',
+      defaultPath: newest?.path ?? (fs.existsSync(backupDir) ? backupDir : documentsDir()),
+      filters: BACKUP_FILE_FILTERS,
+      properties: ['openFile'],
+    });
+    if (picked.canceled || !picked.filePaths[0]) continue;
     try {
-      core?.close();
+      const r = restoreDamagedDatabase(dbPath, picked.filePaths[0]);
+      await dialog.showMessageBox({
+        type: 'info',
+        title: 'Data restored',
+        message: `Your data${r.businessName ? ` for ${r.businessName}` : ''} was restored from the backup.`,
+        detail: `Restored from: ${r.restoredFrom}${r.damagedCopy ? `\nThe file that could not be opened was kept as: ${r.damagedCopy}` : ''}\n\nBillforce will now start again. Anything entered after this backup was taken needs to be entered again.`,
+        buttons: ['Start Billforce'],
+        noLink: true,
+      });
+      relaunch();
+      return;
     } catch (e) {
-      logError('close database', e);
+      logError('restore at start-up', e);
+      await dialog.showMessageBox({
+        type: 'warning',
+        title: 'This backup cannot be used',
+        message: 'This backup cannot be used.',
+        detail: `${e instanceof RecoveryError ? e.message : `The backup could not be put in place: ${(e as Error).message}`}\n\nYour data has not been changed. Choose another backup.`,
+        buttons: ['OK'],
+        noLink: true,
+      });
     }
-    core = null;
-  });
+  }
+  app.exit(1);
 }

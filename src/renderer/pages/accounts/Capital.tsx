@@ -136,6 +136,7 @@ function DrawingsCard({ onSaved }: { onSaved: () => void }) {
     try {
       const e = await m.run({ date, amount, goods: kind === 'goods', mode: kind === 'money' ? pay.mode : null, accountId: kind === 'money' ? pay.accountId : null, narration: narration.trim() || null });
       toast.success(`Recorded drawings of ${formatINR(amount)} (${e.voucherNo})`);
+      for (const w of e.warnings) toast.warning(w);
       setAmount(null);
       setNarration('');
       onSaved();

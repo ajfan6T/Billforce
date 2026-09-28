@@ -2,23 +2,28 @@
  * UI pieces shared by the accounts pages: date ranges remembered per page,
  * badges, the "how this is recorded" posting table and revision history.
  */
-import type { ReactNode } from 'react';
+import { useState, type ReactNode } from 'react';
 import { Link } from 'react-router';
+import { ChevronLeft, ChevronRight } from 'lucide-react';
 import { rangeFromPreset, type RangeValue } from '../../components/report';
-import { Badge, type Tone } from '../../components/ui';
+import { Badge, Button, type Tone } from '../../components/ui';
 import { useStoredState } from '../../hooks';
 import { useAuth } from '../../auth';
+import { useLinkedRange } from '../../links';
 import { formatINR } from '../../../shared/money';
 import { formatDate, formatDateTime, type DatePreset } from '../../../shared/dates';
 import { PAYMENT_MODE_LABELS, VOUCHER_TYPE_LABELS, type VoucherType } from '../../../shared/constants';
 import type { ReportColumn, ReportData, ReportRow } from '../../../shared/report';
 import './accounts.css';
 
-/** A date range remembered per page; presets ("This month") stay current across days. */
+/**
+ * A date range remembered per page; presets ("This month") stay current across days.
+ * A drill-down link's `?from=&to=` (from a report or the dashboard) wins while it is in the address.
+ */
 export function useRange(key: string, preset: DatePreset = 'this_month'): [RangeValue, (v: RangeValue) => void] {
   const [stored, setStored] = useStoredState<RangeValue>(`accounts.${key}`, rangeFromPreset(preset));
   const value = stored.preset === 'custom' ? stored : rangeFromPreset(stored.preset);
-  return [value, setStored];
+  return useLinkedRange(value, setStored);
 }
 
 const VOUCHER_TONES: Partial<Record<VoucherType, Tone>> = {
@@ -237,6 +242,56 @@ export function FieldGroup({ label, hint, error, required, children }: { label: 
       </span>
       {children}
       {error ? <span className="field-error">{error}</span> : hint ? <span className="field-hint">{hint}</span> : null}
+    </div>
+  );
+}
+
+/* ------------------------------ Long lists shown a page at a time ------------------------------ */
+
+export interface PageState {
+  page: number;
+  pageCount: number;
+  firstShown: number;
+  lastShown: number;
+}
+
+const n = (v: number) => v.toLocaleString('en-IN');
+
+/** Page number of a paged list; back to page 1 whenever `key` (the filters) changes. */
+export function usePage(key: string): [number, (page: number) => void] {
+  const [state, setState] = useState({ key, page: 1 });
+  return [state.key === key ? state.page : 1, (page) => setState({ key, page })];
+}
+
+/**
+ * Bar shown above (and below) a book or list that is too long for one screen:
+ * which rows are shown, previous / next page, and that the figures and exports
+ * cover the whole period. Nothing is shown when everything fits on one page.
+ */
+export function PageBar({ info, total, what, onPage, figuresNote = true, bottom }: { info: PageState | undefined; total: number; what: string; onPage: (page: number) => void; figuresNote?: boolean; bottom?: boolean }) {
+  if (!info || info.pageCount <= 1) return null;
+  return (
+    <div className={`ac-pagebar${bottom ? ' bottom' : ''}`} role="navigation" aria-label={`Pages of ${what}`}>
+      <div className="ac-pagebar-text">
+        <b>
+          Showing {what} {n(info.firstShown)}–{n(info.lastShown)} of {n(total)}
+        </b>{' '}
+        · page {info.page} of {info.pageCount}
+        {!bottom && (
+          <span className="ac-pagebar-note">
+            {figuresNote ? 'Opening balance, totals and closing balance are for the whole period. ' : 'Totals are for the whole period. '}
+            Excel, CSV, PDF and Print include every entry.
+          </span>
+        )}
+      </div>
+      <div className="row">
+        <Button size="sm" icon={<ChevronLeft size={15} />} disabled={info.page <= 1} onClick={() => onPage(info.page - 1)}>
+          Previous
+        </Button>
+        <Button size="sm" disabled={info.page >= info.pageCount} onClick={() => onPage(info.page + 1)}>
+          Next <ChevronRight size={15} />
+        </Button>
+      </div>
     </div>
   );
 }

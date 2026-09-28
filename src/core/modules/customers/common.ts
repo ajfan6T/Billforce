@@ -21,6 +21,28 @@ export function phoneKey(phone: string | null | undefined): string | null {
   return d || null;
 }
 
+/**
+ * phoneKey() written in SQL, for a phone that holds only digits, spaces and
+ * + - ( ) (what cleanPhone() stores). The same expression is indexed
+ * (idx_customers_phone_key in db/schema/masters.ts), so the duplicate check is
+ * an index lookup instead of reading every customer. Keep both in step: a test
+ * checks that the query uses the index.
+ */
+const PHONE_DIGITS_SQL = "REPLACE(REPLACE(REPLACE(REPLACE(REPLACE(phone, ' ', ''), '-', ''), '+', ''), '(', ''), ')', '')";
+export const PHONE_KEY_SQL =
+  `(CASE WHEN length(${PHONE_DIGITS_SQL}) > 10 AND (substr(${PHONE_DIGITS_SQL}, 1, 2) = '91' OR substr(${PHONE_DIGITS_SQL}, 1, 1) = '0') ` +
+  `THEN substr(${PHONE_DIGITS_SQL}, -10) ELSE ${PHONE_DIGITS_SQL} END)`;
+
+/** A phone number as stored: trimmed, runs of spaces made single; only digits, spaces and + - ( ) allowed. */
+export function cleanPhone(phone: string | null | undefined): string | null {
+  const p = phone?.replace(/\s+/g, ' ').trim();
+  if (!p) return null;
+  if (!/^[0-9+\-\s()]*$/.test(p) || p.length > 20) {
+    throw fail.validation('Phone number can contain only digits, spaces and + - ( )', { phone: 'Use digits, spaces and + - ( ) only' });
+  }
+  return p;
+}
+
 export function normalizeEmail(email: string | null | undefined): string | null {
   const e = email?.trim();
   if (!e) return null;

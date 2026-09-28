@@ -23,6 +23,9 @@ interface SplitRow {
   key: string;
   mode: SettlementMode;
   amount: number | null;
+  /** Cash / bank account the money went to; null = the default account for the mode. */
+  accountId?: number | null;
+  reference?: string | null;
 }
 
 interface Draft {
@@ -63,6 +66,23 @@ export function BillingScreen() {
 
   const billQ = useQuery('sales.get', editId ? { id: editId } : null);
   const cfgQ = useQuery('sales.posConfig', undefined);
+  const reloadCfg = cfgQ.reload;
+
+  // The counter is often left open overnight: fetch the date (and next bill number) again when the
+  // window comes back and every minute, so the screen follows the clock across midnight.
+  useEffect(() => {
+    const refresh = () => {
+      if (document.visibilityState === 'visible') void reloadCfg();
+    };
+    window.addEventListener('focus', refresh);
+    document.addEventListener('visibilitychange', refresh);
+    const timer = setInterval(refresh, 60_000);
+    return () => {
+      window.removeEventListener('focus', refresh);
+      document.removeEventListener('visibilitychange', refresh);
+      clearInterval(timer);
+    };
+  }, [reloadCfg]);
 
   if (editId && billQ.error) {
     return (
@@ -116,6 +136,7 @@ function PosForm({
   const editing = !!editBill;
   const canDiscount = can('billing.discount');
   const canBackdate = can('billing.backdate');
+  const canRate = can('billing.rate');
   const userId = session?.userId ?? 0;
 
   /* ------------------------------ state ------------------------------ */
@@ -128,7 +149,10 @@ function PosForm({
   const [customer, setCustomer] = useState<CustomerOption | null>(null);
   const [walkInName, setWalkInName] = useState('');
   const [walkInPhone, setWalkInPhone] = useState('');
+  // A new bill is dated today at the moment it is saved, unless the user picked a date.
   const [date, setDate] = useState(cfg.today);
+  const [dateTouched, setDateTouched] = useState(false);
+  const billDate = editing || dateTouched ? date : cfg.today;
   const [billDiscMode, setBillDiscMode] = useState<'amt' | 'pct'>('amt');
   const [billDiscValue, setBillDiscValue] = useState<number | null>(null);
   const defaultMode = cfg.defaultPaymentMode;
@@ -147,15 +171,18 @@ function PosForm({
 
   const searchRef = useRef<HTMLInputElement>(null);
   const cashRef = useRef<HTMLInputElement>(null);
+  const saveBtnRef = useRef<HTMLButtonElement>(null);
   const billDiscRef = useRef<HTMLInputElement>(null);
   const cells = useRef(new Map<string, HTMLInputElement>());
 
-  const nextNo = useQuery('sales.nextNumber', editing ? null : { date });
+  const nextNo = useQuery('sales.nextNumber', editing ? null : { date: billDate });
+  const payAccounts = useQuery('accounts.paymentAccounts', undefined);
   const recent = useQuery('items.recent', { limit: 14 });
   const custItems = useQuery('sales.customerItems', customer ? { customerId: customer.id, limit: 12 } : null);
   const last = useQuery('sales.lastBill', editing ? null : undefined);
 
-  useUnsavedWarning(lines.length > 0);
+  // A new bill keeps a draft (restored when New bill opens again), so moving to another page needs no question.
+  useUnsavedWarning(lines.length > 0, { navigation: editing });
 
   // Toasts go to the bottom-left on this screen so they never cover the Save buttons.
   useEffect(() => {
@@ -204,7 +231,7 @@ function PosForm({
             itemName: l.itemName,
             unit: l.unit,
             qty: l.qty,
-            rate: l.rate,
+            rate: l.itemId && !canRate && l.defaultRate ? l.defaultRate : l.rate,
             discText: discountToText(l.discount, l.discountPct),
             defaultRate: l.defaultRate,
           })),
@@ -227,7 +254,7 @@ function PosForm({
         toast.error(e);
       }
     },
-    [dialogs, focusSearch, setLines, toast],
+    [dialogs, focusSearch, setLines, toast, canRate],
   );
 
   useEffect(() => {
@@ -259,7 +286,7 @@ function PosForm({
       else if (b.payments.length === 1 && b.credit === 0) setPay({ mode: b.payments[0].mode, accountId: b.payments[0].accountId });
       else {
         setSplit(true);
-        setSplitRows(b.payments.map((p) => ({ key: uid(), mode: p.mode, amount: p.amount })));
+        setSplitRows(b.payments.map((p) => ({ key: uid(), mode: p.mode, amount: p.amount, accountId: p.accountId, reference: p.reference })));
       }
       setRemarks(b.remarks ?? '');
       setReady(true);
@@ -344,7 +371,7 @@ function PosForm({
   const total = calc.total;
   const splitPaid = splitRows.reduce((s, r) => s + (r.amount ?? 0), 0);
   const payments = split
-    ? splitRows.filter((r) => r.amount && r.amount > 0).map((r) => ({ mode: r.mode, amount: r.amount!, accountId: null as number | null }))
+    ? splitRows.filter((r) => r.amount && r.amount > 0).map((r) => ({ mode: r.mode, amount: r.amount!, accountId: r.accountId ?? null, reference: r.reference ?? null }))
     : pay.mode === 'credit'
       ? []
       : total > 0
@@ -381,12 +408,19 @@ function PosForm({
     if (badKeys.size) setBadKeys(new Set());
     // Clear messages as soon as the bill changes.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [lines, customer, pay, split, splitRows, billDiscValue]);
+  }, [lines, customer, pay, split, splitRows, billDiscValue, cashReceived]);
 
   /* ------------------------------ lines ------------------------------ */
   const flash = (key: string) => {
     setFlashKey(null);
     setTimeout(() => setFlashKey(key), 0);
+    // On a long bill the new (or increased) line may be out of sight: bring it into view once rendered.
+    const show = (tries: number) => {
+      const row = cells.current.get(`${key}:qty`)?.closest('tr');
+      if (row && row.isConnected) row.scrollIntoView({ block: 'nearest' });
+      else if (tries > 0) requestAnimationFrame(() => show(tries - 1));
+    };
+    requestAnimationFrame(() => show(10));
   };
 
   const addLine = (l: Omit<PosLine, 'key'>): string => {
@@ -432,9 +466,14 @@ function PosForm({
     else focusSearch();
   };
 
+  // Catalogue items are billed at their list rate unless the user may change rates
+  // (one-time items and items without a list rate always take the typed rate).
+  const rateLocked = (l: PosLine) => !canRate && !!l.itemId && l.defaultRate !== 0;
+
   const onCellEnter = (key: string, field: CellField) => {
-    if (field === 'qty') focusCell(key, 'rate');
-    else if (field === 'rate' && canDiscount) focusCell(key, 'disc');
+    const l = linesRef.current.find((x) => x.key === key);
+    if (field === 'qty' && !(l && rateLocked(l))) focusCell(key, 'rate');
+    else if ((field === 'qty' || field === 'rate') && canDiscount) focusCell(key, 'disc');
     else focusSearch();
   };
 
@@ -458,21 +497,33 @@ function PosForm({
     const { qty, name } = parseQuickEntry(text);
     if (!name) {
       if (linesRef.current.length) {
-        // Empty search + Enter: go to payment.
+        // Empty search + Enter: go to payment (cash box), or to the save button for other modes.
         if (!split && pay.mode === 'cash') cashRef.current?.focus();
+        else saveBtnRef.current?.focus();
       }
       return;
     }
     setSearchText('');
     try {
-      // Barcode scanners and fast typists press Enter before suggestions arrive.
+      // Barcode scanners and fast typists press Enter before suggestions arrive: take the exact
+      // match, else the first suggestion (what Enter picks once the list is showing). Only text
+      // that matches no item at all becomes a one-time item.
       const res = await call('items.search', { q: name, limit: 5 });
       const exact = res.find((i) => (i.code && i.code.toLowerCase() === name.toLowerCase()) || i.name.toLowerCase() === name.toLowerCase());
-      if (exact) return addItem(exact, qty);
+      const top = exact ?? res[0];
+      if (top) return addItem(top, qty);
     } catch {
       /* fall through to a one-time line */
     }
     addFreeText(name, qty);
+  };
+
+  /** Enter in a side-panel box goes back to the item search (or the cash box once items are in). */
+  const sideEnter = (e: React.KeyboardEvent<HTMLInputElement>) => {
+    if (e.key !== 'Enter') return;
+    e.preventDefault();
+    if (linesRef.current.length && !split && pay.mode === 'cash') cashRef.current?.focus();
+    else focusSearch();
   };
 
   /* ------------------------------ reset / save ------------------------------ */
@@ -482,6 +533,7 @@ function PosForm({
     setWalkInName('');
     setWalkInPhone('');
     setDate(cfg.today);
+    setDateTouched(false);
     setBillDiscMode('amt');
     setBillDiscValue(null);
     setPay({ mode: defaultMode, accountId: null });
@@ -508,7 +560,25 @@ function PosForm({
     }
     if (!linesRef.current.length && !customer) return reset();
     const ok = await dialogs.confirm({ title: 'Clear this bill?', message: 'All items on the screen will be removed. Nothing has been saved yet.', confirmText: 'Clear bill', danger: true });
-    if (ok) reset();
+    if (!ok) return;
+    // Keep what was cleared so a slip of the keyboard can be undone.
+    const cleared: Draft = { lines: linesRef.current, customer, walkInName, walkInPhone, billDiscMode, billDiscValue, pay, split, splitRows, remarks };
+    reset();
+    toast.info(`Bill cleared (${cleared.lines.length} item${cleared.lines.length === 1 ? '' : 's'}).`, { label: 'Undo', onClick: () => restoreDraft(cleared) });
+  };
+
+  const restoreDraft = (d: Draft) => {
+    setLines(d.lines);
+    setCustomer(d.customer);
+    setWalkInName(d.walkInName ?? '');
+    setWalkInPhone(d.walkInPhone ?? '');
+    setBillDiscMode(d.billDiscMode ?? 'amt');
+    setBillDiscValue(d.billDiscValue ?? null);
+    setPay(d.pay ?? { mode: defaultMode, accountId: null });
+    setSplit(!!d.split);
+    setSplitRows(d.splitRows ?? []);
+    setRemarks(d.remarks ?? '');
+    focusSearch();
   };
 
   const save = async (print: boolean) => {
@@ -523,8 +593,35 @@ function PosForm({
       else focusSearch();
       return;
     }
+    // "Cash received" less than the total is never saved as fully paid: the rest goes on the
+    // customer's credit only when the user says so, and a walk-in customer must pay in full.
+    let pays = payments;
+    let cashNote = '';
+    if (!split && pay.mode === 'cash' && cashReceived !== null && total > 0) {
+      if (cashReceived < total) {
+        const short = total - cashReceived;
+        if (!customer) {
+          setError(`Cash received (${formatINR(cashReceived)}) is less than the total (${formatINR(total)}). Take the full amount, or choose a customer to keep ${formatINR(short)} on credit.`);
+          cashRef.current?.focus();
+          return;
+        }
+        const ok = await dialogs.confirm({
+          title: `Keep ${formatINR(short)} on credit?`,
+          message: `Only ${formatINR(cashReceived)} was received against ${formatINR(total)}. ${customer.name} will owe ${formatINR(short)} more for this bill.`,
+          confirmText: 'Keep on credit',
+          cancelText: 'Go back',
+        });
+        if (!ok) {
+          cashRef.current?.focus();
+          return;
+        }
+        pays = cashReceived > 0 ? [{ mode: 'cash', amount: cashReceived, accountId: pay.accountId }] : [];
+        cashNote = ` · ${formatINR(short)} on credit`;
+      } else if (cashReceived > total) cashNote = ` · Cash ${formatINR(cashReceived)} · Change ${formatINR(cashReceived - total)}`;
+    }
     const input = {
-      date: canBackdate || editing ? date : null,
+      // Only a date the user picked is sent; otherwise the bill gets today's date when it is saved.
+      date: editing || dateTouched ? date : null,
       customerId: customer?.id ?? null,
       customerName: customer ? null : walkInName.trim() || null,
       customerPhone: customer ? null : walkInPhone.trim() || null,
@@ -535,7 +632,7 @@ function PosForm({
       }),
       billDiscount: billDiscMode === 'amt' && (canDiscount || editing) ? billDiscValue || null : null,
       billDiscountPct: billDiscMode === 'pct' && (canDiscount || editing) ? billDiscValue || null : null,
-      payments,
+      payments: pays,
       remarks: remarks.trim() || null,
     };
     setSaving(true);
@@ -559,8 +656,10 @@ function PosForm({
       }
       const res = await call('sales.create', input);
       res.warnings.forEach((w) => toast.warning(w));
-      const willPrint = print || cfg.autoPrint;
-      toast.success(`Bill ${res.billNo} saved · ${formatINR(res.total)}${willPrint ? ' · printing' : ''}`, {
+      if (res.date < res.createdAt.slice(0, 10)) toast.warning(`Bill ${res.billNo} is dated ${formatDate(res.date)}, a past date.`);
+      // "Save" (F10) never prints; "Save & print" (F9) does.
+      const willPrint = print;
+      toast.success(`Bill ${res.billNo} saved · ${formatINR(res.total)}${cashNote}${willPrint ? ' · printing' : ''}`, {
         label: willPrint ? 'Reprint' : 'Print',
         onClick: () => void printDoc('bill', res.id),
       });
@@ -720,7 +819,8 @@ function PosForm({
                 className="sl-chip cust"
                 title={`Last bought ${formatQty(ci.lastQty)}${ci.unit ? ' ' + ci.unit : ''} at ${formatINR(ci.lastRate)} on ${formatDate(ci.lastDate)}`}
                 onClick={() => {
-                  if (ci.itemId) addItem({ id: ci.itemId, name: ci.itemName, unit: ci.unit ?? 'pcs', rate: ci.defaultRate ?? ci.lastRate }, 1, ci.lastRate);
+                  // Without "change rates" a catalogue item goes in at its list rate, not last time's rate.
+                  if (ci.itemId) addItem({ id: ci.itemId, name: ci.itemName, unit: ci.unit ?? 'pcs', rate: ci.defaultRate ?? ci.lastRate }, 1, canRate || !ci.defaultRate ? ci.lastRate : undefined);
                   else {
                     addLine({ itemId: null, itemName: ci.itemName, unit: ci.unit, qty: 1, rate: ci.lastRate, discText: '', defaultRate: null });
                     focusSearch();
@@ -750,6 +850,7 @@ function PosForm({
             lines={lines}
             calc={calc}
             canDiscount={canDiscount}
+            rateLocked={rateLocked}
             flashKey={flashKey}
             badKeys={badKeys}
             onChange={updateLine}
@@ -807,7 +908,16 @@ function PosForm({
             <div className="pos-section-label">
               Customer <span className="sl-kbd-hint faint small">optional · F4</span>
             </div>
-            <div className="pos-customer">
+            <div
+              className="pos-customer"
+              onBlur={(e) => {
+                // A name typed here that matches no customer is not thrown away: use it as the walk-in name.
+                const typed = e.target instanceof HTMLInputElement && e.target.getAttribute('role') === 'combobox' ? e.target.value.trim() : '';
+                if (!typed || customer || walkInName.trim() || document.querySelector('.modal')) return;
+                setWalkInName(typed.slice(0, 120));
+                toast.info(`"${typed}" will be printed as the walk-in name. To bill a saved customer, press F4 and pick or add them.`);
+              }}
+            >
               <CustomerPicker
                 value={customer}
                 onChange={(c) => {
@@ -819,19 +929,31 @@ function PosForm({
             </div>
             {!customer && (
               <div className="sl-walkin">
-                <TextInput value={walkInName} onChange={(e) => setWalkInName(e.target.value)} placeholder="Walk-in name" aria-label="Walk-in customer name" maxLength={120} />
-                <TextInput value={walkInPhone} onChange={(e) => setWalkInPhone(e.target.value.replace(/[^0-9+\-\s()]/g, ''))} placeholder="Phone" aria-label="Walk-in phone" maxLength={20} />
+                <TextInput value={walkInName} onChange={(e) => setWalkInName(e.target.value)} onKeyDown={sideEnter} placeholder="Walk-in name" aria-label="Walk-in customer name" maxLength={120} />
+                <TextInput value={walkInPhone} onChange={(e) => setWalkInPhone(e.target.value.replace(/[^0-9+\-\s()]/g, ''))} onKeyDown={sideEnter} placeholder="Phone" aria-label="Walk-in phone" maxLength={20} />
               </div>
             )}
           </div>
 
-          {(canBackdate || (editing && date !== cfg.today)) && (
+          {(canBackdate || (editing && billDate !== cfg.today)) && (
             <div className="pos-date">
               <span className="pos-section-label" style={{ margin: 0 }}>
                 Bill date
               </span>
-              <DateInput value={date} onChange={(d) => d && setDate(d)} max={dateMax} min={dateMin} disabled={!canBackdate} aria-label="Bill date" />
-              {date !== cfg.today && <span className="badge badge-amber">Past date</span>}
+              <DateInput
+                value={billDate}
+                onChange={(d) => {
+                  if (!d) return;
+                  setDate(d);
+                  // Picking today again means "today when saved" (follows the clock).
+                  if (!editing) setDateTouched(d !== cfg.today);
+                }}
+                max={dateMax}
+                min={dateMin}
+                disabled={!canBackdate}
+                aria-label="Bill date"
+              />
+              {billDate !== cfg.today && <span className="badge badge-amber">Past date</span>}
             </div>
           )}
 
@@ -847,7 +969,7 @@ function PosForm({
               </div>
             )}
             {(canDiscount || calc.billDiscount > 0) && (
-              <div className="tr">
+              <div className="tr sl-bill-disc-row">
                 <span className="sl-bill-disc">
                   Bill discount
                   {canDiscount && (
@@ -868,9 +990,9 @@ function PosForm({
                 <span className="sl-bill-disc">
                   {canDiscount &&
                     (billDiscMode === 'amt' ? (
-                      <FastMoneyInput ref={billDiscRef} value={billDiscValue} onChange={setBillDiscValue} aria-label="Bill discount in rupees" placeholder="0" />
+                      <FastMoneyInput ref={billDiscRef} value={billDiscValue} onChange={setBillDiscValue} onKeyDown={sideEnter} aria-label="Bill discount in rupees" placeholder="0" />
                     ) : (
-                      <FastNumberInput inputRef={billDiscRef} value={billDiscValue} onChange={setBillDiscValue} decimals={2} max={100} aria-label="Bill discount percent" placeholder="0 %" />
+                      <FastNumberInput inputRef={billDiscRef} value={billDiscValue} onChange={setBillDiscValue} onKeyDown={sideEnter} decimals={2} max={100} aria-label="Bill discount percent" placeholder="0 %" />
                     ))}
                   {calc.billDiscount > 0 && <span className="money muted">−{formatINR(calc.billDiscount)}</span>}
                 </span>
@@ -918,7 +1040,8 @@ function PosForm({
                         onKeyDown={(e) => {
                           if (e.key === 'Enter') {
                             e.preventDefault();
-                            void save(true);
+                            // Enter here is the quick "done" key: it prints when automatic printing is on.
+                            void save(cfg.autoPrint);
                           }
                         }}
                       />
@@ -930,19 +1053,25 @@ function PosForm({
                   </div>
                 )}
                 {pay.mode === 'cash' && cashChange !== null && cashChange < 0 && (
-                  <div className="sl-pay-hint">
-                    <AlertTriangle size={14} /> Received less than the total. Use “Split payment” to keep the rest on credit.
+                  <div className="sl-pay-hint bad">
+                    <AlertTriangle size={14} />
+                    {customer
+                      ? `Received less than the total. Saving will ask to keep ${formatINR(-cashChange)} on ${customer.name}'s credit.`
+                      : `Received less than the total. Take the full amount, or choose a customer to keep ${formatINR(-cashChange)} on credit.`}
                   </div>
                 )}
               </>
             ) : (
               <>
                 <div className="sl-split-rows">
-                  {splitRows.map((r) => (
+                  {splitRows.map((r) => {
+                    const accts = (r.mode === 'cash' ? payAccounts.data?.cash : payAccounts.data?.bank) ?? [];
+                    const def = payAccounts.data ? (r.mode === 'cash' ? payAccounts.data.defaults.cash : r.mode === 'upi' ? payAccounts.data.defaults.upi : payAccounts.data.defaults.bank) : null;
+                    return (
                     <div className="sl-split-row" key={r.key}>
                       <Select<SettlementMode>
                         value={r.mode}
-                        onChange={(mode) => updateSplit(r.key, { mode })}
+                        onChange={(mode) => updateSplit(r.key, { mode, accountId: null })}
                         options={(['cash', 'upi', 'bank'] as const).map((m) => ({ value: m, label: PAYMENT_MODE_LABELS[m] }))}
                         aria-label="Payment mode"
                       />
@@ -961,8 +1090,24 @@ function PosForm({
                       <button type="button" className="icon-btn danger" aria-label="Remove payment" onClick={() => setSplitRows((rows) => rows.filter((x) => x.key !== r.key))}>
                         <Trash2 size={14} />
                       </button>
+                      {(accts.length > 1 || (r.accountId && r.accountId !== def)) && (
+                        <Select<number>
+                          className="sl-split-acct"
+                          value={r.accountId ?? def ?? undefined}
+                          onChange={(accountId) => updateSplit(r.key, { accountId })}
+                          options={[
+                            ...accts.map((a) => ({ value: a.id, label: a.name })),
+                            // An edited bill's account that is no longer in the list (e.g. made inactive).
+                            ...(r.accountId && !accts.some((a) => a.id === r.accountId)
+                              ? [{ value: r.accountId, label: editBill?.payments.find((p) => p.accountId === r.accountId)?.accountName ?? 'Saved account' }]
+                              : []),
+                          ]}
+                          aria-label={`${PAYMENT_MODE_LABELS[r.mode]} account`}
+                        />
+                      )}
                     </div>
-                  ))}
+                    );
+                  })}
                   {splitRows.length < 6 && (
                     <button type="button" className="btn btn-link btn-sm" style={{ alignSelf: 'flex-start' }} onClick={() => setSplitRows((rows) => [...rows, { key: uid(), mode: 'cash', amount: null }])}>
                       <Plus size={14} /> Add payment
@@ -983,7 +1128,8 @@ function PosForm({
             {customer && creditPart > 0 && (
               <div className={`sl-pay-hint${overLimit ? ' bad' : ''}`} style={overLimit ? undefined : { color: 'var(--text-2)' }}>
                 {overLimit && <AlertTriangle size={14} />}
-                {customer.name} will owe {formatINR(dueAfter)} after this bill
+                {/* balanceHidden: the user may not see the customer's balance, so only this bill's credit is shown. */}
+                {customer.balanceHidden ? `${formatINR(creditPart)} will be added to ${customer.name}'s account` : `${customer.name} will owe ${formatINR(dueAfter)} after this bill`}
                 {overLimit ? ` — over the credit limit of ${formatINR(customer.creditLimit!)}` : ''}.
               </div>
             )}
@@ -991,7 +1137,7 @@ function PosForm({
 
           <div>
             <div className="pos-section-label">Remarks</div>
-            <TextInput value={remarks} onChange={(e) => setRemarks(e.target.value)} placeholder="Optional note printed on the bill" maxLength={500} aria-label="Remarks" />
+            <TextInput value={remarks} onChange={(e) => setRemarks(e.target.value)} onKeyDown={sideEnter} placeholder="Optional note printed on the bill" maxLength={500} aria-label="Remarks" />
           </div>
         </div>
 
@@ -1007,7 +1153,7 @@ function PosForm({
           )}
           {error && <div className="pos-error" role="alert">{error}</div>}
           <div className="pos-actions">
-            <Button variant="primary" icon={<Printer size={18} />} kbd="F9" loading={saving} onClick={() => void save(true)}>
+            <Button ref={saveBtnRef} variant="primary" icon={<Printer size={18} />} kbd="F9" loading={saving} onClick={() => void save(true)}>
               {editing ? 'Save changes & print' : 'Save & print'}
             </Button>
             <Button icon={<Save size={16} />} kbd="F10" disabled={saving} onClick={() => void save(false)}>

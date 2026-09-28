@@ -67,10 +67,6 @@ export function rupeesToPaise(rupees: number): Paise {
   return sign * Math.round(Math.abs(rupees) * 100 + Number.EPSILON * 100);
 }
 
-export function paiseToRupees(paise: Paise): number {
-  return paise / 100;
-}
-
 /**
  * Parse user input such as "₹1,23,456.50", "1234.5", "-50" or "1.5k" into paise.
  * Returns null for empty or invalid input.
@@ -113,12 +109,6 @@ export function formatQty(qty: number): string {
   const rounded = Math.round(qty * 1000) / 1000;
   const decimals = Number.isInteger(rounded) ? 0 : rounded.toFixed(3).replace(/0+$/, '').split('.')[1].length;
   return formatIndianNumber(rounded, decimals);
-}
-
-export function sumPaise(values: Array<Paise | null | undefined>): Paise {
-  let total = 0;
-  for (const v of values) total += v ?? 0;
-  return total;
 }
 
 const ONES = [

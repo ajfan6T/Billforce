@@ -125,6 +125,7 @@ export function LoansPage() {
       {adding && q.data && (
         <NewLoanModal
           booksStartDate={q.data.booksStartDate}
+          openingLockedReason={q.data.openingLockedReason}
           onClose={() => setAdding(false)}
           onSaved={(id) => {
             setAdding(false);
@@ -136,7 +137,18 @@ export function LoansPage() {
   );
 }
 
-function NewLoanModal({ booksStartDate, onClose, onSaved }: { booksStartDate: string; onClose: () => void; onSaved: (id: number) => void }) {
+function NewLoanModal({
+  booksStartDate,
+  openingLockedReason,
+  onClose,
+  onSaved,
+}: {
+  booksStartDate: string;
+  /** Set when the first financial year is closed: older loans can no longer be brought in with an opening balance. */
+  openingLockedReason: string | null;
+  onClose: () => void;
+  onSaved: (id: number) => void;
+}) {
   const toast = useToast();
   const m = useMutation('loans.create');
   const [direction, setDirection] = useState<'taken' | 'given'>('taken');
@@ -151,7 +163,7 @@ function NewLoanModal({ booksStartDate, onClose, onSaved }: { booksStartDate: st
   const [opening, setOpening] = useState<number | null>(null);
   const older = !!startDate && startDate < booksStartDate;
   const taken = direction === 'taken';
-  const problem = !name.trim() ? 'Enter a name' : !principal ? 'Enter the loan amount' : !startDate ? 'Enter the start date' : null;
+  const problem = !name.trim() ? 'Enter a name' : !principal ? 'Enter the loan amount' : !startDate ? 'Enter the start date' : older && openingLockedReason ? 'Opening balances are closed' : null;
 
   const save = async () => {
     if (problem) return;
@@ -167,6 +179,7 @@ function NewLoanModal({ booksStartDate, onClose, onSaved }: { booksStartDate: st
         disburse: !older && record ? { date: startDate, mode: pay.mode, accountId: pay.accountId, amount: disburseAmount ?? principal! } : null,
       });
       toast.success(`Added ${l.accountName}`);
+      for (const w of l.warnings) toast.warning(w);
       onSaved(l.id);
     } catch {
       /* shown below */
@@ -220,7 +233,11 @@ function NewLoanModal({ booksStartDate, onClose, onSaved }: { booksStartDate: st
             <DateInput value={startDate} max={todayISO()} onChange={setStartDate} />
           </Field>
         </div>
-        {older ? (
+        {older && openingLockedReason ? (
+          <Alert tone="amber" title={`This loan started before your books start (${formatDate(booksStartDate)})`}>
+            {openingLockedReason}
+          </Alert>
+        ) : older ? (
           <Field
             label={`Amount still ${taken ? 'owed' : 'to be received'} on ${formatDate(booksStartDate)}`}
             hint="This loan started before you began using Billforce. Enter what was outstanding on your books start date."

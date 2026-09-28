@@ -5,6 +5,7 @@ import { Alert, Button } from '../../components/ui';
 import { DateInput, Field, FormGrid, MoneyInput, TextInput } from '../../components/forms';
 import { SettlementPicker, SupplierPicker, type SupplierOption } from '../../components/pickers';
 import { useHotkeys, useMutation } from '../../hooks';
+import { useAuth } from '../../auth';
 import { useToast } from '../../feedback';
 import { call, type ApiOutput } from '../../api';
 import { formatINR } from '../../../shared/money';
@@ -32,6 +33,9 @@ export function SupplierPaymentModal(props: Props) {
 
 function PaymentForm({ onClose, supplier: preset, payment, onSaved }: Props) {
   const toast = useToast();
+  const { can } = useAuth();
+  // Printing an edited payment whose voucher was printed before is a reprint.
+  const canPrint = !payment?.printCount || can('billing.reprint');
   const editing = !!payment;
   const today = todayISO();
   const [supplier, setSupplier] = useState<SupplierOption | null>(preset ?? null);
@@ -103,7 +107,7 @@ function PaymentForm({ onClose, supplier: preset, payment, onSaved }: Props) {
     onClose();
   };
 
-  useHotkeys({ 'ctrl+p': () => void save(true), 'ctrl+s': () => void save(false) });
+  useHotkeys({ 'ctrl+p': () => void save(canPrint), 'ctrl+s': () => void save(false) });
   const ref = REFERENCE_LABEL[settle.mode];
 
   return (
@@ -118,9 +122,11 @@ function PaymentForm({ onClose, supplier: preset, payment, onSaved }: Props) {
           <Button variant="ghost" onClick={onClose}>
             Cancel
           </Button>
-          <Button icon={<Printer size={16} />} kbd="Ctrl+P" loading={printing} disabled={!!problem || m.loading} onClick={() => void save(true)}>
-            Save &amp; print voucher
-          </Button>
+          {canPrint && (
+            <Button icon={<Printer size={16} />} kbd="Ctrl+P" loading={printing} disabled={!!problem || m.loading} onClick={() => void save(true)}>
+              Save &amp; print voucher
+            </Button>
+          )}
           <Button variant="primary" type="submit" form="supplier-payment-form" kbd="Enter" loading={m.loading && !printing} disabled={!!problem}>
             Save
           </Button>

@@ -157,3 +157,11 @@
     grid-template-columns: minmax(0, 1fr);
   }
 }
+
+/* A label whose figure is defined differently elsewhere: point at it for the explanation. */
+.db-defined {
+  text-decoration: underline dotted;
+  text-decoration-color: currentColor;
+  text-underline-offset: 3px;
+  cursor: help;
+}

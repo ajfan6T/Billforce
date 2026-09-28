@@ -3,12 +3,12 @@
  * Posting: Dr Sundry Creditors (supplier) amount + discount; Cr cash/bank amount; Cr Discount Received discount.
  */
 import type { Ctx } from '../../context';
-import { currentUserId, now } from '../../context';
+import { assertCan, currentUserId, now } from '../../context';
 import { fail } from '../../errors';
 import { listRevisions, logActivity, recordRevision, type RevisionRow } from '../../audit';
 import { nextDocNumber } from '../../numbering';
 import { getSection } from '../../settings';
-import { partyBalance, paymentAccountId, postEntry, replaceEntry, voidEntry, type EntryInput } from '../../accounting/ledger';
+import { negativeBalanceWarning, partyBalance, paymentAccountId, postEntry, replaceEntry, voidEntry, type EntryInput } from '../../accounting/ledger';
 import { renderReceiptHtml } from '../../print/receipt';
 import { amountInWords, formatINR } from '../../../shared/money';
 import { formatDate, formatTime } from '../../../shared/dates';
@@ -220,6 +220,8 @@ export function createSupplierPayment(ctx: Ctx, input: SupplierPaymentInput): Sa
   const date = resolveDocDate(ctx, input.date, { what: 'A payment' });
   const payable = 0 - partyBalance(ctx, 'supplier', supplier.id, { account: 'AP' });
   const v = normalize(ctx, input, supplier.name, payable);
+  // Before posting: the account balance does not include this payment yet.
+  const short = negativeBalanceWarning(ctx, v.accountId, v.amount, date);
   const num = nextDocNumber(ctx, 'payment', date);
   const id = ctx.db.insert('supplier_payments', {
     payment_no: num.number,
@@ -247,7 +249,7 @@ export function createSupplierPayment(ctx: Ctx, input: SupplierPaymentInput): Sa
     { entityType: 'supplier_payment', entityId: id, details: { supplierId: supplier.id, amount: v.amount, discount: v.discount, mode: v.mode, date } },
   );
   const warning = advanceWarning(supplier.name, payable, v.amount + v.discount, 'supplier');
-  return { ...saved, warnings: warning ? [warning] : [] };
+  return { ...saved, warnings: [warning, short].filter((w): w is string => !!w) };
 }
 
 export function updateSupplierPayment(ctx: Ctx, id: number, input: SupplierPaymentInput, reason?: string | null): SavedSupplierPayment {
@@ -259,6 +261,9 @@ export function updateSupplierPayment(ctx: Ctx, id: number, input: SupplierPayme
   const payable =
     0 - partyBalance(ctx, 'supplier', supplier.id, { account: 'AP' }) + (before.supplier_id === supplier.id ? before.amount + before.discount : 0);
   const v = normalize(ctx, input, supplier.name, payable);
+  // The saved payment is still in the account's balance: only the extra money going out can make it short.
+  const extra = v.amount - (before.account_id === v.accountId ? before.amount : 0);
+  const short = negativeBalanceWarning(ctx, v.accountId, extra, date);
   ctx.db.update('supplier_payments', id, {
     date,
     supplier_id: supplier.id,
@@ -288,7 +293,7 @@ export function updateSupplierPayment(ctx: Ctx, id: number, input: SupplierPayme
     { entityType: 'supplier_payment', entityId: id, details: { before: toPayment(before), after: saved, reason: reason ?? null } },
   );
   const warning = advanceWarning(supplier.name, payable, v.amount + v.discount, 'supplier');
-  return { ...saved, warnings: warning ? [warning] : [] };
+  return { ...saved, warnings: [warning, short].filter((w): w is string => !!w) };
 }
 
 export function cancelSupplierPayment(ctx: Ctx, id: number, reason: string): SupplierPayment {
@@ -374,7 +379,7 @@ export function listSupplierPayments(
 
 /* ------------------------------ Voucher printing ------------------------------ */
 
-export function paymentVoucherHtml(ctx: Ctx, id: number): string {
+export function paymentVoucherHtml(ctx: Ctx, id: number, opts: { duplicate?: boolean } = {}): string {
   const p = getSupplierPaymentDetail(ctx, id);
   const business = getSection(ctx, 'business');
   const settings = getSection(ctx, 'receipt');
@@ -398,7 +403,7 @@ export function paymentVoucherHtml(ctx: Ctx, id: number): string {
   return renderReceiptHtml(
     {
       title: 'PAYMENT VOUCHER',
-      duplicate: settings.markDuplicate && p.printCount > 0,
+      duplicate: opts.duplicate ?? (settings.markDuplicate && p.printCount > 0),
       cancelled: p.status === 'cancelled',
       meta,
       party: { label: 'Paid to', name: p.supplierName, phone: p.supplierPhone },
@@ -411,24 +416,33 @@ export function paymentVoucherHtml(ctx: Ctx, id: number): string {
   );
 }
 
-export async function printPaymentVoucher(ctx: Ctx, id: number): Promise<{ printed: boolean; message?: string }> {
+/**
+ * Same rule as bills: the first print is the original; printing again is a reprint, which needs
+ * "Reprint bills" (billing.reprint), is marked DUPLICATE (receipt setting) and prints one copy.
+ */
+export async function printPaymentVoucher(ctx: Ctx, id: number): Promise<{ printed: boolean; duplicate: boolean; message?: string }> {
   const p = getSupplierPayment(ctx, id);
+  const reprint = p.printCount > 0;
+  if (reprint) assertCan(ctx, 'billing.reprint', 'This payment voucher was already printed. You are not allowed to reprint it. Ask the owner for permission.');
   const settings = getSection(ctx, 'receipt');
-  const html = paymentVoucherHtml(ctx, id);
+  const duplicate = reprint && settings.markDuplicate;
+  const html = paymentVoucherHtml(ctx, id, { duplicate });
+  const printerName = settings.printerName?.trim() || undefined;
   const result = await ctx.platform.printHtml(html, {
-    printerName: settings.printerName || undefined,
-    silent: !!settings.printerName,
+    printerName,
+    silent: !!printerName,
     paperWidthMm: settings.paperWidth,
-    copies: settings.copies,
+    copies: reprint ? 1 : Math.max(1, settings.copies || 1),
   });
   if (result.printed) {
     ctx.db.tx(() => {
       ctx.db.run('UPDATE supplier_payments SET print_count = print_count + 1 WHERE id = ?', [id]);
-      logActivity(ctx, 'supplier_payment.print', `${p.printCount > 0 ? 'Reprinted' : 'Printed'} payment voucher ${p.paymentNo}`, {
+      logActivity(ctx, 'supplier_payment.print', `${reprint ? 'Reprinted' : 'Printed'} payment voucher ${p.paymentNo}${duplicate ? ' marked DUPLICATE' : ''}`, {
         entityType: 'supplier_payment',
         entityId: id,
+        details: { printCount: p.printCount + 1 },
       });
     });
   }
-  return result;
+  return { ...result, duplicate };
 }

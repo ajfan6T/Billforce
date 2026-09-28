@@ -29,19 +29,29 @@ const MODE_ROWS: Array<{ key: keyof typeof MODE_COLORS; row: string; label: stri
   { key: 'credit', row: 'Credit (on account)', label: 'Credit' },
 ];
 
+/** Label of the headline figure: bill totals less returns. It differs from the P&L's "Net sales" (sales less returns), hence the longer name. */
+const NET_LABEL = 'Net sales after discounts';
+const NET_TIP =
+  'Bill totals after item and bill discounts and round off, less returns and credit notes. The Profit & loss "Net sales" is sales less returns only; it shows discounts and round off under indirect expenses.';
+
 /** Tabs whose report summary only repeats the headline cards (the export keeps it). */
 const HIDE_SUMMARY: Tab[] = ['day', 'month', 'customer', 'mode'];
 
 const dataRows = (rows: ReportRow[] | undefined) => (rows ?? []).filter((r) => r.style !== 'total' && r.style !== 'section' && r.style !== 'subtotal');
 
 export function SalesInsightsPage() {
-  const [range, setRange] = useReportRange('sales.range', 'this_month');
+  // Month-wise sales run through the financial year, so the Month tab keeps its own period (This financial year
+  // until the user picks another); the other tabs share one (This month).
+  const dayRange = useReportRange('sales.range', 'this_month');
+  const monthRange = useReportRange('sales.monthRange', 'this_fy');
   const [storedTab, setStoredTab] = useStoredState<Tab>('reports.sales.tab', 'day');
   const [params, setParams] = useSearchParams();
   const urlTab = params.get('tab') as Tab | null;
   const tab: Tab = TABS.some((t) => t.key === urlTab) ? urlTab! : storedTab;
+  const [range, setRange] = tab === 'month' ? monthRange : dayRange;
   const def = TABS.find((t) => t.key === tab)!;
-  const openLink = useOpenLink();
+  // Customer rows open the customer's account on the same period.
+  const openLink = useOpenLink(range);
   const input = { from: range.from, to: range.to };
   const summary = useQuery('reports.salesSummary', input);
   const q = useQuery(def.route as 'reports.salesByDay', input);
@@ -66,11 +76,11 @@ export function SalesInsightsPage() {
         const titles = days.map((d) => `${weekdayShort(d)}, ${formatDate(d)}`);
         return (
           <>
-            <ChartHeader title="Net sales by day" note={values.length > 62 ? 'Point at the line to see a day' : 'Point at a column to see the day'} />
+            <ChartHeader title={`${NET_LABEL} by day`} note={values.length > 62 ? 'Point at the line to see a day' : 'Point at a column to see the day'} />
             {values.length > 62 ? (
-              <TrendChart labels={labels} values={values} seriesName="Net sales" tooltipTitles={titles} emptyMessage={empty} loading={q.loading} />
+              <TrendChart labels={labels} values={values} seriesName={NET_LABEL} tooltipTitles={titles} emptyMessage={empty} loading={q.loading} />
             ) : (
-              <ColumnChart labels={labels} values={values} seriesName="Net sales" tooltipTitles={titles} emptyMessage={empty} loading={q.loading} />
+              <ColumnChart labels={labels} values={values} seriesName={NET_LABEL} tooltipTitles={titles} emptyMessage={empty} loading={q.loading} />
             )}
           </>
         );
@@ -79,11 +89,11 @@ export function SalesInsightsPage() {
         const months = monthsBetween(range.from, range.to);
         return (
           <>
-            <ChartHeader title="Net sales by month" />
+            <ChartHeader title={`${NET_LABEL} by month`} />
             <ColumnChart
               labels={labels.map((l) => l.replace(/ (\d{2})(\d{2})$/, " '$2"))}
               values={values}
-              seriesName="Net sales"
+              seriesName={NET_LABEL}
               tooltipTitles={months.map((m) => monthLabel(m, true))}
               emptyMessage={empty}
               loading={q.loading}
@@ -114,7 +124,7 @@ export function SalesInsightsPage() {
         const rows = dataRows(data.report.rows).slice(0, 10);
         return (
           <>
-            <ChartHeader title="Top customers by net sales" note={rows.length ? 'Click a customer to open their account' : undefined} />
+            <ChartHeader title="Top customers by net sales after discounts" note={rows.length ? 'Click a customer to open their account' : undefined} />
             <BarList
               loading={q.loading}
               emptyMessage={empty}
@@ -160,7 +170,17 @@ export function SalesInsightsPage() {
       </div>
       <div className={summary.loading && s ? 'rp-dim' : ''}>
         <StatGrid>
-          <Stat label="Net sales" value={s ? formatINR(s.netSales) : '…'} icon={<IndianRupee size={16} />} tone="blue" hint={s ? `Gross ${formatINR(s.grossSales)}` : undefined} />
+          <Stat
+            label={
+              <span title={NET_TIP} className="rp-defined">
+                {NET_LABEL}
+              </span>
+            }
+            value={s ? formatINR(s.netSales) : '…'}
+            icon={<IndianRupee size={16} />}
+            tone="blue"
+            hint={s ? `Gross ${formatINR(s.grossSales)}` : undefined}
+          />
           <Stat label="Bills" value={s ? s.bills.toLocaleString('en-IN') : '…'} icon={<ReceiptText size={16} />} hint={s ? `${s.customers} named customer${s.customers === 1 ? '' : 's'}` : undefined} />
           <Stat label="Average bill" value={s ? formatINR(s.averageBill) : '…'} icon={<ShoppingBag size={16} />} />
           <Stat label="Discounts" value={s ? formatINR(s.discounts) : '…'} icon={<BadgePercent size={16} />} hint={s && s.grossSales ? `${((s.discounts / s.grossSales) * 100).toFixed(1)}% of gross` : undefined} />

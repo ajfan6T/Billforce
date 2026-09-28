@@ -8,7 +8,7 @@ import { useHotkeys, useQuery, useStoredState } from '../../hooks';
 import { useAuth } from '../../auth';
 import type { ApiOutput } from '../../api';
 import { formatINR } from '../../../shared/money';
-import { monthLabel } from '../../../shared/dates';
+import { formatDate, monthLabel } from '../../../shared/dates';
 import { MonthPicker, SalaryStatusBadge, currentMonth, fmtDays, listReport, salaryLabel, shiftMonth, SALARY_STATUS_LABELS } from './common';
 import { ProcessSalaryModal } from './ProcessSalaryModal';
 import { ProcessAllModal } from './ProcessAllModal';
@@ -61,6 +61,14 @@ export function SalaryPage() {
         <span title={r.daysEmployed < r.daysInMonth ? `Worked ${r.daysEmployed} of ${r.daysInMonth} days` : undefined}>
           <b>{fmtDays(r.slip?.paidDays ?? r.paidDays)}</b>
           <span className="faint"> / {r.daysInMonth}</span>
+          {!r.slip && r.noAttendance && (
+            <span
+              className="emp-sub emp-warn nowrap"
+              title={r.salaryType === 'monthly' ? 'No attendance marked this month: days not marked are paid, so this is a full month' : 'No attendance marked this month'}
+            >
+              No attendance
+            </span>
+          )}
         </span>
       ),
     },
@@ -80,7 +88,7 @@ export function SalaryPage() {
         const v = r.slip ? r.slip.advanceRecovery : r.suggestedRecovery;
         if (!v) return <span className="emp-nil">—</span>;
         return (
-          <span className="money" title={r.slip ? 'Recovered in this salary' : 'Suggested: the whole advance, up to the salary'}>
+          <span className="money" title={r.slip ? 'Recovered in this salary' : `Suggested: the advance outstanding on ${formatDate(sheet?.date)}, up to the salary`}>
             {formatINR(v)}
             {!r.slip && <span className="faint"> *</span>}
           </span>
@@ -183,7 +191,7 @@ export function SalaryPage() {
             { label: 'Due', value: sheet.totals.due, type: 'money' },
           ],
           link: (r) => (r.slip ? { kind: 'salary', id: r.slip.id } : { kind: 'employee', id: r.employeeId }),
-          notes: ['Rows not yet processed show estimated figures from attendance, with the whole advance recovered.'],
+          notes: [`Rows not yet processed show estimated figures from attendance, with the advance outstanding on ${formatDate(sheet.date)} recovered.`],
         },
       ),
     [sheet],
@@ -211,7 +219,12 @@ export function SalaryPage() {
           <Stat label="Net salary" value={formatINR(t.net)} icon={<Users size={18} />} hint={t.processed < t.employees ? 'Includes estimates for employees not yet processed' : `${t.employees} employee${t.employees === 1 ? '' : 's'}`} />
           <Stat label="Paid" value={formatINR(t.paid)} tone={t.paid ? 'green' : undefined} />
           <Stat label="Still to pay" value={formatINR(t.due)} tone={t.due ? 'red' : undefined} hint="Processed but not yet paid" />
-          <Stat label="Not processed" value={String(pending)} tone={pending ? 'amber' : undefined} hint={pending ? 'Use Process or Process all' : 'All done for this month'} />
+          <Stat
+            label="Not processed"
+            value={String(pending)}
+            tone={pending ? 'amber' : undefined}
+            hint={!pending ? 'All done for this month' : t.noAttendance ? `${t.noAttendance} with no attendance marked` : 'Use Process or Process all'}
+          />
         </StatGrid>
       )}
       {showRule ? (
@@ -223,7 +236,7 @@ export function SalaryPage() {
               <br />
               <b>Daily wages:</b> paid for each day present and each paid-leave day (a half day counts as half). Weekly offs, absent days and days not marked are not
               paid. Wage × paid days.
-              <br />* Suggested recovery is the whole advance, up to the salary. You can change it when you process.{' '}
+              <br />* Suggested recovery is the advance outstanding on the salary date, up to the salary. You can change it when you process.{' '}
               <button type="button" className="link-btn" onClick={() => setShowRule(false)}>
                 Hide
               </button>

@@ -230,3 +230,58 @@ describe('year-end closing', () => {
     expect((await t.fails('yearEnd.preview', { fyStart: '2025-04-01', transferDrawings: true })).code).toBe('FORBIDDEN');
   });
 });
+
+describe('after the first year is closed', () => {
+  it('no longer offers opening balances, with a clear reason instead of a closed-period error', async () => {
+    const { t } = await withLastYear();
+    const cash = sysId(t, 'CASH');
+    expect((await t.call('accounts.get', { id: cash })).openingLockedReason).toBeNull();
+    expect((await t.call('loans.list', {})).openingLockedReason).toBeNull();
+    await t.call('yearEnd.close', { fyStart: '2025-04-01', transferDrawings: true });
+    const reason = /Financial year 2025-26, when your books start, is closed, so opening balances can no longer be added or changed/;
+
+    const chart = await t.call('accounts.chart', {});
+    expect(chart.openingLockedReason).toMatch(reason);
+    const cashDetail = await t.call('accounts.get', { id: cash });
+    expect(cashDetail).toMatchObject({ openingBalance: 2000000 });
+    expect(cashDetail.openingLockedReason).toMatch(reason);
+    // Income / expense accounts never have an opening balance, so nothing is locked for them.
+    expect((await t.call('accounts.get', { id: acctId(t, 'Rent') })).openingLockedReason).toBeNull();
+
+    const add = await t.fails('accounts.create', { name: 'ICICI Current', groupCode: 'bank', openingBalance: { amount: 2500000, side: 'debit' } });
+    expect(add.code).toBe('VALIDATION');
+    expect(add.message).toMatch(reason);
+    expect(t.app.db.value("SELECT COUNT(*) FROM accounts WHERE name = 'ICICI Current'")).toBe(0);
+    expect((await t.call('accounts.create', { name: 'ICICI Current', groupCode: 'bank' })).openingLockedReason).toMatch(reason);
+
+    // Renaming an account that has an opening balance still works (the closed year's entry is left alone) ...
+    expect((await t.call('accounts.update', { id: cash, name: 'Galla Cash' })).name).toBe('Galla Cash');
+    // ... but changing the amount is refused.
+    const change = await t.fails('accounts.update', { id: cash, name: 'Galla Cash', openingBalance: { amount: 100, side: 'debit' } });
+    expect(change.code).toBe('VALIDATION');
+    expect(change.message).toMatch(reason);
+
+    const loanReason = /Financial year 2025-26, when your books start, is closed, so an older loan can no longer be brought in with an opening balance\. Save it with a start date from 01-04-2025/;
+    const loans = await t.call('loans.list', {});
+    expect(loans.openingLockedReason).toMatch(loanReason);
+    const old = await t.fails('loans.create', { name: 'SBI', direction: 'taken', principal: 50000000, startDate: '2024-06-01', openingOutstanding: 20000000 });
+    expect(old.code).toBe('VALIDATION');
+    expect(old.message).toMatch(loanReason);
+    expect(t.app.db.value("SELECT COUNT(*) FROM loans WHERE name = 'SBI'")).toBe(0);
+    expect(ledgerProblems(t.app)).toEqual([]);
+  });
+
+  it('shows income and expense ledgers of the new year from zero, before and after closing', async () => {
+    const { t } = await withLastYear();
+    const rent = acctId(t, 'Rent');
+    await t.call('expenses.create', { date: '2026-04-10', accountId: rent, amount: 100000, mode: 'cash' });
+    const before = await t.call('books.ledger', { accountId: rent, from: '2026-04-01', to: '2026-09-28' });
+    expect(before).toMatchObject({ opening: 0, closing: 100000 });
+    await t.call('yearEnd.close', { fyStart: '2025-04-01', transferDrawings: true });
+    const after = await t.call('books.ledger', { accountId: rent, from: '2026-04-01', to: '2026-09-28' });
+    expect(after).toMatchObject({ opening: 0, closing: 100000 });
+    // The closed year's own ledger ends at zero with the closing entry.
+    const last = await t.call('books.ledger', { accountId: rent, from: '2025-04-01', to: '2026-03-31' });
+    expect(last).toMatchObject({ opening: 0, totalIn: 3000000, totalOut: 3000000, closing: 0 });
+  });
+});

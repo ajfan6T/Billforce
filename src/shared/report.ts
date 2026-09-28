@@ -54,16 +54,3 @@ export interface ReportData {
 }
 
 export type ExportFormat = 'xlsx' | 'csv' | 'pdf';
-
-/** Build a simple report from plain objects. */
-export function simpleReport(
-  title: string,
-  subtitle: string | undefined,
-  columns: ReportColumn[],
-  records: Array<Record<string, ReportCell>>,
-  totals?: Record<string, ReportCell>,
-): ReportData {
-  const rows: ReportRow[] = records.map((cells) => ({ cells }));
-  if (totals) rows.push({ cells: totals, style: 'total' });
-  return { title, subtitle, columns, rows };
-}

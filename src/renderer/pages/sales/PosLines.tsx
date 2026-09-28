@@ -25,6 +25,7 @@ export function PosLines({
   lines,
   calc,
   canDiscount,
+  rateLocked,
   flashKey,
   badKeys,
   onChange,
@@ -38,6 +39,9 @@ export function PosLines({
   lines: PosLine[];
   calc: BillCalc;
   canDiscount: boolean;
+  /** True when the rate of this line may not be changed (list rate only). */
+  rateLocked: (l: PosLine) => boolean;
+  /** The line just added or increased (it flashes). */
   flashKey: string | null;
   /** Lines with a problem (missing rate, bad discount...). */
   badKeys: Set<string>;
@@ -131,6 +135,10 @@ export function PosLines({
                     onKeyDown={keys(l, 'rate')}
                     onFocus={() => onFocusLine(l.key)}
                     placeholder="Rate"
+                    readOnly={rateLocked(l)}
+                    tabIndex={rateLocked(l) ? -1 : undefined}
+                    title={rateLocked(l) ? 'List rate. Changing rates needs permission from the owner.' : l.rate !== null ? formatINR(l.rate) : undefined}
+                    className={rateLocked(l) ? 'locked' : ''}
                   />
                   {l.defaultRate !== null && l.rate !== null && l.defaultRate !== l.rate && (
                     <button type="button" className="sl-rate-hint" tabIndex={-1} title="Use the rate from the item list" onClick={() => onChange(l.key, { rate: l.defaultRate })}>

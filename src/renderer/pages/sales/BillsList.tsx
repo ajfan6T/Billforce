@@ -8,7 +8,7 @@ import { Badge, Button, EmptyState, ErrorBox, LinkButton, Page, PageHeader, Tool
 import { SearchInput, Select } from '../../components/forms';
 import { DataTable, type Column } from '../../components/table';
 import { DateRangePicker, ExportButtons, rangeFromPreset, type RangeValue } from '../../components/report';
-import { BILL_PAYMENT_MODE_LABELS, type BillPaymentMode } from '../../../shared/billing';
+import { BILL_PAYMENT_MODE_LABELS, billPaymentLabel, type BillPaymentMode } from '../../../shared/billing';
 import { formatINR } from '../../../shared/money';
 import { describeRange, formatDate, formatTime, todayISO } from '../../../shared/dates';
 import type { ReportData } from '../../../shared/report';
@@ -17,6 +17,8 @@ import { ModeBadge, StatusBadge } from './common';
 type Row = ApiOutput<'sales.list'>['rows'][number];
 
 const PAGE = 200;
+/** Searching by bill number, customer or item looks at every date (finding an old bill to reprint). */
+const ALL_DATES_FROM = '2000-01-01';
 
 export function BillsList() {
   const navigate = useNavigate();
@@ -31,9 +33,10 @@ export function BillsList() {
 
   useEffect(() => setLimit(PAGE), [range.from, range.to, dq, status, mode]);
 
+  const searchAll = canViewAll && !!dq.trim();
   const list = useQuery('sales.list', {
-    from: range.from,
-    to: range.to,
+    from: searchAll ? ALL_DATES_FROM : range.from,
+    to: searchAll ? (todayISO() > range.to ? todayISO() : range.to) : range.to,
     q: dq.trim() || null,
     status: status || null,
     paymentMode: mode || null,
@@ -75,7 +78,7 @@ export function BillsList() {
     { key: 'total', label: 'Total', type: 'money' },
     { key: 'paid', label: 'Paid', type: 'money' },
     { key: 'credit', label: 'Credit', type: 'money', render: (r) => (r.credit ? <span className="money" style={{ color: 'var(--warning)' }}>{formatINR(r.credit)}</span> : <span className="faint">—</span>) },
-    { key: 'paymentMode', label: 'Mode', render: (r) => <ModeBadge mode={r.paymentMode} /> },
+    { key: 'paymentMode', label: 'Mode', render: (r) => <ModeBadge mode={r.paymentMode} credit={r.credit} /> },
     { key: 'status', label: 'Status', render: (r) => <StatusBadge status={r.status} /> },
   ];
 
@@ -83,7 +86,7 @@ export function BillsList() {
     if (!data) return null;
     return {
       title: 'Bills',
-      subtitle: `${describeRange({ from: data.from, to: data.to })}${status ? ` · ${status === 'active' ? 'Active' : 'Cancelled'}` : ''}${mode ? ` · ${BILL_PAYMENT_MODE_LABELS[mode]}` : ''}${dq ? ` · "${dq}"` : ''}`,
+      subtitle: `${searchAll ? 'All dates' : describeRange({ from: data.from, to: data.to })}${status ? ` · ${status === 'active' ? 'Active' : 'Cancelled'}` : ''}${mode ? ` · ${BILL_PAYMENT_MODE_LABELS[mode]}` : ''}${dq ? ` · "${dq}"` : ''}`,
       columns: [
         { key: 'billNo', label: 'Bill no', width: 16 },
         { key: 'date', label: 'Date', type: 'date', width: 11 },
@@ -107,7 +110,7 @@ export function BillsList() {
             total: r.total,
             paid: r.paid,
             credit: r.credit,
-            mode: BILL_PAYMENT_MODE_LABELS[r.paymentMode],
+            mode: billPaymentLabel(r.paymentMode, r.credit),
             status: r.status === 'active' ? 'Active' : 'Cancelled',
           },
           style: r.status === 'cancelled' ? ('muted' as const) : undefined,
@@ -125,7 +128,7 @@ export function BillsList() {
       notes: data.hasMore ? [`Showing the first ${data.rows.length} bills. Narrow the period to export all.`] : undefined,
       landscape: true,
     };
-  }, [data, status, mode, dq]);
+  }, [data, status, mode, dq, searchAll]);
 
   return (
     <Page>
@@ -159,11 +162,16 @@ export function BillsList() {
           value={mode}
           onChange={setMode}
           aria-label="Payment mode"
-          options={[{ value: '', label: 'All payment modes' }, ...(['cash', 'upi', 'bank', 'credit', 'split'] as const).map((m) => ({ value: m, label: BILL_PAYMENT_MODE_LABELS[m] }))]}
+          options={[
+            { value: '', label: 'All payment modes' },
+            ...(['cash', 'upi', 'bank', 'credit'] as const).map((m) => ({ value: m, label: BILL_PAYMENT_MODE_LABELS[m] })),
+            { value: 'split', label: 'Split / part paid' },
+          ]}
         />
         <SearchInput value={q} onChange={setQ} placeholder="Bill no, customer, phone, item… (F3)" />
       </Toolbar>
 
+      {searchAll && <p className="small muted sl-search-all">Searching bills of all dates for “{dq.trim()}”. Clear the search to see the chosen period again.</p>}
       {list.error && <ErrorBox error={list.error} onRetry={list.reload} />}
       {data && (
         <div className="sl-list-summary">
@@ -198,7 +206,7 @@ export function BillsList() {
         </div>
       )}
 
-      <div className="card">
+      <div className="card sl-list-card">
         <DataTable<Row>
           columns={columns}
           rows={data?.rows}

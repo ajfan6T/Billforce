@@ -56,6 +56,8 @@ export function AdvanceModal({
     try {
       const a = await m.run({ employeeId: employeeId!, amount: amount!, date, mode: pay.mode, accountId: pay.accountId, remarks: remarks.trim() || null });
       toast.success(`Advance ${a.advanceNo} of ${formatINR(a.amount)} given to ${a.employeeName}`);
+      // e.g. cash going below zero: the advance is saved, but the owner should check the books.
+      for (const w of a.warnings) toast.warning(w);
       onSaved(a);
     } catch {
       /* shown below */

@@ -3,9 +3,32 @@ import type { ReportData } from '../../shared/report';
 import { cellText, columnAlign } from './format';
 import { parseISODate } from '../../shared/dates';
 
-/** Excel number format with Indian lakh / crore grouping. */
-export const INDIAN_MONEY_FORMAT = '[>=10000000]##\\,##\\,##\\,##0.00;[>=100000]##\\,##\\,##0.00;##,##0.00';
-const DRCR_FORMAT = '#,##0.00 "Dr";#,##0.00 "Cr";0.00';
+/**
+ * Number pattern with Indian grouping (12,34,567.00) for a value of this size. Excel only allows two
+ * conditions per format, which cannot cover lakh + crore for both signs, so the pattern is chosen per
+ * cell from the value: below one lakh the usual thousands pattern is identical; from one lakh up the
+ * commas are literal and exactly as many groups as the value needs are written (a literal comma with
+ * no digit before it would show).
+ */
+export function indianPattern(value: number): string {
+  const digits = Math.max(1, Math.floor(Math.abs(Math.round(value * 100) / 100)).toString().length);
+  if (digits <= 5) return '#,##0.00';
+  // Last group of three, then groups of two: 6-7 digits -> ##,##,##0 ; 8-9 -> ##,##,##,##0 ; ...
+  const pairs = Math.ceil((digits - 3) / 2);
+  return `${'##\\,'.repeat(pairs)}##0.00`;
+}
+
+/** Excel number format for an amount in rupees: Indian grouping, minus sign for negatives. */
+export function moneyFormat(value: number): string {
+  const p = indianPattern(value);
+  return `${p};-${p};0.00`;
+}
+
+/** Excel number format for a Dr/Cr balance (positive = Dr): the amount without sign, with Indian grouping. */
+export function drCrFormat(value: number): string {
+  const p = indianPattern(value);
+  return `${p} "Dr";${p} "Cr";0.00`;
+}
 
 /** Build an .xlsx workbook for a report: title rows, summary, formatted table, notes. */
 export async function reportToXlsx(report: ReportData, businessName?: string): Promise<Uint8Array> {
@@ -37,7 +60,7 @@ export async function reportToXlsx(report: ReportData, businessName?: string): P
       const cell = row.getCell(2);
       if (typeof s.value === 'number' && (s.type === 'money' || s.type === 'drcr')) {
         cell.value = s.value / 100;
-        cell.numFmt = s.type === 'drcr' ? DRCR_FORMAT : INDIAN_MONEY_FORMAT;
+        cell.numFmt = s.type === 'drcr' ? drCrFormat(s.value / 100) : moneyFormat(s.value / 100);
       } else {
         cell.value = s.value ?? '';
       }
@@ -65,7 +88,7 @@ export async function reportToXlsx(report: ReportData, businessName?: string): P
         case 'drcr':
           if (typeof v === 'number') {
             cell.value = v / 100;
-            cell.numFmt = c.type === 'drcr' ? DRCR_FORMAT : INDIAN_MONEY_FORMAT;
+            cell.numFmt = c.type === 'drcr' ? drCrFormat(v / 100) : moneyFormat(v / 100);
           } else cell.value = v;
           break;
         case 'number':

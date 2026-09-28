@@ -47,10 +47,14 @@ export interface DashboardSummary {
   balances: { cash: number; bank: number } | null;
   /** Customers owe you / you owe suppliers. */
   dues: { receivables: number; receivableCustomers: number; payables: number; payableSuppliers: number } | null;
+  /**
+   * Expenses entered this month: the same total as the Expenses page ("Total expenses") for this month.
+   * Purchases, salaries, discounts and round off are not in it; the Profit & loss shows every cost.
+   */
   expensesThisMonth: number | null;
   /** Net profit (financial reports only). */
   profit: { thisMonth: number; thisFy: number } | null;
-  /** Net sales per day for the last 30 days. */
+  /** Net sales after discounts (bill totals less returns) per day for the last 30 days. */
   trend: { dates: string[]; values: number[] } | null;
   topItems: Array<{ name: string; itemId: number | null; qty: number; unit: string | null; amount: number }> | null;
   recentBills: { bills: DashboardBill[]; todayOnly: boolean } | null;
@@ -88,13 +92,9 @@ function duesFor(ctx: Ctx, asOf: string) {
   return { receivables, receivableCustomers, payables, payableSuppliers };
 }
 
+/** Expense vouchers (not cancelled) dated in the period: the Expenses page's "Total expenses". */
 function expensesBetween(ctx: Ctx, from: string, to: string): number {
-  const nets = accountNets(ctx, { from, to, excludeClosing: true, types: ['expense'] });
-  let total = 0;
-  for (const a of accountsMeta(ctx)) {
-    if (a.groupCode === 'direct_expenses' || a.groupCode === 'indirect_expenses') total += nets.get(a.id) ?? 0;
-  }
-  return total;
+  return ctx.db.value<number>("SELECT COALESCE(SUM(amount), 0) FROM expenses WHERE status = 'active' AND date >= ? AND date <= ?", [from, to], 0);
 }
 
 function recentBills(ctx: Ctx, todayOnly: boolean, t: string): DashboardBill[] {

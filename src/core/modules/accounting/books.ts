@@ -2,12 +2,27 @@
  * Books of account, built straight from the ledger so they always agree with
  * account balances: cash book, bank & UPI book, day book, and the ledger of
  * any account or party. Cancelled (void) entries are left out.
+ *
+ * Opening balance, totals and closing balance are always worked out over the
+ * whole period. Only the rows shown on screen are split into pages; exports
+ * ask for every row (`all`).
+ *
+ * Opening-balance vouchers (dated the books start) count towards the opening
+ * balance, as in the cash flow and trial balance, not as money in or out.
+ * Income and expense accounts start every financial year at zero, like the
+ * trial balance; balance-sheet accounts and parties carry their balance forward.
+ *
+ * Speed: SQLite runs in the app's main process, so a slow book freezes
+ * everything. Each query below either walks the entries of the period (by
+ * date, looking up their lines by entry) or walks the lines of the book's
+ * accounts / party (by account or party, looking up their entry) - whichever
+ * touches fewer rows - and never both nested (that was quadratic).
  */
 import type { Ctx } from '../../context';
 import { fail } from '../../errors';
 import { getAccount } from '../../accounting/ledger';
 import { entrySourceLink } from '../../accounting/links';
-import { addDays, describeRange, formatDate } from '../../../shared/dates';
+import { addDays, describeRange, formatDate, fyOf } from '../../../shared/dates';
 import { VOUCHER_TYPE_LABELS, type PartyType, type VoucherType } from '../../../shared/constants';
 import type { ReportColumn, ReportData, ReportRow } from '../../../shared/report';
 import { inList, joinNames, voucherLabel } from './common';
@@ -37,8 +52,40 @@ const LINE_SELECT = `SELECT l.entry_id, e.date, e.voucher_type, e.voucher_no, e.
        l.account_id, a.name AS account_name, l.party_type, l.party_id, ${PARTY_NAME} AS party_name, l.debit, l.credit
   FROM journal_lines l JOIN journal_entries e ON e.id = l.entry_id JOIN accounts a ON a.id = l.account_id`;
 
-/** Most entries in one book; longer periods show a note asking for a shorter one. */
-const MAX_ENTRIES = 5000;
+/** Entries per page of a cash / bank book or ledger on screen. */
+export const BOOK_PAGE_SIZE = 2000;
+/** Vouchers per page of the day book on screen (each voucher takes several rows). */
+export const DAY_BOOK_PAGE_SIZE = 1000;
+
+export interface PageInput {
+  /** Page of rows to show (1 = first). Opening, totals and closing are always for the whole period. */
+  page?: number | null;
+  /** Every row of the period on one page (for Excel / CSV / PDF / print). */
+  all?: boolean | null;
+}
+
+export interface PageInfo {
+  page: number;
+  pageCount: number;
+  pageSize: number;
+  /** Position (1-based) of the first and last entry shown; 0 when there are none. */
+  firstShown: number;
+  lastShown: number;
+}
+
+function pageOf(total: number, input: PageInput, size: number): PageInfo & { start: number; end: number } {
+  if (input.all || total <= size) return { page: 1, pageCount: 1, pageSize: Math.max(size, total), firstShown: total ? 1 : 0, lastShown: total, start: 0, end: total };
+  const pageCount = Math.ceil(total / size);
+  const page = Math.min(Math.max(1, Math.floor(input.page ?? 1)), pageCount);
+  const start = (page - 1) * size;
+  const end = Math.min(total, start + size);
+  return { page, pageCount, pageSize: size, firstShown: start + 1, lastShown: end, start, end };
+}
+
+function pageNote(p: PageInfo, total: number, what: string): string | null {
+  if (p.pageCount <= 1) return null;
+  return `Showing ${what} ${p.firstShown.toLocaleString('en-IN')}–${p.lastShown.toLocaleString('en-IN')} of ${total.toLocaleString('en-IN')} (page ${p.page} of ${p.pageCount}). Opening balance, totals and closing balance are for the whole period.`;
+}
 
 interface EntryGroup {
   id: number;
@@ -51,17 +98,21 @@ interface EntryGroup {
   lines: LineRow[];
 }
 
-function groupByEntry(lines: LineRow[]): EntryGroup[] {
-  const out: EntryGroup[] = [];
-  let cur: EntryGroup | null = null;
-  for (const l of lines) {
-    if (!cur || cur.id !== l.entry_id) {
-      cur = { id: l.entry_id, date: l.date, voucherType: l.voucher_type, voucherNo: l.voucher_no, narration: l.narration, sourceType: l.source_type, sourceId: l.source_id, lines: [] };
-      out.push(cur);
+/** Lines of the given entries, grouped by entry in the order of `ids`. */
+function entryGroups(ctx: Ctx, ids: number[]): EntryGroup[] {
+  const byId = new Map<number, EntryGroup>();
+  for (let i = 0; i < ids.length; i += 500) {
+    const chunk = ids.slice(i, i + 500);
+    for (const l of ctx.db.all<LineRow>(`${LINE_SELECT} WHERE l.entry_id IN (${inList(chunk.length)}) ORDER BY l.entry_id, l.line_no`, chunk)) {
+      let g = byId.get(l.entry_id);
+      if (!g) {
+        g = { id: l.entry_id, date: l.date, voucherType: l.voucher_type, voucherNo: l.voucher_no, narration: l.narration, sourceType: l.source_type, sourceId: l.source_id, lines: [] };
+        byId.set(l.entry_id, g);
+      }
+      g.lines.push(l);
     }
-    cur.lines.push(l);
   }
-  return out;
+  return ids.map((id) => byId.get(id)).filter((g): g is EntryGroup => !!g);
 }
 
 function partyLabel(l: Pick<LineRow, 'account_name' | 'party_name'>): string {
@@ -81,15 +132,119 @@ function linkOf(ctx: Ctx, g: EntryGroup) {
   return entrySourceLink(ctx, { id: g.id, source_type: g.sourceType, source_id: g.sourceId });
 }
 
+/* ------------------------------ Which lines belong to a book ------------------------------ */
+
+interface Scope {
+  accountIds?: number[];
+  party?: { type: PartyType; id: number };
+}
+
+/**
+ * SQL condition on journal_lines alias `l` for the book's lines. With `byEntry`
+ * the columns get a unary + so SQLite finds the lines of each entry through the
+ * entry index instead of walking the account's whole history once per entry.
+ */
+function scopeSql(s: Scope, byEntry: boolean): { sql: string; params: unknown[] } {
+  const p = byEntry ? '+' : '';
+  const parts: string[] = [];
+  const params: unknown[] = [];
+  if (s.accountIds) {
+    if (!s.accountIds.length) return { sql: '0', params: [] };
+    parts.push(`${p}l.account_id IN (${inList(s.accountIds.length)})`);
+    params.push(...s.accountIds);
+  }
+  if (s.party) {
+    parts.push(`${p}l.party_type = ? AND ${p}l.party_id = ?`);
+    params.push(s.party.type, s.party.id);
+  }
+  return { sql: parts.join(' AND ') || '1', params };
+}
+
+/**
+ * Walk the book's lines (via the account / party index) when there are fewer
+ * of them than entries dated in [from, to]; otherwise walk those entries.
+ */
+function walkLines(ctx: Ctx, s: Scope, from: string | null, to: string): boolean {
+  if (!s.accountIds && !s.party) return false;
+  const f = scopeSql(s, false);
+  const lines = ctx.db.value<number>(`SELECT COUNT(*) FROM journal_lines l WHERE ${f.sql}`, f.params, 0);
+  const entries = from
+    ? ctx.db.value<number>('SELECT COUNT(*) FROM journal_entries WHERE date >= ? AND date <= ?', [from, to], 0)
+    : ctx.db.value<number>('SELECT COUNT(*) FROM journal_entries WHERE date <= ?', [to], 0);
+  return lines <= entries * 2;
+}
+
+/** Net (debit - credit) of the book's lines on non-void entries matching `cond` (on alias e), dated in [from, to]. */
+function scopeNet(ctx: Ctx, s: Scope, from: string | null, to: string, cond = '1', condParams: unknown[] = []): number {
+  const dates = from ? 'e.date >= ? AND e.date <= ?' : 'e.date <= ?';
+  const dateParams = from ? [from, to] : [to];
+  if (walkLines(ctx, s, from, to)) {
+    const f = scopeSql(s, false);
+    return ctx.db.value<number>(
+      `SELECT COALESCE(SUM(l.debit - l.credit), 0) FROM journal_lines l CROSS JOIN journal_entries e ON e.id = l.entry_id
+        WHERE ${f.sql} AND e.is_void = 0 AND ${dates} AND ${cond}`,
+      [...f.params, ...dateParams, ...condParams],
+      0,
+    );
+  }
+  const f = scopeSql(s, true);
+  return ctx.db.value<number>(
+    `SELECT COALESCE(SUM(l.debit - l.credit), 0) FROM journal_entries e CROSS JOIN journal_lines l ON l.entry_id = e.id
+      WHERE e.is_void = 0 AND ${dates} AND ${cond} AND ${f.sql}`,
+    [...dateParams, ...condParams, ...f.params],
+    0,
+  );
+}
+
+interface Movement {
+  id: number;
+  date: string;
+  dr: number;
+  cr: number;
+}
+
+/** Debit and credit of the book's lines per entry in the period (opening vouchers left out), in date order. */
+function movements(ctx: Ctx, s: Scope, from: string, to: string): Movement[] {
+  const entryCond = "e.is_void = 0 AND e.date >= ? AND e.date <= ? AND e.voucher_type <> 'opening'";
+  // GROUP BY date, id follows the date index, so no sorting is needed when walking entries.
+  if (walkLines(ctx, s, from, to)) {
+    const f = scopeSql(s, false);
+    return ctx.db.all<Movement>(
+      `SELECT e.id, e.date, SUM(l.debit) AS dr, SUM(l.credit) AS cr FROM journal_lines l CROSS JOIN journal_entries e ON e.id = l.entry_id
+        WHERE ${f.sql} AND ${entryCond} GROUP BY e.date, e.id ORDER BY e.date, e.id`,
+      [...f.params, from, to],
+    );
+  }
+  const f = scopeSql(s, true);
+  return ctx.db.all<Movement>(
+    `SELECT e.id, e.date, SUM(l.debit) AS dr, SUM(l.credit) AS cr FROM journal_entries e CROSS JOIN journal_lines l ON l.entry_id = e.id
+      WHERE ${entryCond} AND ${f.sql} GROUP BY e.date, e.id ORDER BY e.date, e.id`,
+    [from, to, ...f.params],
+  );
+}
+
+/**
+ * Balance of the book at the start of `from`: everything before it, plus
+ * opening-balance vouchers dated up to `to`. For income / expense accounts
+ * only this financial year counts (they start every year at zero).
+ */
+function openingBalance(ctx: Ctx, s: Scope, from: string, to: string, profitAndLoss: boolean): number {
+  const before = profitAndLoss ? scopeNet(ctx, s, fyOf(from).start, addDays(from, -1)) : scopeNet(ctx, s, null, addDays(from, -1));
+  const openingVouchers = scopeNet(ctx, s, from, to, "e.voucher_type = 'opening'");
+  return before + openingVouchers;
+}
+
 /* ------------------------------ Account books (cash / bank / ledger) ------------------------------ */
 
-interface BookOptions {
+interface BookOptions extends PageInput {
   title: string;
   from: string;
   to: string;
   /** Lines that belong to the book. */
   accountIds?: number[];
   party?: { type: PartyType; id: number };
+  /** Income / expense account: starts every financial year at zero. */
+  profitAndLoss?: boolean;
   /** Column labels for debit / credit. */
   inLabel: string;
   outLabel: string;
@@ -100,55 +255,57 @@ interface BookOptions {
   notes?: string[];
 }
 
-export interface BookResult {
+export interface BookResult extends PageInfo {
   report: ReportData;
+  from: string;
+  to: string;
   opening: number;
   totalIn: number;
   totalOut: number;
   closing: number;
+  /** Entries in the whole period (the report may show one page of them). */
   entryCount: number;
 }
 
-function bookFilter(opts: BookOptions, alias = 'l'): { sql: string; params: unknown[] } {
-  const parts: string[] = [];
-  const params: unknown[] = [];
-  if (opts.accountIds) {
-    if (!opts.accountIds.length) return { sql: '0', params: [] };
-    parts.push(`${alias}.account_id IN (${inList(opts.accountIds.length)})`);
-    params.push(...opts.accountIds);
-  }
-  if (opts.party) {
-    parts.push(`${alias}.party_type = ? AND ${alias}.party_id = ?`);
-    params.push(opts.party.type, opts.party.id);
-  }
-  return { sql: parts.join(' AND ') || '1', params };
-}
-
 function accountBook(ctx: Ctx, opts: BookOptions): BookResult {
-  const f = bookFilter(opts);
-  const opening = ctx.db.value<number>(
-    `SELECT COALESCE(SUM(l.debit - l.credit), 0) FROM journal_lines l JOIN journal_entries e ON e.id = l.entry_id
-      WHERE e.is_void = 0 AND e.date < ? AND ${f.sql}`,
-    [opts.from, ...f.params],
-    0,
+  const scope: Scope = { accountIds: opts.accountIds, party: opts.party };
+  const pl = !!opts.profitAndLoss;
+  const opening = openingBalance(ctx, scope, opts.from, opts.to, pl);
+  const moves = movements(ctx, scope, opts.from, opts.to);
+
+  // Running balance before each entry, over the whole period. Income / expense accounts restart at zero each April.
+  const before: number[] = new Array(moves.length);
+  const restarts = new Set<number>();
+  const days = new Map<string, { in: number; out: number; count: number }>();
+  let running = opening;
+  let fy = fyOf(opts.from).start;
+  let totalIn = 0;
+  let totalOut = 0;
+  moves.forEach((m, i) => {
+    if (pl && fyOf(m.date).start !== fy) {
+      fy = fyOf(m.date).start;
+      running = 0;
+      restarts.add(i);
+    }
+    before[i] = running;
+    running += m.dr - m.cr;
+    totalIn += m.dr;
+    totalOut += m.cr;
+    const d = days.get(m.date) ?? { in: 0, out: 0, count: 0 };
+    d.in += m.dr;
+    d.out += m.cr;
+    d.count++;
+    days.set(m.date, d);
+  });
+  const endFy = fyOf(opts.to).start;
+  const restartsAtEnd = pl && endFy !== fy;
+  const closing = restartsAtEnd ? 0 : running;
+
+  const p = pageOf(moves.length, opts, BOOK_PAGE_SIZE);
+  const groups = entryGroups(
+    ctx,
+    moves.slice(p.start, p.end).map((m) => m.id),
   );
-  const inner = bookFilter(opts, 'b');
-  const entryIds = ctx.db
-    .all<{ id: number }>(
-      `SELECT e.id FROM journal_entries e WHERE e.is_void = 0 AND e.date >= ? AND e.date <= ?
-          AND EXISTS (SELECT 1 FROM journal_lines b WHERE b.entry_id = e.id AND ${inner.sql})
-        ORDER BY e.date, e.id LIMIT ?`,
-      [opts.from, opts.to, ...inner.params, MAX_ENTRIES + 1],
-    )
-    .map((r) => r.id);
-  const truncated = entryIds.length > MAX_ENTRIES;
-  const ids = entryIds.slice(0, MAX_ENTRIES);
-  const lines: LineRow[] = [];
-  for (let i = 0; i < ids.length; i += 500) {
-    const chunk = ids.slice(i, i + 500);
-    lines.push(...ctx.db.all<LineRow>(`${LINE_SELECT} WHERE l.entry_id IN (${inList(chunk.length)}) ORDER BY e.date, e.id, l.line_no`, chunk));
-  }
-  const groups = groupByEntry(lines);
   const inBook = (l: LineRow) =>
     (!opts.accountIds || opts.accountIds.includes(l.account_id)) && (!opts.party || (l.party_type === opts.party.type && l.party_id === opts.party.id));
 
@@ -162,38 +319,28 @@ function accountBook(ctx: Ctx, opts: BookOptions): BookResult {
     { key: 'out', label: opts.outLabel, type: 'money', width: 14 },
     { key: 'balance', label: 'Balance', type: opts.balanceType, width: 16 },
   ];
-  const rows: ReportRow[] = [
-    { cells: { date: opts.from, voucher: null, no: null, account: null, particulars: 'Opening balance', in: null, out: null, balance: opening }, style: 'group' },
-  ];
-  let running = opening;
-  let totalIn = 0;
-  let totalOut = 0;
-  let dayIn = 0;
-  let dayOut = 0;
-  let dayCount = 0;
-  const flushDay = (date: string) => {
-    // Day totals help when a period spans several days; for a single day the closing row says it all.
-    if (opts.dayTotals && dayCount > 1 && opts.from !== opts.to) {
-      rows.push({
-        cells: { date: null, voucher: null, no: null, account: null, particulars: `Total for ${formatDate(date)}`, in: dayIn, out: dayOut, balance: running },
-        style: 'subtotal',
-      });
-    }
-    dayIn = 0;
-    dayOut = 0;
-    dayCount = 0;
-  };
-  groups.forEach((g, i) => {
+  const blank = { voucher: null, no: null, account: null };
+  const cumulative = (upTo: number) => moves.slice(0, upTo).reduce((s, m) => ({ in: s.in + m.dr, out: s.out + m.cr }), { in: 0, out: 0 });
+  const restartRow = (date: string): ReportRow => ({
+    cells: { date, ...blank, particulars: `Opening balance of financial year ${fyOf(date).name} (income and expense accounts start each year at zero)`, in: null, out: null, balance: 0 },
+    style: 'group',
+  });
+
+  const rows: ReportRow[] = [];
+  if (p.start === 0) {
+    rows.push({ cells: { date: opts.from, ...blank, particulars: 'Opening balance', in: null, out: null, balance: opening }, style: 'group' });
+  } else {
+    const c = cumulative(p.start);
+    const prev = restarts.has(p.start) ? before[p.start - 1] + moves[p.start - 1].dr - moves[p.start - 1].cr : before[p.start];
+    rows.push({ cells: { date: moves[p.start].date, ...blank, particulars: 'Brought forward from the previous page', in: c.in, out: c.out, balance: prev }, style: 'group' });
+  }
+  groups.forEach((g, gi) => {
+    const i = p.start + gi;
+    const m = moves[i];
+    if (restarts.has(i)) rows.push(restartRow(fyOf(m.date).start));
+    const bal = before[i] + m.dr - m.cr;
     const mine = g.lines.filter(inBook);
     const others = g.lines.filter((l) => !inBook(l));
-    const dr = mine.reduce((s, l) => s + l.debit, 0);
-    const cr = mine.reduce((s, l) => s + l.credit, 0);
-    running += dr - cr;
-    totalIn += dr;
-    totalOut += cr;
-    dayIn += dr;
-    dayOut += cr;
-    dayCount++;
     // Particulars: the other side of the entry; for control-account ledgers, the party on this line comes first.
     const ownParty = !opts.party ? mine.filter((l) => l.party_name).map((l) => l.party_name!) : [];
     const otherNames = others.length ? others.map(partyLabel) : mine.map((l) => l.account_name);
@@ -204,21 +351,38 @@ function accountBook(ctx: Ctx, opts: BookOptions): BookResult {
         no: g.voucherNo,
         account: opts.showAccount ? joinNames(mine.map((l) => l.account_name)) : null,
         particulars: particulars([...ownParty, ...otherNames.filter((n) => !ownParty.includes(n))], g.narration),
-        in: dr || null,
-        out: cr || null,
-        balance: running,
+        in: m.dr || null,
+        out: m.cr || null,
+        balance: bal,
       },
       link: linkOf(ctx, g),
     });
-    const next = groups[i + 1];
-    if (!next || next.date !== g.date) flushDay(g.date);
+    // Day totals (for the whole day, even when it starts on the previous page) help when a period spans several days.
+    const day = days.get(m.date)!;
+    const lastOfDay = moves[i + 1]?.date !== m.date;
+    if (opts.dayTotals && lastOfDay && day.count > 1 && opts.from !== opts.to) {
+      rows.push({ cells: { date: null, ...blank, particulars: `Total for ${formatDate(m.date)}`, in: day.in, out: day.out, balance: bal }, style: 'subtotal' });
+    }
   });
-  rows.push({
-    cells: { date: opts.to, voucher: null, no: null, account: null, particulars: 'Closing balance', in: totalIn, out: totalOut, balance: running },
-    style: 'total',
-  });
+  if (p.end < moves.length) {
+    const c = cumulative(p.end);
+    const bal = before[p.end - 1] + moves[p.end - 1].dr - moves[p.end - 1].cr;
+    rows.push({ cells: { date: moves[p.end - 1].date, ...blank, particulars: 'Carried forward to the next page', in: c.in, out: c.out, balance: bal }, style: 'subtotal' });
+  } else {
+    if (restartsAtEnd) rows.push(restartRow(endFy));
+    rows.push({ cells: { date: opts.to, ...blank, particulars: 'Closing balance', in: totalIn, out: totalOut, balance: closing }, style: 'total' });
+  }
+
   const notes = [...(opts.notes ?? [])];
-  if (truncated) notes.unshift(`Only the first ${MAX_ENTRIES} entries are shown. Choose a shorter period to see everything.`);
+  const paged = pageNote(p, moves.length, 'entries');
+  if (paged) notes.unshift(paged);
+  if (pl) {
+    notes.push(
+      fyOf(opts.from).start !== endFy
+        ? `Income and expense accounts start every financial year at zero, so the closing balance is for ${fyOf(opts.to).name} only. Earlier years' result is in Profit & loss (previous years), or in capital once the year is closed.`
+        : "Income and expense accounts start every financial year at zero. Earlier years' result is in Profit & loss (previous years), or in capital once the year is closed.",
+    );
+  }
   return {
     report: {
       title: opts.title,
@@ -229,16 +393,23 @@ function accountBook(ctx: Ctx, opts: BookOptions): BookResult {
         { label: 'Opening balance', value: opening, type: opts.balanceType },
         { label: opts.inLabel, value: totalIn, type: 'money' },
         { label: opts.outLabel, value: totalOut, type: 'money' },
-        { label: 'Closing balance', value: running, type: opts.balanceType },
+        { label: 'Closing balance', value: closing, type: opts.balanceType },
       ],
       notes,
       landscape: true,
     },
+    from: opts.from,
+    to: opts.to,
     opening,
     totalIn,
     totalOut,
-    closing: running,
-    entryCount: groups.length,
+    closing,
+    entryCount: moves.length,
+    page: p.page,
+    pageCount: p.pageCount,
+    pageSize: p.pageSize,
+    firstShown: p.firstShown,
+    lastShown: p.lastShown,
   };
 }
 
@@ -254,7 +425,13 @@ export interface AccountBalanceItem {
   closing: number;
 }
 
-function groupBook(ctx: Ctx, group: 'cash' | 'bank', input: { from: string; to: string; accountId?: number | null }) {
+export interface BookInput extends PageInput {
+  from: string;
+  to: string;
+  accountId?: number | null;
+}
+
+function groupBook(ctx: Ctx, group: 'cash' | 'bank', input: BookInput) {
   checkRange(input);
   const accounts = ctx.db.all<{ id: number; name: string; is_active: number }>(
     'SELECT id, name, is_active FROM accounts WHERE group_code = ? ORDER BY code, name COLLATE NOCASE',
@@ -270,26 +447,31 @@ function groupBook(ctx: Ctx, group: 'cash' | 'bank', input: { from: string; to: 
     ids = [acct.id];
     title = `${title} - ${acct.name}`;
   }
-  const balances = (date: string) =>
-    new Map(
-      ctx.db
-        .all<{ account_id: number; bal: number }>(
-          `SELECT l.account_id, SUM(l.debit - l.credit) AS bal FROM journal_lines l JOIN journal_entries e ON e.id = l.entry_id
-            WHERE e.is_void = 0 AND e.date <= ? AND l.account_id IN (${inList(accounts.length || 1)}) GROUP BY l.account_id`,
-          [date, ...(accounts.length ? accounts.map((a) => a.id) : [0])],
+  // Opening (same rule as the book: opening vouchers up to "to" count as opening) and closing of each account, in one pass.
+  const sums = new Map(
+    (accounts.length
+      ? ctx.db.all<{ account_id: number; opening: number; closing: number }>(
+          `SELECT l.account_id,
+                  SUM(CASE WHEN e.date < ? OR e.voucher_type = 'opening' THEN l.debit - l.credit ELSE 0 END) AS opening,
+                  SUM(l.debit - l.credit) AS closing
+             FROM journal_lines l CROSS JOIN journal_entries e ON e.id = l.entry_id
+            WHERE l.account_id IN (${inList(accounts.length)}) AND e.is_void = 0 AND e.date <= ?
+            GROUP BY l.account_id`,
+          [input.from, ...accounts.map((a) => a.id), input.to],
         )
-        .map((r) => [r.account_id, r.bal]),
-    );
-  const before = balances(addDays(input.from, -1));
-  const after = balances(input.to);
+      : []
+    ).map((r) => [r.account_id, r]),
+  );
   const list: AccountBalanceItem[] = accounts
     .filter((a) => ids.includes(a.id))
-    .filter((a) => a.is_active || before.get(a.id) || after.get(a.id))
-    .map((a) => ({ id: a.id, name: a.name, isActive: !!a.is_active, opening: before.get(a.id) ?? 0, closing: after.get(a.id) ?? 0 }));
+    .filter((a) => a.is_active || sums.get(a.id)?.opening || sums.get(a.id)?.closing)
+    .map((a) => ({ id: a.id, name: a.name, isActive: !!a.is_active, opening: sums.get(a.id)?.opening ?? 0, closing: sums.get(a.id)?.closing ?? 0 }));
   const book = accountBook(ctx, {
     title,
     from: input.from,
     to: input.to,
+    page: input.page,
+    all: input.all,
     accountIds: ids,
     inLabel: 'Receipts',
     outLabel: 'Payments',
@@ -298,14 +480,14 @@ function groupBook(ctx: Ctx, group: 'cash' | 'bank', input: { from: string; to: 
     dayTotals: true,
     notes: ['Cancelled bills and vouchers are not shown.'],
   });
-  return { ...book, accounts: list };
+  return { ...book, accountId: input.accountId ?? null, accounts: list };
 }
 
-export function cashBook(ctx: Ctx, input: { from: string; to: string; accountId?: number | null }) {
+export function cashBook(ctx: Ctx, input: BookInput) {
   return groupBook(ctx, 'cash', input);
 }
 
-export function bankBook(ctx: Ctx, input: { from: string; to: string; accountId?: number | null }) {
+export function bankBook(ctx: Ctx, input: BookInput) {
   return groupBook(ctx, 'bank', input);
 }
 
@@ -314,7 +496,7 @@ export function bankBook(ctx: Ctx, input: { from: string; to: string; accountId?
 const PARTY_TABLES: Record<PartyType, string> = { customer: 'customers', supplier: 'suppliers', employee: 'employees' };
 const PARTY_LABELS: Record<PartyType, string> = { customer: 'Customer', supplier: 'Supplier', employee: 'Employee' };
 
-export interface LedgerInput {
+export interface LedgerInput extends PageInput {
   from: string;
   to: string;
   accountId?: number | null;
@@ -352,8 +534,11 @@ export function ledger(ctx: Ctx, input: LedgerInput) {
     title: `Ledger: ${title}`,
     from: input.from,
     to: input.to,
+    page: input.page,
+    all: input.all,
     accountIds: account ? [account.id] : undefined,
     party: party ? { type: party.type, id: party.id } : undefined,
+    profitAndLoss: !party && (account?.type === 'income' || account?.type === 'expense'),
     inLabel: 'Debit',
     outLabel: 'Credit',
     balanceType: 'drcr',
@@ -364,7 +549,7 @@ export function ledger(ctx: Ctx, input: LedgerInput) {
 
 /* ------------------------------ Day book ------------------------------ */
 
-export function dayBook(ctx: Ctx, input: { from: string; to: string; voucherType?: VoucherType | null }) {
+export function dayBook(ctx: Ctx, input: { from: string; to: string; voucherType?: VoucherType | null } & PageInput) {
   checkRange(input);
   const where = ['e.is_void = 0', 'e.date >= ?', 'e.date <= ?'];
   const params: unknown[] = [input.from, input.to];
@@ -372,28 +557,36 @@ export function dayBook(ctx: Ctx, input: { from: string; to: string; voucherType
     where.push('e.voucher_type = ?');
     params.push(input.voucherType);
   }
-  const ids = ctx.db
-    .all<{ id: number }>(`SELECT e.id FROM journal_entries e WHERE ${where.join(' AND ')} ORDER BY e.date, e.id LIMIT ?`, [...params, MAX_ENTRIES + 1])
-    .map((r) => r.id);
-  const truncated = ids.length > MAX_ENTRIES;
-  const use = ids.slice(0, MAX_ENTRIES);
-  const lines: LineRow[] = [];
-  for (let i = 0; i < use.length; i += 500) {
-    const chunk = use.slice(i, i + 500);
-    lines.push(...ctx.db.all<LineRow>(`${LINE_SELECT} WHERE l.entry_id IN (${inList(chunk.length)}) ORDER BY e.date, e.id, l.line_no`, chunk));
-  }
-  const groups = groupByEntry(lines);
-  const rows: ReportRow[] = [];
-  let dayDr = 0;
-  let dayCr = 0;
-  let dayCount = 0;
+  // Every voucher of the period with its totals (for the summary and day totals); lines only for the page shown.
+  const vouchers = ctx.db.all<{ id: number; date: string; voucher_type: VoucherType; dr: number; cr: number }>(
+    `SELECT e.id, e.date, e.voucher_type, SUM(l.debit) AS dr, SUM(l.credit) AS cr
+       FROM journal_entries e CROSS JOIN journal_lines l ON l.entry_id = e.id
+      WHERE ${where.join(' AND ')} GROUP BY e.date, e.id ORDER BY e.date, e.id`,
+    params,
+  );
   let totalDr = 0;
   let totalCr = 0;
   const byType = new Map<VoucherType, number>();
-  groups.forEach((g, i) => {
+  const days = new Map<string, { dr: number; cr: number; count: number }>();
+  for (const v of vouchers) {
+    totalDr += v.dr;
+    totalCr += v.cr;
+    byType.set(v.voucher_type, (byType.get(v.voucher_type) ?? 0) + 1);
+    const d = days.get(v.date) ?? { dr: 0, cr: 0, count: 0 };
+    d.dr += v.dr;
+    d.cr += v.cr;
+    d.count++;
+    days.set(v.date, d);
+  }
+  const p = pageOf(vouchers.length, input, DAY_BOOK_PAGE_SIZE);
+  const groups = entryGroups(
+    ctx,
+    vouchers.slice(p.start, p.end).map((v) => v.id),
+  );
+  const rows: ReportRow[] = [];
+  groups.forEach((g, gi) => {
+    const i = p.start + gi;
     const link = linkOf(ctx, g);
-    const dr = g.lines.reduce((s, l) => s + l.debit, 0);
-    const cr = g.lines.reduce((s, l) => s + l.credit, 0);
     rows.push({
       cells: { date: g.date, voucher: voucherLabel(g.voucherType), no: g.voucherNo, particulars: g.narration ?? '', debit: null, credit: null },
       style: 'group',
@@ -413,26 +606,19 @@ export function dayBook(ctx: Ctx, input: { from: string; to: string; voucherType
         link,
       });
     }
-    dayDr += dr;
-    dayCr += cr;
-    dayCount++;
-    totalDr += dr;
-    totalCr += cr;
-    byType.set(g.voucherType, (byType.get(g.voucherType) ?? 0) + 1);
-    const next = groups[i + 1];
-    if (!next || next.date !== g.date) {
+    // The whole day's total, even when the day starts on the previous page.
+    if (vouchers[i + 1]?.date !== g.date) {
+      const d = days.get(g.date)!;
       rows.push({
-        cells: { date: null, voucher: null, no: null, particulars: `Total for ${formatDate(g.date)} (${dayCount} ${dayCount === 1 ? 'voucher' : 'vouchers'})`, debit: dayDr, credit: dayCr },
+        cells: { date: null, voucher: null, no: null, particulars: `Total for ${formatDate(g.date)} (${d.count} ${d.count === 1 ? 'voucher' : 'vouchers'})`, debit: d.dr, credit: d.cr },
         style: 'subtotal',
       });
-      dayDr = 0;
-      dayCr = 0;
-      dayCount = 0;
     }
   });
-  if (groups.length) rows.push({ cells: { date: null, voucher: null, no: null, particulars: 'Total', debit: totalDr, credit: totalCr }, style: 'total' });
+  if (vouchers.length && p.end === vouchers.length) rows.push({ cells: { date: null, voucher: null, no: null, particulars: 'Total', debit: totalDr, credit: totalCr }, style: 'total' });
   const notes = ['Cancelled bills and vouchers are not shown.'];
-  if (truncated) notes.unshift(`Only the first ${MAX_ENTRIES} vouchers are shown. Choose a shorter period to see everything.`);
+  const paged = pageNote(p, vouchers.length, 'vouchers');
+  if (paged) notes.unshift(paged.replace('Opening balance, totals and closing balance are', 'The totals are'));
   const report: ReportData = {
     title: input.voucherType ? `Day book - ${VOUCHER_TYPE_LABELS[input.voucherType]}` : 'Day book',
     subtitle: describeRange(input),
@@ -446,7 +632,7 @@ export function dayBook(ctx: Ctx, input: { from: string; to: string; voucherType
     ],
     rows,
     summary: [
-      { label: 'Vouchers', value: groups.length, type: 'number' },
+      { label: 'Vouchers', value: vouchers.length, type: 'number' },
       { label: 'Total debit', value: totalDr, type: 'money' },
       { label: 'Total credit', value: totalCr, type: 'money' },
     ],
@@ -455,9 +641,17 @@ export function dayBook(ctx: Ctx, input: { from: string; to: string; voucherType
   };
   return {
     report,
-    voucherCount: groups.length,
+    from: input.from,
+    to: input.to,
+    voucherType: input.voucherType ?? null,
+    voucherCount: vouchers.length,
     totalDebit: totalDr,
     totalCredit: totalCr,
     byType: [...byType.entries()].map(([type, count]) => ({ type, label: VOUCHER_TYPE_LABELS[type], count })),
+    page: p.page,
+    pageCount: p.pageCount,
+    pageSize: p.pageSize,
+    firstShown: p.firstShown,
+    lastShown: p.lastShown,
   };
 }

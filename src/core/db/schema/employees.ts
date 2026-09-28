@@ -80,6 +80,7 @@ CREATE TABLE salaries (
   status TEXT NOT NULL DEFAULT 'unpaid' CHECK (status IN ('unpaid', 'partly_paid', 'paid', 'cancelled')),
   remarks TEXT,
   journal_entry_id INTEGER REFERENCES journal_entries (id),
+  print_count INTEGER NOT NULL DEFAULT 0, -- prints after the first are marked DUPLICATE
   created_by INTEGER,
   created_at TEXT NOT NULL,
   updated_by INTEGER,

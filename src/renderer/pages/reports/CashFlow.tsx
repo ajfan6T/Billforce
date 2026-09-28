@@ -14,6 +14,7 @@ export function CashFlowPage() {
       loading={q.loading}
       error={q.error}
       onRetry={q.reload}
+      linkPeriod={range}
       filters={<DateRangePicker value={range} onChange={setRange} />}
       status={
         f && (

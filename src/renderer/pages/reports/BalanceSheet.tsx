@@ -11,6 +11,9 @@ export function BalanceSheetPage() {
   const totals = q.data?.totals;
   const today = todayISO();
   const lastFyEnd = addDays(fyOf(today).start, -1);
+  // A row opens its ledger from the start of that year up to this date, so the ledger's closing balance is the figure shown.
+  // (Shown as "This financial year" when the date is today.)
+  const linkPeriod = { from: fyOf(asOf).start, to: asOf, preset: 'this_fy' as const };
   return (
     <ReportLayout
       title="Balance sheet"
@@ -18,6 +21,7 @@ export function BalanceSheetPage() {
       loading={q.loading}
       error={q.error}
       onRetry={q.reload}
+      linkPeriod={linkPeriod}
       filters={
         <>
           <AsOnPicker value={asOf} onChange={setAsOf} />

@@ -260,3 +260,12 @@
 .list-card .table tfoot td {
   white-space: nowrap;
 }
+
+/* "Opening + Billed − Payments − Returns = Amount due" under the customer's cards */
+.balance-sum {
+  margin: -6px 0 16px;
+  line-height: 1.6;
+}
+.balance-sum b {
+  color: var(--text);
+}

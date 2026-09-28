@@ -319,3 +319,39 @@ describe('purchase bills', () => {
     expect(ledgerProblems(t.app)).toEqual([]);
   });
 });
+
+describe('review fixes: purchases paid now', () => {
+  it('warns when paying for a purchase would take cash or bank below zero', async () => {
+    const t = await createTestApp({ openingCash: 100000 });
+    const s = await t.call('suppliers.create', { name: 'Gupta Traders' });
+    const items = (rate: number) => [{ description: 'Sugar 50kg bag', qty: 1, unit: 'bag', rate }];
+    const ok = await t.call('purchases.create', { supplierId: s.id, items: items(60000), roundOff: false, payments: [{ mode: 'cash', amount: 60000 }] });
+    expect(ok.warnings).toEqual([]);
+    // Two payments from the same account are added up.
+    const split = await t.call('purchases.create', {
+      supplierId: s.id,
+      items: items(70000),
+      roundOff: false,
+      payments: [
+        { mode: 'cash', amount: 30000 },
+        { mode: 'cash', amount: 30000 },
+        { mode: 'upi', amount: 10000 },
+      ],
+    });
+    expect(split.warnings).toEqual([
+      'Cash in Hand will be short by ₹200.00 after this payment. Check that all money received has been entered.',
+      'UPI Account will be short by ₹100.00 after this payment. Check that all money received has been entered.',
+    ]);
+    // On credit: nothing goes out, no warning.
+    expect((await t.call('purchases.create', { supplierId: s.id, items: items(900000), roundOff: false })).warnings).toEqual([]);
+
+    // Editing keeps the saved payment in mind.
+    await t.call('purchases.cancel', { id: split.id, reason: 'test' });
+    let e = await t.call('purchases.update', { id: ok.id, supplierId: s.id, items: items(90000), roundOff: false, payments: [{ mode: 'cash', amount: 90000 }] });
+    expect(e.warnings).toEqual([]);
+    e = await t.call('purchases.update', { id: ok.id, supplierId: s.id, items: items(150000), roundOff: false, payments: [{ mode: 'cash', amount: 150000 }] });
+    expect(e.warnings).toEqual(['Cash in Hand will be short by ₹500.00 after this payment. Check that all money received has been entered.']);
+    expect(systemBalance(t.app, 'CASH')).toBe(-50000);
+    expect(ledgerProblems(t.app)).toEqual([]);
+  });
+});

@@ -18,6 +18,8 @@ const zReason = z.string({ error: 'Enter the reason' }).trim().min(1, 'Enter the
 const zOpening = z.object({ amount: zPaise, side: z.enum(['debit', 'credit']) });
 const zVoucherType = z.enum(VOUCHER_TYPES);
 const zPartyType = z.enum(['customer', 'supplier', 'employee']);
+/** Period of a book, the page of rows to show, or every row (for exports). */
+const zBookRange = zRange.extend({ page: z.number().int().min(1).nullish(), all: z.boolean().nullish() });
 
 const zAccountName = z.string({ error: 'Enter the account name' }).trim().min(1, 'Enter the account name').max(80, 'Name is too long (max 80 characters)');
 const zCode = z.string().trim().max(20, 'Code is too long (max 20 characters)').nullish();
@@ -166,6 +168,8 @@ export const accountingRoutes = {
       accountId: zOptAccountId,
       status: z.enum(['all', 'active', 'cancelled']).optional(),
       limit: z.number().int().min(1).max(5000).optional(),
+      page: z.number().int().min(1).nullish(),
+      all: z.boolean().nullish(),
     }),
     handler: (ctx, input) => journals.listEntries(ctx, input),
   }),
@@ -238,12 +242,12 @@ export const accountingRoutes = {
   }),
 
   /* ------------------------------ Books ------------------------------ */
-  'books.cashBook': route({ access: BOOKS, input: zRange.extend({ accountId: zOptAccountId }), handler: (ctx, input) => books.cashBook(ctx, input) }),
-  'books.bankBook': route({ access: BOOKS, input: zRange.extend({ accountId: zOptAccountId }), handler: (ctx, input) => books.bankBook(ctx, input) }),
-  'books.dayBook': route({ access: BOOKS, input: zRange.extend({ voucherType: zVoucherType.nullish() }), handler: (ctx, input) => books.dayBook(ctx, input) }),
+  'books.cashBook': route({ access: BOOKS, input: zBookRange.extend({ accountId: zOptAccountId }), handler: (ctx, input) => books.cashBook(ctx, input) }),
+  'books.bankBook': route({ access: BOOKS, input: zBookRange.extend({ accountId: zOptAccountId }), handler: (ctx, input) => books.bankBook(ctx, input) }),
+  'books.dayBook': route({ access: BOOKS, input: zBookRange.extend({ voucherType: zVoucherType.nullish() }), handler: (ctx, input) => books.dayBook(ctx, input) }),
   'books.ledger': route({
     access: BOOKS,
-    input: zRange.extend({ accountId: zOptAccountId, partyType: zPartyType.nullish(), partyId: z.number().int().positive().nullish() }),
+    input: zBookRange.extend({ accountId: zOptAccountId, partyType: zPartyType.nullish(), partyId: z.number().int().positive().nullish() }),
     handler: (ctx, input) => books.ledger(ctx, input),
   }),
 

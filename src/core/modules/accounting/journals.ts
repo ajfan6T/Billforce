@@ -16,10 +16,13 @@ import { nextDocNumber } from '../../numbering';
 import { getEntry, postEntry, replaceEntry, voidEntry, type EntryLineInput } from '../../accounting/ledger';
 import { entrySourceLink, type DocLink } from '../../accounting/links';
 import { formatINR } from '../../../shared/money';
+import { fyOf } from '../../../shared/dates';
 import type { PartyType, VoucherType } from '../../../shared/constants';
 import {
   activeAccount,
+  assertClosedAccountsUntouched,
   assertEditableEntry,
+  assertLoanOpen,
   assertSameYear,
   entryLines,
   entrySnapshot,
@@ -28,6 +31,7 @@ import {
   joinNames,
   lockReason,
   closedYearReason,
+  outflowWarnings,
   resolveVoucherDate,
   SOURCE_LABELS,
   userName,
@@ -91,9 +95,15 @@ export interface ManualPosting {
 
 /**
  * Post a voucher entered from the Accounts pages: takes the next "JV" number,
- * posts the entry, records revision 1 and logs the activity.
+ * posts the entry, records revision 1 and logs the activity. Returns the entry
+ * id and warnings when money paid out would leave a cash / bank account below zero.
  */
-export function postManualVoucher(ctx: Ctx, p: ManualPosting, activity: { action: string; summary: (voucherNo: string) => string; entityType?: string; entityId?: number }): number {
+export function postManualVoucher(
+  ctx: Ctx,
+  p: ManualPosting,
+  activity: { action: string; summary: (voucherNo: string) => string; entityType?: string; entityId?: number },
+): { id: number; warnings: string[] } {
+  const warnings = outflowWarnings(ctx, p.lines, p.date);
   const no = nextDocNumber(ctx, 'journal', p.date);
   const id = postEntry(ctx, {
     date: p.date,
@@ -110,28 +120,32 @@ export function postManualVoucher(ctx: Ctx, p: ManualPosting, activity: { action
     entityId: activity.entityId ?? id,
     details: { entryId: id, voucherNo: no.number },
   });
-  return id;
+  return { id, warnings };
 }
 
 function entryTotal(lines: EntryLineInput[]): number {
   return lines.reduce((s, l) => s + (l.debit ?? 0), 0);
 }
 
-export function createJournal(ctx: Ctx, input: JournalInput): EntryDetail {
+/** An entry just saved, with warnings to show (e.g. cash going below zero). */
+export type SavedEntry = EntryDetail & { warnings: string[] };
+
+export function createJournal(ctx: Ctx, input: JournalInput): SavedEntry {
   const date = resolveVoucherDate(ctx, input.date, 'A journal entry');
   const narration = input.narration.trim();
   if (!narration) throw fail.validation('Write a narration: what is this entry for?', { narration: 'Enter a narration' });
   const lines = toLedgerLines(ctx, input.lines);
-  const id = postManualVoucher(
+  const { id, warnings } = postManualVoucher(
     ctx,
     { date, voucherType: 'journal', narration, lines },
     { action: 'journal.create', summary: (no) => `Entered journal ${no} for ${formatINR(entryTotal(lines))}: ${narration}` },
   );
-  return getEntryDetail(ctx, id);
+  return { ...getEntryDetail(ctx, id), warnings };
 }
 
-export function updateJournal(ctx: Ctx, entryId: number, input: JournalInput & { reason?: string | null }): EntryDetail {
+export function updateJournal(ctx: Ctx, entryId: number, input: JournalInput & { reason?: string | null }): SavedEntry {
   const e = assertEditableEntry(ctx, entryId);
+  assertLoanOpen(ctx, e, 'change');
   const before = entrySnapshot(ctx, entryId);
   const date = resolveVoucherDate(ctx, input.date || e.date, 'A journal entry');
   assertSameYear(e.date, date, `Voucher ${e.voucher_no ?? '#' + e.id}`);
@@ -146,6 +160,8 @@ export function updateJournal(ctx: Ctx, entryId: number, input: JournalInput & {
       throw fail.validation(`This is a loan entry, so it must keep a line on "${acctName}".`, { lines: 'Keep the loan account' });
     }
   }
+  assertClosedAccountsUntouched(ctx, entryId, lines, 'change');
+  const warnings = outflowWarnings(ctx, lines, date, entryId);
   replaceEntry(ctx, entryId, {
     date,
     voucherType: e.voucher_type,
@@ -167,7 +183,7 @@ export function updateJournal(ctx: Ctx, entryId: number, input: JournalInput & {
     `Edited ${voucherLabel(e.voucher_type).toLowerCase()} ${e.voucher_no ?? '#' + e.id}${changes.length ? ': ' + changes.join(', ') : ''}${reason ? ` (${reason})` : ''}`,
     { entityType: 'journal', entityId: entryId, details: { before, after, reason } },
   );
-  return getEntryDetail(ctx, entryId);
+  return { ...getEntryDetail(ctx, entryId), warnings };
 }
 
 /** Cancel a voucher entered from the Accounts pages (journal, capital, drawings, transfer, loan transaction). */
@@ -175,6 +191,7 @@ export function cancelEntry(ctx: Ctx, entryId: number, reason: string): EntryDet
   const e = assertEditableEntry(ctx, entryId);
   const why = reason.trim();
   if (!why) throw fail.validation('Enter the reason for cancelling', { reason: 'Enter a reason' });
+  assertClosedAccountsUntouched(ctx, entryId, null, 'cancel');
   voidEntry(ctx, entryId, why);
   const snap = entrySnapshot(ctx, entryId);
   recordRevision(ctx, 'journal', entryId, 'cancelled', snap, why);
@@ -223,9 +240,12 @@ export interface EntryDetail {
 export function getEntryDetail(ctx: Ctx, entryId: number): EntryDetail {
   const e = getEntry(ctx, entryId);
   const lines = entryLines(ctx, entryId);
-  const reason = lockReason(e) ?? closedYearReason(ctx, e.date);
+  const loanRow =
+    e.source_type === 'loan' && e.source_id ? (ctx.db.get<{ id: number; name: string; is_active: number }>('SELECT id, name, is_active FROM loans WHERE id = ?', [e.source_id]) ?? null) : null;
+  const loan = loanRow ? { id: loanRow.id, name: loanRow.name } : null;
+  const loanClosed = loanRow && !loanRow.is_active ? `The loan "${loanRow.name}" is closed. Re-open it from Accounts > Loans to change this entry.` : null;
+  const reason = lockReason(e) ?? closedYearReason(ctx, e.date) ?? loanClosed;
   const link = entrySourceLink(ctx, e);
-  const loan = e.source_type === 'loan' && e.source_id ? (ctx.db.get<{ id: number; name: string }>('SELECT id, name FROM loans WHERE id = ?', [e.source_id]) ?? null) : null;
   const ownRevisions = e.source_type === 'manual' || e.source_type === 'loan';
   return {
     id: e.id,
@@ -282,10 +302,31 @@ export interface EntryListQuery {
   q?: string | null;
   accountId?: number | null;
   status?: 'all' | 'active' | 'cancelled';
+  /** Rows per page (default 500). */
   limit?: number;
+  /** Page of rows (1 = the latest entries). */
+  page?: number | null;
+  /** Every matching entry on one page (for exports). */
+  all?: boolean | null;
 }
 
-export function listEntries(ctx: Ctx, query: EntryListQuery): { rows: EntryListRow[]; total: number; truncated: boolean; totalAmount: number } {
+export interface EntryListResult {
+  rows: EntryListRow[];
+  /** Entries matching the filters in the whole period. */
+  total: number;
+  /** True when only some of them are on this page. */
+  truncated: boolean;
+  /** Total amount of the active matching entries in the whole period. */
+  totalAmount: number;
+  page: number;
+  pageCount: number;
+  pageSize: number;
+  /** Position (1-based, newest first) of the first and last row shown; 0 when none. */
+  firstShown: number;
+  lastShown: number;
+}
+
+export function listEntries(ctx: Ctx, query: EntryListQuery): EntryListResult {
   const where = ['e.date >= ?', 'e.date <= ?'];
   const params: unknown[] = [query.from, query.to];
   if (query.voucherType) {
@@ -293,7 +334,8 @@ export function listEntries(ctx: Ctx, query: EntryListQuery): { rows: EntryListR
     params.push(query.voucherType);
   }
   if (query.accountId) {
-    where.push('EXISTS (SELECT 1 FROM journal_lines x WHERE x.entry_id = e.id AND x.account_id = ?)');
+    // "+" makes SQLite look up each entry's own lines instead of walking the account's whole history per entry.
+    where.push('EXISTS (SELECT 1 FROM journal_lines x WHERE x.entry_id = e.id AND +x.account_id = ?)');
     params.push(query.accountId);
   }
   const status = query.status ?? 'all';
@@ -320,14 +362,17 @@ export function listEntries(ctx: Ctx, query: EntryListQuery): { rows: EntryListR
     }
     where.push(`(${any.join(' OR ')})`);
   }
-  const limit = query.limit ?? 500;
   const whereSql = where.join(' AND ');
   const total = ctx.db.value<number>(`SELECT COUNT(*) FROM journal_entries e WHERE ${whereSql}`, params, 0);
   const totalAmount = ctx.db.value<number>(
-    `SELECT COALESCE(SUM(l.debit), 0) FROM journal_lines l JOIN journal_entries e ON e.id = l.entry_id WHERE ${whereSql} AND e.is_void = 0`,
+    `SELECT COALESCE(SUM(l.debit), 0) FROM journal_entries e CROSS JOIN journal_lines l ON l.entry_id = e.id WHERE ${whereSql} AND e.is_void = 0`,
     params,
     0,
   );
+  const size = query.all ? Math.max(total, 1) : (query.limit ?? 500);
+  const pageCount = Math.max(1, Math.ceil(total / size));
+  const page = Math.min(Math.max(1, Math.floor(query.page ?? 1)), pageCount);
+  const offset = (page - 1) * size;
   const entries = ctx.db.all<{
     id: number;
     date: string;
@@ -339,8 +384,8 @@ export function listEntries(ctx: Ctx, query: EntryListQuery): { rows: EntryListR
     is_void: number;
   }>(
     `SELECT e.id, e.date, e.voucher_type, e.voucher_no, e.narration, e.source_type, e.source_id, e.is_void
-       FROM journal_entries e WHERE ${whereSql} ORDER BY e.date DESC, e.id DESC LIMIT ?`,
-    [...params, limit],
+       FROM journal_entries e WHERE ${whereSql} ORDER BY e.date DESC, e.id DESC LIMIT ? OFFSET ?`,
+    [...params, size, offset],
   );
   const lines = new Map<number, Array<{ account_name: string; party_name: string | null; debit: number; credit: number }>>();
   if (entries.length) {
@@ -363,6 +408,13 @@ export function listEntries(ctx: Ctx, query: EntryListQuery): { rows: EntryListR
       }
     }
   }
+  // One closed-year check per financial year, not per row.
+  const closedYears = new Map<string, boolean>();
+  const inClosedYear = (date: string) => {
+    const fy = fyOf(date).start;
+    if (!closedYears.has(fy)) closedYears.set(fy, !!closedYearReason(ctx, date));
+    return closedYears.get(fy)!;
+  };
   const rows = entries.map((e) => {
     const ls = lines.get(e.id) ?? [];
     return {
@@ -379,8 +431,18 @@ export function listEntries(ctx: Ctx, query: EntryListQuery): { rows: EntryListR
       sourceLabel: SOURCE_LABELS[e.source_type ?? ''] ?? voucherLabel(e.voucher_type),
       link: entrySourceLink(ctx, e),
       isVoid: !!e.is_void,
-      editable: !lockReason(e) && !closedYearReason(ctx, e.date),
+      editable: !lockReason(e) && !inClosedYear(e.date),
     };
   });
-  return { rows, total, truncated: total > rows.length, totalAmount };
+  return {
+    rows,
+    total,
+    truncated: total > rows.length,
+    totalAmount,
+    page,
+    pageCount,
+    pageSize: size,
+    firstShown: rows.length ? offset + 1 : 0,
+    lastShown: offset + rows.length,
+  };
 }

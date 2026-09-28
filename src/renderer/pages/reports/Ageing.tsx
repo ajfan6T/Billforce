@@ -3,7 +3,7 @@ import { Button } from '../../components/ui';
 import { ChartHeader, ORDINAL_BLUES, ShareBar } from '../../components/charts';
 import { useQuery } from '../../hooks';
 import { formatINR } from '../../../shared/money';
-import { todayISO } from '../../../shared/dates';
+import { fyOf, todayISO } from '../../../shared/dates';
 import { ReportLayout, useAsOnDate } from './common';
 
 const BUCKETS = [
@@ -19,6 +19,9 @@ function AgeingPage({ kind }: { kind: 'receivables' | 'payables' }) {
   const totals = q.data?.totals;
   const today = todayISO();
   const who = kind === 'receivables' ? 'customers' : 'suppliers';
+  // A row opens the party's account up to this date, so its closing balance is the balance shown.
+  // (Shown as "This financial year" when the date is today.)
+  const linkPeriod = { from: fyOf(asOf).start, to: asOf, preset: 'this_fy' as const };
   return (
     <ReportLayout
       title={kind === 'receivables' ? 'Receivables ageing' : 'Payables ageing'}
@@ -27,6 +30,7 @@ function AgeingPage({ kind }: { kind: 'receivables' | 'payables' }) {
       loading={q.loading}
       error={q.error}
       onRetry={q.reload}
+      linkPeriod={linkPeriod}
       wide
       filters={
         <>

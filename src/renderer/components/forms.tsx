@@ -2,6 +2,7 @@ import {
   forwardRef,
   useEffect,
   useId,
+  useLayoutEffect,
   useRef,
   useState,
   type InputHTMLAttributes,
@@ -159,6 +160,41 @@ export function SegmentedControl<V extends string>({
 
 /* ------------------------ Money / quantity / date ------------------------ */
 
+function assignRef<T>(ref: React.ForwardedRef<T>, value: T | null) {
+  if (typeof ref === 'function') ref(value);
+  else if (ref) ref.current = value;
+}
+
+/**
+ * Select a number box's text on focus so that typing replaces it, without ever
+ * swallowing or appending keystrokes. The select happens synchronously right
+ * after the focus render: MoneyInput changes its text on focus ("2,100.00" ->
+ * "2100"), which moves the caret to the end, and keys typed before a deferred
+ * select() would be appended to the old value (a ₹2,100 rate typed as 2150.50
+ * became ₹2,10,02,150.50). A deferred select() still runs after a mouse click
+ * has placed the caret, but only while nothing has been typed.
+ */
+function useSelectOnFocus(focused: boolean) {
+  const el = useRef<HTMLInputElement | null>(null);
+  const typed = useRef(false);
+  useLayoutEffect(() => {
+    const node = el.current;
+    if (focused && node && !typed.current && document.activeElement === node) node.select();
+  }, [focused]);
+  return {
+    el,
+    focused(node: HTMLInputElement) {
+      typed.current = false;
+      setTimeout(() => {
+        if (!typed.current && document.activeElement === node) node.select();
+      }, 0);
+    },
+    typedNow() {
+      typed.current = true;
+    },
+  };
+}
+
 function paiseToEditText(p: number | null | undefined): string {
   if (p === null || p === undefined) return '';
   const r = p / 100;
@@ -184,6 +220,7 @@ export const MoneyInput = forwardRef<HTMLInputElement, MoneyInputProps>(function
 ) {
   const [focused, setFocused] = useState(false);
   const [text, setText] = useState(paiseToEditText(value));
+  const sel = useSelectOnFocus(focused);
   useEffect(() => {
     if (!focused) setText(paiseToEditText(value));
   }, [value, focused]);
@@ -192,17 +229,17 @@ export const MoneyInput = forwardRef<HTMLInputElement, MoneyInputProps>(function
     <div className={`input-adorn ${className}`}>
       {symbol && <span className="adorn">₹</span>}
       <input
-        ref={ref}
+        ref={(node) => {
+          sel.el.current = node;
+          assignRef(ref, node);
+        }}
         className="input num"
         inputMode="decimal"
         value={display}
         onFocus={(e) => {
           setFocused(true);
-          const editText = paiseToEditText(value);
-          setText(editText);
-          const el = e.target;
-          // select() also focuses in Chromium: skip it if the user already moved on or started typing.
-          setTimeout(() => document.activeElement === el && el.value === editText && el.select(), 0);
+          setText(paiseToEditText(value));
+          sel.focused(e.target);
           onFocus?.(e);
         }}
         onBlur={(e) => {
@@ -210,6 +247,7 @@ export const MoneyInput = forwardRef<HTMLInputElement, MoneyInputProps>(function
           onBlur?.(e);
         }}
         onChange={(e) => {
+          sel.typedNow();
           const t = e.target.value;
           setText(t);
           const p = parseMoney(t);
@@ -236,21 +274,22 @@ export const NumberInput = forwardRef<HTMLInputElement, NumberInputProps>(functi
 ) {
   const [focused, setFocused] = useState(false);
   const [text, setText] = useState(value === null || value === undefined ? '' : String(value));
+  const sel = useSelectOnFocus(focused);
   useEffect(() => {
     if (!focused) setText(value === null || value === undefined ? '' : String(value));
   }, [value, focused]);
   return (
     <input
-      ref={ref}
+      ref={(node) => {
+        sel.el.current = node;
+        assignRef(ref, node);
+      }}
       className={`input num ${className}`}
       inputMode="decimal"
       value={text}
       onFocus={(e) => {
         setFocused(true);
-        const el = e.target;
-        const before = el.value;
-        // select() also focuses in Chromium: skip it if the user already moved on or started typing.
-        setTimeout(() => document.activeElement === el && el.value === before && el.select(), 0);
+        sel.focused(e.target);
         onFocus?.(e);
       }}
       onBlur={(e) => {
@@ -258,6 +297,7 @@ export const NumberInput = forwardRef<HTMLInputElement, NumberInputProps>(functi
         onBlur?.(e);
       }}
       onChange={(e) => {
+        sel.typedNow();
         const t = e.target.value.replace(/,/g, '');
         const re = new RegExp(`^\\d*${decimals > 0 ? `(\\.\\d{0,${decimals}})?` : ''}$`);
         if (!re.test(t)) return;

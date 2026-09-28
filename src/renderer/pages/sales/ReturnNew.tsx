@@ -8,8 +8,8 @@ import { useToast, useUnsavedWarning } from '../../feedback';
 import { Alert, Button, Card, ErrorBox, Loading, Page, PageHeader, Tabs } from '../../components/ui';
 import { Combobox, DateInput, Field, MoneyInput, NumberInput, TextInput } from '../../components/forms';
 import { CustomerPicker, PaymentModePicker, type CustomerOption, type PaymentChoice } from '../../components/pickers';
-import { roundQty } from '../../../shared/billing';
-import { formatINR, formatQty, lineAmount, roundOffAdjustment } from '../../../shared/money';
+import { returnLineAmount, returnNoteTotal } from '../../../shared/billing';
+import { formatINR, formatQty } from '../../../shared/money';
 import { formatDate } from '../../../shared/dates';
 import { ModeBadge, qtyUnit, usePrintDoc } from './common';
 
@@ -26,35 +26,31 @@ interface Pick {
   rate: number | null;
 }
 
-/** Refund amount of one line, exactly as the server computes it. */
-function lineRefund(l: RLine, qty: number, rate: number): number {
-  let amount = lineAmount(qty, rate);
-  if (roundQty(qty) === l.returnable && rate === l.netRate) {
-    const left = l.netAmount - l.returnedAmount;
-    if (left > 0 && Math.abs(left - amount) <= Math.ceil(l.qtyBilled) + 1) amount = left;
-  }
-  return amount;
-}
-
 export function ReturnNew() {
   const [params] = useSearchParams();
+  const { can } = useAuth();
   const initialBill = Number(params.get('billId')) || null;
-  const [tab, setTab] = useState(params.get('kind') === 'adjustment' ? 'note' : 'goods');
+  // Goods returns need "returns.create"; credit notes without goods need "returns.adjust".
+  const canGoods = can('returns.create');
+  const canNote = can('returns.adjust');
+  const [tab, setTab] = useState(!canGoods || (canNote && params.get('kind') === 'adjustment' && !initialBill) ? 'note' : 'goods');
   const cfg = useQuery('sales.posConfig', undefined);
   if (cfg.error) return <Page><ErrorBox error={cfg.error} onRetry={cfg.reload} /></Page>;
   if (!cfg.data) return <Loading />;
+  const tabs = [
+    ...(canGoods ? [{ key: 'goods', label: 'Goods returned' }] : []),
+    ...(canNote ? [{ key: 'note', label: 'Credit note (no goods)' }] : []),
+  ];
+  const show = tab === 'note' && canNote ? 'note' : canGoods ? 'goods' : 'note';
   return (
     <Page>
-      <PageHeader title="New return / credit note" back="/sales/returns" subtitle="Take back goods against a bill, or give a customer credit without goods." />
-      <Tabs
-        value={tab}
-        onChange={setTab}
-        tabs={[
-          { key: 'goods', label: 'Goods returned' },
-          { key: 'note', label: 'Credit note (no goods)' },
-        ]}
+      <PageHeader
+        title={canNote && canGoods ? 'New return / credit note' : canNote ? 'New credit note' : 'New sales return'}
+        back="/sales/returns"
+        subtitle={canNote && canGoods ? 'Take back goods against a bill, or give a customer credit without goods.' : canNote ? 'Give a customer credit without goods.' : 'Take back goods against a bill.'}
       />
-      {tab === 'goods' ? <GoodsReturn cfg={cfg.data} initialBillId={initialBill} /> : <CreditNoteForm cfg={cfg.data} />}
+      {tabs.length > 1 && <Tabs value={show} onChange={setTab} tabs={tabs} />}
+      {show === 'goods' ? <GoodsReturn cfg={cfg.data} initialBillId={initialBill} /> : <CreditNoteForm cfg={cfg.data} />}
     </Page>
   );
 }
@@ -74,7 +70,8 @@ function GoodsReturn({ cfg, initialBillId }: { cfg: ApiOutput<'sales.posConfig'>
   const [picks, setPicks] = useState<Record<number, Pick>>({});
   const [refund, setRefund] = useState<PaymentChoice>({ mode: 'cash', accountId: null });
   const [reason, setReason] = useState('');
-  const [date, setDate] = useState(cfg.today);
+  // Dated today when saved unless the user picks a date.
+  const [date, setDate] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -90,9 +87,15 @@ function GoodsReturn({ cfg, initialBillId }: { cfg: ApiOutput<'sales.posConfig'>
     () => (data ? data.lines.filter((l) => picks[l.billItemId]?.on).map((l) => ({ l, p: picks[l.billItemId] })) : []),
     [data, picks],
   );
-  const subtotal = chosen.reduce((s, { l, p }) => s + (p.qty && p.rate !== null ? lineRefund(l, p.qty, p.rate) : 0), 0);
-  const roundOff = cfg.roundOff && subtotal > 0 ? roundOffAdjustment(subtotal) : 0;
-  const total = subtotal + roundOff;
+  // Exactly what the server will save: capped at what was paid, rounded on the bill's running total.
+  const subtotal = chosen.reduce((s, { l, p }) => s + (p.qty && p.rate !== null ? returnLineAmount(l, p.qty, p.rate) : 0), 0);
+  const total =
+    data && subtotal > 0
+      ? returnNoteTotal({ billTotal: data.bill.total, returnedTotal: data.returnedTotal, returnedValue: data.returnedValue, value: subtotal, roundOff: data.roundOff })
+      : 0;
+  const roundOff = subtotal > 0 ? total - subtotal : 0;
+  const moneyMode = refund.mode !== 'credit';
+  const overMoney = !!data && moneyMode && total > data.moneyRefundable;
   useUnsavedWarning(chosen.length > 0);
 
   const toggle = (l: RLine, on: boolean) =>
@@ -107,9 +110,16 @@ function GoodsReturn({ cfg, initialBillId }: { cfg: ApiOutput<'sales.posConfig'>
       if (!p.qty || p.qty <= 0) return `Enter the quantity of "${l.itemName}".`;
       if (p.qty > l.returnable + 1e-9) return `Only ${qtyUnit(l.returnable, l.unit)} of "${l.itemName}" can be returned.`;
       if (p.rate === null) return `Enter the refund rate of "${l.itemName}".`;
-      if (p.rate > l.rate) return `Refund rate of "${l.itemName}" cannot be more than ${formatINR(l.rate)}.`;
+      if (p.rate > l.netRate) return `Refund rate of "${l.itemName}" cannot be more than ${formatINR(l.netRate)}, what the customer paid for it.`;
     }
-    if (total <= 0) return 'The refund must be more than zero.';
+    if (data.refundable <= 0) return 'Everything paid on this bill has already been refunded.';
+    if (subtotal <= 0) return 'Nothing was paid for the chosen items, so there is nothing to refund.';
+    if (total <= 0) return 'This return comes to ₹0.00 after rounding. Return it together with other items of the bill.';
+    if (overMoney) {
+      return data.bill.customerId
+        ? `Only ${formatINR(data.moneyRefundable)} can be paid back in money on this bill. Choose “Adjust” to take ${formatINR(total)} off ${data.bill.customerName}'s balance, or return fewer items now.`
+        : `Only ${formatINR(data.moneyRefundable)} can be refunded on this bill.`;
+    }
     return null;
   })();
 
@@ -122,12 +132,13 @@ function GoodsReturn({ cfg, initialBillId }: { cfg: ApiOutput<'sales.posConfig'>
       const res = await call('returns.create', {
         kind: 'return',
         billId: data.bill.id,
-        date: date !== cfg.today ? date : null,
+        date,
         items: chosen.map(({ l, p }) => ({ billItemId: l.billItemId, qty: p.qty!, rate: p.rate! })),
         refundMode: refund.mode,
         refundAccountId: refund.accountId,
         reason: reason.trim() || null,
       });
+      res.warnings.forEach((w) => toast.warning(w));
       toast.success(`Sales return ${res.cnNo} saved · ${formatINR(res.total)} ${res.refundMode === 'credit' ? 'adjusted' : 'to refund'}`);
       if (print) await printDoc('return', res.id);
       navigate(`/sales/returns/${res.id}`);
@@ -189,7 +200,7 @@ function GoodsReturn({ cfg, initialBillId }: { cfg: ApiOutput<'sales.posConfig'>
             <span className="sl-bp-no">{can('billing.view') || b.date === cfg.today ? <Link to={`/sales/bills/${b.id}`}>{b.billNo}</Link> : b.billNo}</span>
             <span className="muted">{formatDate(b.date)}</span>
             <span>{b.customerName ?? <span className="faint">Walk-in</span>}</span>
-            <ModeBadge mode={b.paymentMode} />
+            <ModeBadge mode={b.paymentMode} credit={b.credit} />
             <span className="grow" />
             <span>
               Bill total <b className="money">{formatINR(b.total)}</b>
@@ -211,7 +222,7 @@ function GoodsReturn({ cfg, initialBillId }: { cfg: ApiOutput<'sales.posConfig'>
                 <th>Item</th>
                 <th style={{ textAlign: 'right' }}>Billed</th>
                 <th style={{ textAlign: 'right' }}>Returning</th>
-                <th style={{ textAlign: 'right' }}>Rate</th>
+                <th style={{ textAlign: 'right' }}>Refund rate</th>
                 <th style={{ textAlign: 'right' }}>Refund</th>
               </tr>
             </thead>
@@ -228,7 +239,8 @@ function GoodsReturn({ cfg, initialBillId }: { cfg: ApiOutput<'sales.posConfig'>
                     <td>
                       <span className="sl-cell-main">{l.itemName}</span>
                       <span className="sl-cell-sub">Billed at {formatINR(l.rate)}</span>
-                      {l.netRate !== l.rate && <span className="sl-cell-sub">Paid {formatINR(l.netRate)} each after discount</span>}
+                      {l.netRate !== l.rate && <span className="sl-cell-sub">Customer paid {formatINR(l.netRate)} each</span>}
+                      {l.returnedAmount > 0 && l.returnable > 0 && <span className="sl-cell-sub">{formatINR(l.refundable)} of it left to refund</span>}
                     </td>
                     <td style={{ textAlign: 'right' }} className="nowrap">
                       {qtyUnit(l.qtyBilled, l.unit)}
@@ -247,12 +259,18 @@ function GoodsReturn({ cfg, initialBillId }: { cfg: ApiOutput<'sales.posConfig'>
                     <td style={{ textAlign: 'right' }}>
                       {!disabled && (
                         <div className="row" style={{ justifyContent: 'flex-end' }}>
-                          <MoneyInput className="sl-rate-in" value={on ? p.rate : l.netRate} onChange={(rate) => setPick(l, { rate })} aria-label={`Refund rate of ${l.itemName}`} />
+                          <MoneyInput
+                            className="sl-rate-in"
+                            value={on ? p.rate : l.netRate}
+                            onChange={(rate) => setPick(l, { rate })}
+                            aria-label={`Refund rate of ${l.itemName}`}
+                            title={`At most ${formatINR(l.netRate)}, what the customer paid`}
+                          />
                         </div>
                       )}
                     </td>
                     <td style={{ textAlign: 'right' }} className="money bold">
-                      {on && p.qty && p.rate !== null ? formatINR(lineRefund(l, p.qty, p.rate)) : ''}
+                      {on && p.qty && p.rate !== null ? formatINR(returnLineAmount(l, p.qty, p.rate)) : ''}
                     </td>
                   </tr>
                 );
@@ -266,11 +284,49 @@ function GoodsReturn({ cfg, initialBillId }: { cfg: ApiOutput<'sales.posConfig'>
       <div className="sl-return-summary">
         <Card title="Refund">
           <div className="stack">
+            <div className="sl-refund-limits small" aria-label="Refund limits">
+              <div className="tr">
+                <span className="muted">Received on this bill</span>
+                <span className="money">{formatINR(b.paid)}</span>
+              </div>
+              {data.returnedTotal > 0 && (
+                <div className="tr">
+                  <span className="muted">Already returned</span>
+                  <span className="money">{formatINR(data.returnedTotal)}</span>
+                </div>
+              )}
+              <div className="tr">
+                <span className="muted">Can still be refunded</span>
+                <span className="money bold">{formatINR(data.refundable)}</span>
+              </div>
+              <div className="tr">
+                <span className="muted">In cash / UPI / bank, at most</span>
+                <span className={`money bold${overMoney ? ' bad' : ''}`}>{formatINR(Math.min(data.moneyRefundable, data.refundable))}</span>
+              </div>
+            </div>
             <Field label="How is the money going back?" className="sl-refund-picker">
-              <PaymentModePicker value={refund} onChange={setRefund} modes={b.customerId ? ['cash', 'upi', 'bank', 'credit'] : ['cash', 'upi', 'bank']} creditLabel="Adjust" />
+              <PaymentModePicker
+                value={refund}
+                onChange={setRefund}
+                modes={b.customerId ? (data.moneyRefundable > 0 ? ['cash', 'upi', 'bank', 'credit'] : ['credit']) : ['cash', 'upi', 'bank']}
+                creditLabel="Adjust"
+              />
             </Field>
             {refund.mode === 'credit' && <div className="small muted">The amount will be taken off {b.customerName}'s balance.</div>}
-            {!b.customerId && <div className="small faint">Walk-in bill: the refund is paid back in money.</div>}
+            {b.customerId && data.moneyRefundable <= 0 && (
+              <div className="small muted">{b.paid > 0 ? 'What was paid on this bill has already been paid back' : 'Nothing was paid on this bill'}, so the return is adjusted in the account.</div>
+            )}
+            {!b.customerId && <div className="small faint">Walk-in bill: the refund is paid back in money, up to what was paid.</div>}
+            {overMoney && b.customerId && (
+              <div className="sl-over-money">
+                <div className="sl-pay-hint bad">
+                  Only {formatINR(data.moneyRefundable)} can go back in money on this bill. Adjust this return in {b.customerName}'s account, or return fewer items now.
+                </div>
+                <Button size="sm" onClick={() => setRefund({ mode: 'credit', accountId: null })}>
+                  Adjust in account instead
+                </Button>
+              </div>
+            )}
             <Field label="Reason (optional)">
               <TextInput value={reason} onChange={(e) => setReason(e.target.value)} placeholder="Why is it being returned?" maxLength={300} onKeyDown={(e) => e.key === 'Enter' && void save(true)} />
               <div className="sl-reason-chips">
@@ -283,7 +339,7 @@ function GoodsReturn({ cfg, initialBillId }: { cfg: ApiOutput<'sales.posConfig'>
             </Field>
             {can('billing.backdate') && (
               <Field label="Return date">
-                <DateInput value={date} onChange={(d) => d && setDate(d)} min={b.date} max={cfg.today} />
+                <DateInput value={date ?? cfg.today} onChange={(d) => d && setDate(d === cfg.today ? null : d)} min={b.date} max={cfg.today} />
               </Field>
             )}
             <div className="pos-totals">
@@ -336,7 +392,7 @@ function CreditNoteForm({ cfg }: { cfg: ApiOutput<'sales.posConfig'> }) {
   const [amount, setAmount] = useState<number | null>(null);
   const [reason, setReason] = useState('');
   const [refund, setRefund] = useState<PaymentChoice>({ mode: 'credit', accountId: null });
-  const [date, setDate] = useState(cfg.today);
+  const [date, setDate] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
   useUnsavedWarning(!!amount);
@@ -355,8 +411,9 @@ function CreditNoteForm({ cfg }: { cfg: ApiOutput<'sales.posConfig'> }) {
         reason: reason.trim(),
         refundMode: refund.mode,
         refundAccountId: refund.accountId,
-        date: date !== cfg.today ? date : null,
+        date,
       });
+      res.warnings.forEach((w) => toast.warning(w));
       toast.success(`Credit note ${res.cnNo} saved · ${formatINR(res.total)}`);
       if (print) await printDoc('return', res.id);
       navigate(`/sales/returns/${res.id}`);
@@ -394,7 +451,7 @@ function CreditNoteForm({ cfg }: { cfg: ApiOutput<'sales.posConfig'> }) {
           </Field>
           {can('billing.backdate') && (
             <Field label="Date">
-              <DateInput value={date} onChange={(d) => d && setDate(d)} min={cfg.booksStartDate} max={cfg.today} />
+              <DateInput value={date ?? cfg.today} onChange={(d) => d && setDate(d === cfg.today ? null : d)} min={cfg.booksStartDate} max={cfg.today} />
             </Field>
           )}
         </div>

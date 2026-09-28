@@ -52,22 +52,29 @@ export function listAccounts(ctx: Ctx, opts: ListAccountsOptions = {}): AccountL
     params,
   );
   let balances: Map<number, number> | null = null;
-  if (opts.withBalances) {
+  if (opts.withBalances && rows.length) {
     const bp: unknown[] = [];
-    let dateFilter = '';
+    let filter = '';
+    // Only the listed accounts' lines when the list is a subset (e.g. just the cash accounts).
+    if (opts.groups?.length || opts.types?.length) {
+      filter += ` AND l.account_id IN (${rows.map(() => '?').join(', ')})`;
+      bp.push(...rows.map((r) => r.id));
+    }
     if (opts.asOf) {
-      dateFilter = ' AND e.date <= ?';
+      filter += ' AND e.date <= ?';
       bp.push(opts.asOf);
     }
     balances = new Map(
       ctx.db
         .all<{ account_id: number; bal: number }>(
-          `SELECT l.account_id, SUM(l.debit - l.credit) AS bal FROM journal_lines l JOIN journal_entries e ON e.id = l.entry_id
-            WHERE e.is_void = 0${dateFilter} GROUP BY l.account_id`,
+          `SELECT l.account_id, SUM(l.debit - l.credit) AS bal FROM journal_lines l CROSS JOIN journal_entries e ON e.id = l.entry_id
+            WHERE e.is_void = 0${filter} GROUP BY l.account_id`,
           bp,
         )
         .map((r) => [r.account_id, r.bal]),
     );
+  } else if (opts.withBalances) {
+    balances = new Map();
   }
   return rows.map((r) => ({
     id: r.id,

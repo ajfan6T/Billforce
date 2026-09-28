@@ -5,6 +5,9 @@ import path from 'node:path';
 import { randomBytes } from 'node:crypto';
 import type { FileFilter, Platform, PrinterInfo, PrintOptions, PrintResult } from '../src/core/platform';
 
+/** File types Windows would run rather than open. */
+const EXECUTABLE = /\.(exe|com|bat|cmd|msi|msp|scr|pif|lnk|url|ps1|psm1|vbs|vbe|js|jse|wsf|wsh|hta|cpl|jar|reg|appref-ms)$/i;
+
 /** Platform services backed by Electron: printing, PDF, native file dialogs. */
 export class ElectronPlatform implements Platform {
   kind = 'electron' as const;
@@ -119,6 +122,8 @@ export class ElectronPlatform implements Platform {
   }
 
   async openPath(p: string): Promise<void> {
+    // Last line of defence (core already only allows files Billforce saved): never start a program.
+    if (EXECUTABLE.test(p)) throw new Error('Billforce does not open programs.');
     const err = await shell.openPath(p);
     if (err) throw new Error(err);
   }

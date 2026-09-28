@@ -18,6 +18,7 @@ export function ProfitLossPage() {
       loading={q.loading}
       error={q.error}
       onRetry={q.reload}
+      linkPeriod={range}
       wide={compare !== 'none'}
       filters={
         <>

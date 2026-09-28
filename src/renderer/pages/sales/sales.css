@@ -290,7 +290,12 @@
   font-size: 13px;
 }
 .sl-lines-table .sl-ln-rate {
-  width: 110px;
+  width: 132px;
+}
+.sl-lines-table .sl-ln-rate .input-adorn.locked .input {
+  background: var(--surface-2);
+  color: var(--text-2);
+  cursor: default;
 }
 .sl-lines-table .sl-ln-disc {
   width: 84px;
@@ -467,6 +472,15 @@ body.pos-active .toasts {
   display: flex;
   align-items: center;
   gap: 6px;
+  white-space: nowrap;
+}
+/* Bill discount: label + mode on one side, box + amount on the other; wraps instead of running off the panel. */
+.pos-totals .tr.sl-bill-disc-row {
+  flex-wrap: wrap;
+  row-gap: 4px;
+}
+.pos-totals .tr.sl-bill-disc-row > .sl-bill-disc:last-child {
+  margin-left: auto;
 }
 .sl-bill-disc .segmented {
   padding: 2px;
@@ -477,7 +491,7 @@ body.pos-active .toasts {
 }
 .sl-bill-disc .input-adorn,
 .sl-bill-disc > .input {
-  width: 96px;
+  width: 112px;
 }
 .sl-bill-disc .input {
   height: 30px;
@@ -571,6 +585,32 @@ body.pos-active .toasts {
 }
 .sl-split-row .input {
   height: 32px;
+}
+.sl-split-row .sl-split-acct {
+  grid-column: 1 / -1;
+}
+.sl-refund-limits {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  padding: 8px 10px;
+  border-radius: var(--radius-sm);
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+}
+.sl-refund-limits .tr {
+  display: flex;
+  justify-content: space-between;
+  gap: 10px;
+}
+.sl-refund-limits .bad {
+  color: var(--danger);
+}
+.sl-over-money {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 6px;
 }
 .pos-customer .picked-sub {
   display: none;
@@ -714,11 +754,23 @@ td > span > .sl-cell-sub {
   white-space: nowrap;
 }
 .sl-cell-items {
-  max-width: 300px;
+  display: inline-block;
+  vertical-align: bottom;
+  max-width: 240px;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
   color: var(--text-2);
+}
+@media (min-width: 1600px) {
+  .sl-cell-items {
+    max-width: 380px;
+  }
+}
+/* List pages put a DataTable straight into a card: keep its horizontal scroll (the generic
+   card rule clips overflow, which hid the last columns on 1366 px screens). */
+.card.sl-list-card > div.table-wrap:not(.card-body):not(.card-header) {
+  overflow: auto;
 }
 .sl-load-more {
   display: flex;

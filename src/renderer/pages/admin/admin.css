@@ -65,6 +65,9 @@
   font-size: 12px;
   color: var(--text-2);
 }
+.cell-note.danger {
+  color: var(--danger);
+}
 .row-inactive td {
   color: var(--text-3);
 }
@@ -190,6 +193,16 @@
 }
 .change-table td.change-new {
   color: var(--success);
+}
+.detail-value {
+  white-space: pre-line;
+  word-break: break-word;
+}
+.tech-details > summary {
+  cursor: pointer;
+  color: var(--text-2);
+  font-size: 13px;
+  user-select: none;
 }
 
 /* Settings */

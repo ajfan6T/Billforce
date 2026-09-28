@@ -39,9 +39,10 @@ export function parseISODate(s: string): Date {
   return new Date(y, m - 1, d);
 }
 
-/** "2026-09-28" -> "28-09-2026" */
+/** "2026-09-28" -> "28-09-2026". Anything that is not a date (e.g. a "Total" label in a date column) is returned as it is. */
 export function formatDate(iso: string | null | undefined): string {
   if (!iso) return '';
+  if (!/^\d{4}-\d{2}-\d{2}/.test(iso)) return iso;
   const [y, m, d] = iso.slice(0, 10).split('-');
   return `${d}-${m}-${y}`;
 }
@@ -152,17 +153,6 @@ export function fyFromStartYear(startYear: number): FinancialYear {
     start: `${startYear}-04-01`,
     end: `${endYear}-03-31`,
   };
-}
-
-/** Months of a financial year as keys: ["2026-04", ..., "2027-03"] */
-export function fyMonths(fy: FinancialYear): string[] {
-  const out: string[] = [];
-  let cur = fy.start;
-  for (let i = 0; i < 12; i++) {
-    out.push(monthKey(cur));
-    cur = addMonths(cur, 1);
-  }
-  return out;
 }
 
 /** All month keys from a to b inclusive. */

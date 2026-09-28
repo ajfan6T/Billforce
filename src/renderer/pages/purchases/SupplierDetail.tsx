@@ -7,7 +7,7 @@ import { DateRangePicker, ExportButtons, ReportView, rangeFromPreset, type Range
 import { useQuery, useStoredState } from '../../hooks';
 import { useAuth } from '../../auth';
 import { useDialogs, useToast } from '../../feedback';
-import { useOpenLink } from '../../links';
+import { useLinkedPeriod, useOpenLink } from '../../links';
 import { call, type ApiOutput } from '../../api';
 import { formatINR } from '../../../shared/money';
 import { describeRange, formatDate } from '../../../shared/dates';
@@ -26,7 +26,9 @@ export function SupplierDetailPage() {
   const toast = useToast();
   const dialogs = useDialogs();
   const [tab, setTab] = useStoredState<'statement' | 'purchases' | 'payments'>('supplier.tab', 'statement');
-  const [range, setRange] = useState<RangeValue>(() => rangeFromPreset('this_fy'));
+  // A report row (payables ageing, trial balance) opens the supplier on the report's period.
+  const linkedPeriod = useLinkedPeriod();
+  const [range, setRange] = useState<RangeValue>(() => linkedPeriod ?? rangeFromPreset('this_fy'));
   const [editing, setEditing] = useState(false);
   const [paying, setPaying] = useState(false);
   const valid = Number.isInteger(id) && id > 0;

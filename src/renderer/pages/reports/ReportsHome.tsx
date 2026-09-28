@@ -49,7 +49,7 @@ const GROUPS: ReportGroup[] = [
     title: 'Sales',
     description: 'How the counter is doing.',
     cards: [
-      { to: '/reports/sales?tab=day', title: 'Sales by day', description: 'Bills, discounts, returns and net sales for each day.', icon: ChartColumn, perm: 'reports.sales' },
+      { to: '/reports/sales?tab=day', title: 'Sales by day', description: 'Bills, discounts, returns and net sales after discounts for each day.', icon: ChartColumn, perm: 'reports.sales' },
       { to: '/reports/sales?tab=month', title: 'Sales by month', description: 'Month-wise sales through the financial year.', icon: CalendarClock, perm: 'reports.sales' },
       { to: '/reports/sales?tab=item', title: 'Sales by item', description: 'Best-selling items, quantities sold and returned.', icon: NotebookText, perm: 'reports.sales' },
       { to: '/reports/sales?tab=customer', title: 'Sales by customer', description: 'Your best customers; walk-in sales grouped together.', icon: BookOpen, perm: 'reports.sales' },

@@ -67,12 +67,24 @@ tests/               vitest; helpers.ts gives createTestApp(), ledgerProblems(),
   `<ExportButtons/>` (Excel / CSV / PDF / Print handled generically by `files.exportReport` / `files.printReport`).
   Every report takes a date filter (`{from, to}` or `{asOf}`); UI uses `<DateRangePicker/>` / `<AsOnPicker/>`.
   Row links: `link: { kind, id }` with kinds `bill | credit_note | receipt | purchase | supplier_payment | expense | journal | salary | advance | customer | supplier | employee | account | loan`.
+  Drill-downs keep the period: `useOpenLink(period)` / `linkPath(link, period)` / `withPeriod(path, period)` (`renderer/links.ts`)
+  add `?from=&to=&preset=` for ledgers and party accounts; pages read it through `useRange` / `useReportRange` (the address
+  wins until the user picks another period) or `useLinkedPeriod()`, and as-on reports through `?asOf=`.
+  Never cut a long list silently: opening, totals and closing are SQL aggregates over the whole period; only the rows
+  shown are paged (`page`, and `all: true` for exports — see `books.*` / `journals.list`), with `<ExportButtons load>`
+  fetching every row. SQLite runs on the main process: check `EXPLAIN QUERY PLAN` on big data and never let a per-entry
+  subquery walk a busy account's whole history (use `+l.account_id` or the covering `idx_jl_account_entry`).
 * **Printing**: build a `ReceiptDoc` and call `renderReceiptHtml(doc, business, receiptSettings)`; print with
   `ctx.platform.printHtml(html, { printerName, silent: !!printerName, paperWidthMm, copies })` using `getSection(ctx,'receipt')`.
   Provide a `*.receiptHtml` route so the UI can preview with `<ReceiptPreview html/>`.
 * **UI**: pages use `<Page>`, `<PageHeader title actions/>`, `<Card>`, `<DataTable>`, `<Toolbar>`, form controls from `forms.tsx`,
   domain pickers from `pickers.tsx`, `useQuery(route, input)` / `useMutation(route)`, `useToast()`, `useDialogs()` (confirm / prompt),
-  `useAuth().can(perm)` to hide actions. Keyboard: `useHotkeys`. Module CSS goes in `pages/<module>/<module>.css` imported by its pages.
+  `useAuth().can(perm)` to hide actions. Keyboard: `useHotkeys` (page shortcuts are off while a dialog is open or the
+  screen is locked; shortcuts set up by the component that renders a `<Modal>` work while it is on top).
+  Forms with unsaved changes call `useUnsavedWarning(dirty)`: closing the window asks, and the sidebar, `LinkButton`,
+  "Back" links and F2 ask before leaving (`{ navigation: false }` when the page keeps its own draft).
+  `files.open` / `files.showInFolder` only accept what Billforce saved (via `platform.saveFile`), the data folder and backups.
+  Module CSS goes in `pages/<module>/<module>.css` imported by its pages.
   Tone: plain English a shop owner understands ("Payment received", "Amount due", "Cancel bill").
 * **Tests**: each module adds `tests/<module>.test.ts` using `createTestApp()`; assert `ledgerProblems(t.app)` is empty after
   every scenario, check postings with `systemBalance`, and test permission denials with `t.loginAs('cashier')`.
@@ -108,7 +120,7 @@ Balance sheet as on D: balance-sheet accounts use all entries ≤ D except closi
 | Route | Input | Output |
 | --- | --- | --- |
 | `items.search` / `items.recent` / `items.list` / `items.create` ... | see `modules/items/routes.ts` | `Item` (`rate` paise) |
-| `customers.search` | `{ q, limit? }` | `{ id, name, phone, balance, creditLimit }[]` (balance + = owes you) |
+| `customers.search` | `{ q, limit? }` | `{ id, name, phone, balance, creditLimit, balanceHidden? }[]` (balance + = owes you; without `customers.view`/`customers.receive`: balance 0, creditLimit null, balanceHidden true) |
 | `customers.quickCreate` | `{ name, phone?, address? }` | same shape |
 | `suppliers.search` / `suppliers.quickCreate` | `{ q, limit? }` / `{ name, phone? }` | `{ id, name, phone, payable }` (+ = you owe) |
 | `accounts.list` | `{ groups?, types?, includeInactive?, withBalances?, asOf? }` | `AccountListItem[]` |
@@ -118,4 +130,4 @@ Balance sheet as on D: balance-sheet accounts use all entries ≤ D except closi
 | `reports.trialBalance` | `{ from?, to }` | `ReportData` |
 
 Core helpers other modules may call: `touchItemUsage`, `searchCustomers`, `quickCreateCustomer`, `searchSuppliers`,
-`setPartyOpeningBalance`, `createBackup` (outside transactions), `listAccounts`, `paymentAccounts`, `searchEmployees`.
+`setPartyOpeningBalance`, `createBackup` / `createBackupAsync` (outside transactions; the async one does not block the app, the sync one is for work that must finish first), `listAccounts`, `paymentAccounts`, `searchEmployees`.

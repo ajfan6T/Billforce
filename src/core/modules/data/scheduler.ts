@@ -3,13 +3,17 @@
  * takes one automatic backup per day (and one on exit when data changed since
  * the last backup) and keeps the newest `keepCount` automatic backups.
  * Never throws: failures are written to the console and the activity log.
+ *
+ * The daily backup is written in the background (createBackupAsync), so billing
+ * goes on while it runs. The backup on exit is synchronous on purpose: the app
+ * is quitting and the database is closed right after it.
  */
 import type { BillforceApp } from '../../app';
 import type { Ctx } from '../../context';
 import { logActivity } from '../../audit';
 import { getMeta, getSection } from '../../settings';
 import { addDays, parseISODate, toISODate } from '../../../shared/dates';
-import { createBackup, pruneAutoBackups, type BackupInfo } from './backup';
+import { createBackup, createBackupAsync, pruneAutoBackups, type BackupInfo } from './backup';
 
 export interface BackupScheduler {
   stop(): void;
@@ -62,7 +66,7 @@ function autoBackupToday(ctx: Ctx, today: string): boolean {
 const lastFailureLoggedOn = new WeakMap<BillforceApp, string>();
 
 function reportFailure(app: BillforceApp, when: string, e: unknown): AutoBackupResult {
-  const message = (e as Error)?.message ?? String(e);
+  const message = ((e as Error)?.message ?? String(e)).replace(/\.\s*$/, '');
   console.error(`[backup] automatic backup (${when}) failed:`, e);
   try {
     const ctx = systemCtx(app);
@@ -81,7 +85,11 @@ function reportFailure(app: BillforceApp, when: string, e: unknown): AutoBackupR
 }
 
 function takeAutoBackup(app: BillforceApp, ctx: Ctx, note: string): AutoBackupResult {
-  const backup = createBackup(ctx, 'auto', { note });
+  return afterAutoBackup(app, ctx, createBackup(ctx, 'auto', { note }));
+}
+
+/** Remove old automatic backups and record the new one. */
+function afterAutoBackup(app: BillforceApp, ctx: Ctx, backup: BackupInfo): AutoBackupResult {
   let pruned: string[] = [];
   try {
     pruned = pruneAutoBackups(ctx);
@@ -95,21 +103,37 @@ function takeAutoBackup(app: BillforceApp, ctx: Ctx, note: string): AutoBackupRe
   return { status: 'done', backup, pruned };
 }
 
-/** One scheduler tick: back up if automatic backups are on and none was taken today. */
-export function runAutoBackup(app: BillforceApp): AutoBackupResult {
+/** Apps whose daily backup is being written right now (a slow pen drive must not get a second one started). */
+const running = new WeakSet<BillforceApp>();
+
+/**
+ * One scheduler tick: back up if automatic backups are on and none was taken today.
+ * The backup is compressed and checked in the background; the promise never rejects.
+ */
+export async function runAutoBackup(app: BillforceApp): Promise<AutoBackupResult> {
   try {
     const ctx = systemCtx(app);
     if (getMeta(ctx, 'setup_done') !== '1') return { status: 'skipped', reason: 'Setup not finished' };
     if (!getSection(ctx, 'backup').autoBackup) return { status: 'skipped', reason: 'Automatic backup is off' };
     if (ctx.db.inTransaction) return { status: 'skipped', reason: 'Busy' };
+    if (running.has(app)) return { status: 'skipped', reason: 'A backup is already being saved' };
     if (autoBackupToday(ctx, toISODate(ctx.clock()))) return { status: 'skipped', reason: 'Already backed up today' };
-    return takeAutoBackup(app, ctx, 'Daily automatic backup');
+    running.add(app);
+    try {
+      const backup = await createBackupAsync(ctx, 'auto', { note: 'Daily automatic backup' });
+      return afterAutoBackup(app, ctx, backup);
+    } finally {
+      running.delete(app);
+    }
   } catch (e) {
     return reportFailure(app, 'daily', e);
   }
 }
 
-/** On exit: back up (synchronously) if data changed since the last backup. */
+/**
+ * On exit: back up if data changed since the last backup. Synchronous on purpose (the app is quitting and
+ * closes the database right after this; it cannot wait for a background backup).
+ */
 export function runExitBackup(app: BillforceApp): AutoBackupResult {
   try {
     const ctx = systemCtx(app);
@@ -136,7 +160,7 @@ export function startBackupScheduler(app: BillforceApp, opts: SchedulerOptions =
   let stopped = false;
   let hourly: ReturnType<typeof setInterval> | null = null;
   const tick = () => {
-    if (!stopped) runAutoBackup(app);
+    if (!stopped) void runAutoBackup(app);
   };
   const first = setTimeout(() => {
     tick();

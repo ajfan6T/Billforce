@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { createTestApp, ledgerProblems, OWNER, type TestApp } from './helpers';
 import { seedReferenceData } from '../src/core/seed';
-import { activityLabel } from '../src/shared/activity';
+import { activityLabel, describeActivityDetails } from '../src/shared/activity';
 import { DEFAULT_ROLE_PERMISSIONS } from '../src/shared/permissions';
 
 async function addUser(t: TestApp, role: 'owner' | 'manager' | 'cashier', username: string, opts: { mustChangePassword?: boolean } = {}) {
@@ -282,6 +282,88 @@ describe('activity log', () => {
     expect(detail.details).toMatchObject({ name: 'Anita Desai' });
     const users = await t.call('activity.users');
     expect(users.map((u) => u.username)).toContain('priya');
+  });
+
+  it('shows details in plain words: rupees not paise, DD-MM-YYYY dates, no internal fields', async () => {
+    const t = await createTestApp();
+    const last = async (action: string) => {
+      const id = t.app.db.value<number>('SELECT MAX(id) FROM activity_log WHERE action = ?', [action]);
+      return t.call('activity.get', { id });
+    };
+    const cust = await t.call('customers.create', { name: 'Anita Desai', phone: '98200 11111' });
+    const r = await t.call('receipts.create', { customerId: cust.id, amount: 5000, mode: 'cash' });
+    await t.call('receipts.update', { id: r.id, customerId: cust.id, amount: 7500, mode: 'upi', date: '2026-09-27', reason: 'Typed wrong' });
+    const edit = await last('receipt.update');
+    expect(edit.view.changes).toEqual(
+      expect.arrayContaining([
+        { label: 'Amount', before: '₹50.00', after: '₹75.00' },
+        { label: 'Paid by', before: 'Cash', after: 'UPI' },
+        { label: 'Date', before: '28-09-2026', after: '27-09-2026' },
+      ]),
+    );
+    expect(edit.view.facts).toContainEqual({ label: 'Reason', value: 'Typed wrong' });
+    const shown = JSON.stringify(edit.view);
+    expect(shown).not.toMatch(/\b5000\b|\b7500\b/); // never raw paise
+    expect(shown).not.toMatch(/Revision|Updated at|Journal|Print count|ID"/); // internal bookkeeping stays hidden
+    expect(edit.view.changes).toContainEqual({ label: 'Account', before: 'Cash in Hand', after: 'UPI Account' });
+    expect(edit.details).toMatchObject({ before: { amount: 5000 }, after: { amount: 7500 } }); // raw data kept for "Technical details"
+
+    const bill = await t.call('sales.create', { items: [{ itemName: 'Tea', qty: 1, rate: 10100 }], payments: [{ mode: 'cash', amount: 10100 }] });
+    expect((await last('bill.create')).view.facts).toEqual(expect.arrayContaining([{ label: 'Total', value: '₹101.00' }, { label: 'Paid by', value: 'Cash' }, { label: 'Lines', value: '1' }]));
+    await t.call('sales.cancel', { id: bill.id, reason: 'Wrong items entered' });
+    expect((await last('bill.cancel')).view).toEqual({ changes: [], facts: [{ label: 'Reason', value: 'Wrong items entered' }, { label: 'Total', value: '₹101.00' }] });
+
+    const item = await t.call('items.create', { name: 'Sugar', unit: 'kg', rate: 4500 });
+    await t.call('items.setRate', { id: item.id, rate: 4800 });
+    expect((await last('item.update')).view).toEqual({ changes: [{ label: 'Rate', before: '₹45.00', after: '₹48.00' }], facts: [] });
+    await t.call('items.update', { id: item.id, name: 'Sugar 1 kg', unit: 'kg', rate: 123456750 });
+    const itemEdit = (await last('item.update')).view;
+    expect(itemEdit.changes).toEqual(
+      expect.arrayContaining([
+        { label: 'Name', before: 'Sugar', after: 'Sugar 1 kg' },
+        { label: 'Rate', before: '₹48.00', after: '₹12,34,567.50' },
+      ]),
+    );
+    expect(JSON.stringify(itemEdit)).not.toMatch(/Created at|Usage|"Id"/);
+
+    // Role changes read as permission names, not codes.
+    await t.call('roles.update', { role: 'cashier', permissions: DEFAULT_ROLE_PERMISSIONS.cashier.filter((p) => p !== 'billing.reprint') });
+    const role = (await last('role.update')).view;
+    expect(role.facts).toEqual(expect.arrayContaining([{ label: 'Role', value: 'Cashier' }, { label: 'No longer allowed', value: 'Reprint bills' }]));
+  });
+
+  it('formats unknown details generically without leaking paise or codes', () => {
+    expect(describeActivityDetails('salary.process', { employeeId: 3, month: '2026-09', paidDays: 26, gross: 1500000, advanceRecovery: 50000, net: 1450000, payNow: null })).toEqual({
+      changes: [],
+      facts: [
+        { label: 'Month', value: 'September 2026' },
+        { label: 'Paid days', value: '26' },
+        { label: 'Gross', value: '₹15,000.00' },
+        { label: 'Advance recovered', value: '₹500.00' },
+        { label: 'Net', value: '₹14,500.00' },
+      ],
+    });
+    expect(describeActivityDetails('customer.update', { before: { openingBalance: { amount: 100000, direction: 'receivable' }, creditLimit: null }, after: { openingBalance: { amount: 250000, direction: 'receivable' }, creditLimit: 500000 } }).changes).toEqual([
+      { label: 'Opening balance', before: '₹1,000.00 (receivable)', after: '₹2,500.00 (receivable)' },
+      { label: 'Credit limit', before: '—', after: '₹5,000.00' },
+    ]);
+    expect(describeActivityDetails('loan.create', { name: 'HDFC', principal: 1000000, interestRate: 10.5, startDate: '2026-04-01' }).facts).toEqual([
+      { label: 'Name', value: 'HDFC' },
+      { label: 'Principal', value: '₹10,000.00' },
+      { label: 'Interest rate', value: '10.5%' },
+      { label: 'Start date', value: '01-04-2026' },
+    ]);
+    expect(describeActivityDetails('attendance.mark', { date: '2026-09-28', from: 'P', to: 'A' }).facts.map((f) => f.value)).toEqual(['28-09-2026', 'Present', 'Absent']);
+    expect(describeActivityDetails('backup.create', { path: '/b/Shop_manual.bfbackup', sizeBytes: 2_200_000 }).facts).toEqual([
+      { label: 'File', value: '/b/Shop_manual.bfbackup' },
+      { label: 'Size', value: '2.1 MB' },
+    ]);
+    expect(describeActivityDetails('bill.print', { printCount: 3 }).facts).toEqual([{ label: 'Times printed', value: '3' }]);
+    expect(describeActivityDetails('settings.update', { section: 'billing', before: { prefixes: { bill: 'INV', receipt: 'RCT' } }, after: { prefixes: { bill: 'B', receipt: 'RCT' } } })).toEqual({
+      changes: [{ label: 'Prefixes: Bill', before: 'INV', after: 'B' }],
+      facts: [{ label: 'Section', value: 'Billing' }],
+    });
+    expect(describeActivityDetails('x.y', null)).toEqual({ changes: [], facts: [] });
   });
 
   it('labels actions in plain English, with a readable fallback', () => {

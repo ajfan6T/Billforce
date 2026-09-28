@@ -143,6 +143,8 @@ export function CustomerPicker({
           onChange(c);
           setText('');
         }}
+        // Keyboard users: Enter on a name that matches nobody opens "Add customer" with the name filled in.
+        onEnterNoMatch={canCreate ? (t) => t.trim() && setAdding(true) : undefined}
         renderOption={(c) => (
           <div className="combo-option">
             <div>

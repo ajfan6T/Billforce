@@ -1,5 +1,9 @@
+import nodePath from 'node:path';
 import type { Ctx } from '../../context';
 import { now } from '../../context';
+import { fail } from '../../errors';
+import { pathKey, wasSavedByApp } from '../../platform';
+import { backupFolder } from '../data/backup';
 import type { ExportFormat, ReportData } from '../../../shared/report';
 import { reportToCsv } from '../../export/csv';
 import { reportToXlsx } from '../../export/xlsx';
@@ -42,4 +46,26 @@ export async function exportReport(ctx: Ctx, report: ReportData, format: ExportF
 export async function printReport(ctx: Ctx, report: ReportData): Promise<{ printed: boolean }> {
   const result = await ctx.platform.printHtml(reportHtml(ctx, report), { silent: false });
   return { printed: result.printed };
+}
+
+/**
+ * files.open / files.showInFolder only work on what Billforce itself produced: files saved this session
+ * (exports, templates, backup copies), the data folder, the backup folder and Billforce backup files
+ * (.bfbackup) in it or in the backup history. Anything else is refused, so these routes can never be
+ * used to start a program or open an arbitrary file or network path.
+ */
+export function assertAppFile(ctx: Ctx, p: string): void {
+  const refuse = () => fail.forbidden('Billforce can only open files and folders it saved itself.');
+  const abs = /^([a-zA-Z]:[\\/]|\/)/.test(p) || /^\\\\/.test(p);
+  if (!abs || p.includes('\0')) throw refuse();
+  if (wasSavedByApp(ctx.platform, p)) return;
+  const key = pathKey(p);
+  const folder = backupFolder(ctx);
+  if (key === pathKey(ctx.info.dataDir) || key === pathKey(folder)) return;
+  if (/\.bfbackup$/i.test(p)) {
+    if (pathKey(nodePath.dirname(p)) === pathKey(folder)) return;
+    const recorded = ctx.db.all<{ path: string }>('SELECT path FROM backup_history');
+    if (recorded.some((r) => pathKey(r.path) === key)) return;
+  }
+  throw refuse();
 }

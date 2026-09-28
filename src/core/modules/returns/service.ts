@@ -6,6 +6,15 @@
  *   Dr SALES_RETURNS (amount before rounding)
  *   Dr ROUND_OFF if rounded up           Cr ROUND_OFF if rounded down
  *   Cr refund cash / bank account, or AR(customer) when adjusted in the customer's account
+ *
+ * Refund rules (goods returned against a bill):
+ *   - a unit is refunded at most at what the customer paid for it: the line amount after its
+ *     discount, less its share of the bill discount and round off (netLineAmounts);
+ *   - rounding works on the running total of the bill's returns, so refunds never add up to
+ *     more than the bill total and the return that takes back the rest settles it exactly;
+ *   - money (cash / UPI / bank) goes back only up to what was received on the bill; anything
+ *     more is adjusted in the customer's account.
+ * Credit notes without goods need "returns.adjust".
  */
 import type { Ctx } from '../../context';
 import { assertCan, can, currentUserId, now, requireSession, today } from '../../context';
@@ -13,14 +22,14 @@ import { AppError, fail } from '../../errors';
 import { listRevisions, logActivity, recordRevision } from '../../audit';
 import { nextDocNumber } from '../../numbering';
 import { getSection } from '../../settings';
-import { paymentAccountId, postEntry, voidEntry, type EntryLineInput } from '../../accounting/ledger';
+import { negativeBalanceWarning, paymentAccountId, postEntry, voidEntry, type EntryLineInput } from '../../accounting/ledger';
 import { assertDateOpen } from '../../accounting/periods';
 import { renderReceiptHtml, type ReceiptDoc, type ReceiptTotal } from '../../print/receipt';
-import { amountInWords, formatAmount, formatINR, formatQty, lineAmount, roundOffAdjustment } from '../../../shared/money';
+import { amountInWords, formatAmount, formatINR, formatQty } from '../../../shared/money';
 import { formatDate, formatTime, isValidISODate } from '../../../shared/dates';
 import { PAYMENT_MODE_LABELS, type PaymentMode, type SettlementMode } from '../../../shared/constants';
-import { roundQty, shareDiscount, type BillPaymentMode } from '../../../shared/billing';
-import { customerSummary, getBillRow, itemCountLine, sendToReceiptPrinter, type BillCustomer, type RevisionSummary } from '../sales/service';
+import { netLineAmounts, returnLineAmount, returnNoteTotal, roundQty, type BillPaymentMode } from '../../../shared/billing';
+import { customerBalanceLine, customerSummary, getBillRow, itemCountLine, sendToReceiptPrinter, type BillCustomer, type RevisionSummary } from '../sales/service';
 
 /* ------------------------------------------------------------------ */
 /* Types                                                               */
@@ -68,12 +77,17 @@ export interface ReturnableLine {
   returnable: number;
   /** Billed rate (before discounts). */
   rate: number;
-  /** What the customer effectively paid per unit: after line discount and a share of the bill discount. */
+  /**
+   * What the customer paid per unit: after the line discount and the line's share of the bill discount
+   * and round off. The highest refund rate allowed.
+   */
   netRate: number;
-  /** Line value after line discount and its share of the bill discount. */
+  /** What the customer paid for the line: after line discount and its share of the bill discount and round off. */
   netAmount: number;
-  /** Amount already refunded for this line on active returns. */
+  /** Amount already refunded for this line on active returns (before note rounding). */
   returnedAmount: number;
+  /** Most that can still be refunded for this line (netAmount - returnedAmount). */
+  refundable: number;
 }
 
 export interface BillReturnable {
@@ -95,6 +109,19 @@ export interface BillReturnable {
   lines: ReturnableLine[];
   /** Total of active returns / credit notes already made against the bill. */
   returnedTotal: number;
+  /** Item value (before rounding) of those returns; the running total that return rounding works on. */
+  returnedValue: number;
+  /** Most that can still be refunded on the bill: bill total less active returns. */
+  refundable: number;
+  /** Already paid back in cash / UPI / bank on active returns. */
+  moneyRefunded: number;
+  /**
+   * Most that can be paid back in cash / UPI / bank: what was received on the bill less money
+   * already refunded. Anything more must be adjusted in the customer's account.
+   */
+  moneyRefundable: number;
+  /** Returns are rounded to the nearest rupee (settings.billing.roundOff). */
+  roundOff: boolean;
   /** Suggested refund: adjust in the account for credit bills with a customer, else the bill's payment mode. */
   suggestedRefundMode: PaymentMode;
 }
@@ -233,7 +260,7 @@ export function getCreditNote(ctx: Ctx, id: number): CreditNoteDetail {
   };
 }
 
-/** What can still be returned from a bill, with the effective rate the customer paid. */
+/** What can still be returned from a bill, with the rate the customer actually paid. */
 export function billReturnable(ctx: Ctx, billId: number): BillReturnable {
   const bill = getBillRow(ctx, billId);
   const items = ctx.db.all<{ id: number; item_id: number | null; item_name: string; unit: string | null; qty: number; rate: number; amount: number }>(
@@ -251,14 +278,15 @@ export function billReturnable(ctx: Ctx, billId: number): BillReturnable {
       )
       .map((r) => [r.bill_item_id, r]),
   );
-  const shares = shareDiscount(
+  // What was really paid for each line: bill discount and round off shared out exactly.
+  const net = netLineAmounts(
     items.map((i) => i.amount),
-    bill.bill_discount,
+    bill.total,
   );
   const lines = items.map((it, idx): ReturnableLine => {
-    const net = it.amount - shares[idx];
     const done = returned.get(it.id);
     const qtyReturned = roundQty(done?.qty ?? 0);
+    const returnedAmount = done?.amount ?? 0;
     return {
       billItemId: it.id,
       itemId: it.item_id,
@@ -268,14 +296,27 @@ export function billReturnable(ctx: Ctx, billId: number): BillReturnable {
       qtyReturned,
       returnable: Math.max(0, roundQty(it.qty - qtyReturned)),
       rate: it.rate,
-      netRate: it.qty > 0 ? Math.round(net / it.qty) : 0,
-      netAmount: net,
-      returnedAmount: done?.amount ?? 0,
+      netRate: it.qty > 0 ? Math.round(net[idx] / it.qty) : 0,
+      netAmount: net[idx],
+      returnedAmount,
+      refundable: Math.max(0, net[idx] - returnedAmount),
     };
   });
-  const returnedTotal = ctx.db.value<number>("SELECT COALESCE(SUM(total), 0) FROM credit_notes WHERE bill_id = ? AND status = 'active'", [billId], 0);
+  const sums = ctx.db.get<{ total: number; value: number; money: number }>(
+    `SELECT COALESCE(SUM(total), 0) AS total, COALESCE(SUM(subtotal), 0) AS value,
+            COALESCE(SUM(CASE WHEN refund_mode <> 'credit' THEN total END), 0) AS money
+       FROM credit_notes WHERE bill_id = ? AND status = 'active'`,
+    [billId],
+  )!;
+  const moneyRefundable = Math.max(0, bill.paid - sums.money);
   const suggestedRefundMode: PaymentMode =
-    bill.customer_id && bill.credit > 0 ? 'credit' : bill.payment_mode === 'split' || bill.payment_mode === 'credit' ? (bill.customer_id ? 'credit' : 'cash') : bill.payment_mode;
+    bill.customer_id && (bill.credit > 0 || moneyRefundable <= 0)
+      ? 'credit'
+      : bill.payment_mode === 'split' || bill.payment_mode === 'credit'
+        ? bill.customer_id
+          ? 'credit'
+          : 'cash'
+        : bill.payment_mode;
   return {
     bill: {
       id: bill.id,
@@ -293,7 +334,12 @@ export function billReturnable(ctx: Ctx, billId: number): BillReturnable {
       paymentMode: bill.payment_mode,
     },
     lines,
-    returnedTotal,
+    returnedTotal: sums.total,
+    returnedValue: sums.value,
+    refundable: Math.max(0, bill.total - sums.total),
+    moneyRefunded: sums.money,
+    moneyRefundable,
+    roundOff: getSection(ctx, 'billing').roundOff,
     suggestedRefundMode,
   };
 }
@@ -351,9 +397,10 @@ interface PreparedItem {
   amount: number;
 }
 
-export function createCreditNote(ctx: Ctx, input: CreateCreditNoteInput): CreditNoteDetail {
+export type CreditNoteResult = CreditNoteDetail & { warnings: string[] };
+
+export function createCreditNote(ctx: Ctx, input: CreateCreditNoteInput): CreditNoteResult {
   requireSession(ctx);
-  const roundOffOn = getSection(ctx, 'billing').roundOff;
   let date: string;
   let billId: number | null = null;
   let billNo: string | null = null;
@@ -361,10 +408,11 @@ export function createCreditNote(ctx: Ctx, input: CreateCreditNoteInput): Credit
   let customerName: string | null;
   let items: PreparedItem[] = [];
   let subtotal: number;
-  let roundOff = 0;
+  let total: number;
   const reason = (input.reason ?? '').trim() || null;
 
   if (input.kind === 'return') {
+    assertCan(ctx, 'returns.create', 'You are not allowed to take back goods. Ask the owner for permission.');
     const bill = getBillRow(ctx, input.billId);
     if (bill.status !== 'active') throw fail.validation(`Bill ${bill.bill_no} is cancelled, so nothing can be returned against it.`);
     date = checkDate(ctx, input.date, 'return');
@@ -391,22 +439,35 @@ export function createCreditNote(ctx: Ctx, input: CreateCreditNoteInput): Credit
       }
       const rate = ri.rate ?? line.netRate;
       if (!Number.isInteger(rate) || rate < 0) throw fail.validation(`Enter a valid refund rate for "${line.itemName}".`, { [`items.${idx}.rate`]: 'Invalid rate' });
-      if (rate > line.rate) {
-        throw fail.validation(`Refund rate for "${line.itemName}" cannot be more than the billed rate ${formatINR(line.rate)}.`, {
-          [`items.${idx}.rate`]: `At most ${formatINR(line.rate)}`,
+      // The customer gets back at most what they actually paid: after discounts and round off.
+      if (rate > line.netRate) {
+        const paid = line.netRate === line.rate ? `the billed rate ${formatINR(line.rate)}` : `${formatINR(line.netRate)}, what the customer paid for it`;
+        throw fail.validation(`Refund rate for "${line.itemName}" cannot be more than ${paid}.`, {
+          [`items.${idx}.rate`]: `At most ${formatINR(line.netRate)}`,
         });
       }
-      let amount = lineAmount(qty, rate);
-      // Returning everything that is left at the net rate refunds exactly what is left of the line,
-      // so rounding of the per-unit rate never leaves stray paise behind.
-      if (qty === line.returnable && rate === line.netRate) {
-        const left = line.netAmount - line.returnedAmount;
-        if (left > 0 && Math.abs(left - amount) <= Math.ceil(line.qtyBilled) + 1) amount = left;
-      }
+      const amount = returnLineAmount(line, qty, rate);
       return { billItemId: line.billItemId, itemId: line.itemId, itemName: line.itemName, unit: line.unit, qty, rate, amount };
     });
     subtotal = items.reduce((s, i) => s + i.amount, 0);
-    roundOff = roundOffOn && subtotal > 0 ? roundOffAdjustment(subtotal) : 0;
+    if (subtotal <= 0) {
+      throw fail.validation(
+        r.refundable <= 0
+          ? `Everything paid on bill ${bill.bill_no} (${formatINR(bill.total)}) has already been refunded, so nothing is left to refund.`
+          : 'Nothing was paid for the chosen items (or it has already been refunded), so there is nothing to refund.',
+        { total: 'Nothing to refund' },
+      );
+    }
+    // Rounded on the running total of the bill's returns, and never more than is left of the bill.
+    total = returnNoteTotal({ billTotal: bill.total, returnedTotal: r.returnedTotal, returnedValue: r.returnedValue, value: subtotal, roundOff: r.roundOff });
+    if (total <= 0) {
+      throw fail.validation(
+        r.refundable <= 0
+          ? `Everything paid on bill ${bill.bill_no} (${formatINR(bill.total)}) has already been refunded, so nothing is left to refund.`
+          : `This return comes to ${formatINR(Math.max(total, 0))} after rounding to the rupee. Return it together with other items of the bill.`,
+        { total: 'Nothing to refund' },
+      );
+    }
     billId = bill.id;
     billNo = bill.bill_no;
     customerId = bill.customer_id;
@@ -416,7 +477,20 @@ export function createCreditNote(ctx: Ctx, input: CreateCreditNoteInput): Credit
         refundMode: 'No customer on the bill',
       });
     }
+    // Money goes back only up to what was received on the bill; anything more is adjusted in the customer's account.
+    if (input.refundMode !== 'credit' && total > r.moneyRefundable) {
+      const why =
+        bill.paid <= 0
+          ? `Nothing was paid on bill ${bill.bill_no} (it was sold on credit), so the return cannot be paid back in money.`
+          : r.moneyRefundable <= 0
+            ? `The ${formatINR(bill.paid)} received on bill ${bill.bill_no} has already been paid back, so nothing more can be refunded in money.`
+            : `Only ${formatINR(bill.paid)} was received on bill ${bill.bill_no}${r.moneyRefunded ? ` and ${formatINR(r.moneyRefunded)} has already been paid back` : ''}, so at most ${formatINR(r.moneyRefundable)} can be refunded in money.`;
+      throw fail.validation(customerId ? `${why} Choose "Adjust" to take ${formatINR(total)} off ${customerName}'s balance, or return fewer items now.` : why, {
+        refundMode: r.moneyRefundable > 0 ? `At most ${formatINR(r.moneyRefundable)} in money` : 'Adjust in the account',
+      });
+    }
   } else {
+    assertCan(ctx, 'returns.adjust', 'You are not allowed to make credit notes without goods. Ask the owner for permission.');
     const c = ctx.db.get<{ id: number; name: string; is_active: number }>('SELECT id, name, is_active FROM customers WHERE id = ?', [input.customerId]);
     if (!c) throw fail.validation('The chosen customer was not found.', { customerId: 'Customer not found' });
     if (!reason) throw fail.validation('Enter the reason for the credit note.', { reason: 'Reason is required' });
@@ -425,13 +499,17 @@ export function createCreditNote(ctx: Ctx, input: CreateCreditNoteInput): Credit
     customerId = c.id;
     customerName = c.name;
     subtotal = input.amount;
+    total = input.amount;
   }
-
-  const total = subtotal + roundOff;
-  if (total <= 0) throw fail.validation('The amount must be more than zero.', { total: 'Amount is zero' });
+  const roundOff = total - subtotal;
 
   let refundAccountId: number | null = null;
-  if (input.refundMode !== 'credit') refundAccountId = paymentAccountId(ctx, input.refundMode as SettlementMode, input.refundAccountId);
+  const warnings: string[] = [];
+  if (input.refundMode !== 'credit') {
+    refundAccountId = paymentAccountId(ctx, input.refundMode as SettlementMode, input.refundAccountId);
+    const short = negativeBalanceWarning(ctx, refundAccountId, total, date);
+    if (short) warnings.push(short);
+  }
 
   const num = nextDocNumber(ctx, 'credit_note', date);
   const id = ctx.db.insert('credit_notes', {
@@ -496,7 +574,7 @@ export function createCreditNote(ctx: Ctx, input: CreateCreditNoteInput): Credit
       : `Credit note ${num.number} for ${formatINR(total)} to ${customerName} (${refund})${reason ? `. Reason: ${reason}` : ''}`,
     { entityType: 'credit_note', entityId: id, details: { kind: input.kind, billId, total, refundMode: input.refundMode } },
   );
-  return getCreditNote(ctx, id);
+  return { ...getCreditNote(ctx, id), warnings };
 }
 
 export function cancelCreditNote(ctx: Ctx, id: number, reason: string): CreditNoteDetail {
@@ -654,8 +732,7 @@ export function creditNoteReceiptDoc(ctx: Ctx, d: CreditNoteDetail, opts: { dupl
   if (d.items.length) lines.push(itemCountLine(d.items));
   if (receipt.showAmountInWords) lines.push(amountInWords(d.total));
   if (d.refundMode === 'credit' && d.customer && d.status === 'active') {
-    const bal = d.customer.balance;
-    lines.push(bal >= 0 ? `Balance due from you now: ${formatINR(bal)}` : `Advance with us now: ${formatINR(-bal)}`);
+    lines.push(customerBalanceLine(d.customer.balance, today(ctx)));
   }
   if (d.reason) lines.push(`Reason: ${d.reason}`);
   if (d.status === 'cancelled') lines.push(`Cancelled${d.cancelledAt ? ` on ${formatDate(d.cancelledAt)}` : ''}: ${d.cancelReason ?? ''}`);

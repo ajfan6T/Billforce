@@ -14,6 +14,12 @@ files:
   - package.json
   - "!**/*.map"
 asar: true
+# Only the Chromium UI languages Billforce can use (the UI is English, --lang en-IN resolves to en-GB);
+# the other ~50 locale packs add 49 MB and slow down every start of the portable exe.
+electronLanguages:
+  - en-US
+  - en-GB
+  - hi
 # No native modules: SQLite comes built into Electron (node:sqlite).
 npmRebuild: false
 nodeGypRebuild: false

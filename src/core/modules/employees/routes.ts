@@ -101,15 +101,16 @@ export const employeesRoutes = {
   }),
 
   /* ---------------- Salary ---------------- */
+  /** `date` = the salary date being considered: only the advance outstanding on that day can be recovered. */
   'salary.preview': route({
     access: 'employees.salary',
-    input: z.object({ employeeId: zId, month: zMonth }),
-    handler: (ctx, input) => salary.previewSalary(ctx, input.employeeId, input.month),
+    input: z.object({ employeeId: zId, month: zMonth, date: zDate.nullish() }),
+    handler: (ctx, input) => salary.previewSalary(ctx, input.employeeId, input.month, input.date),
   }),
   'salary.monthSheet': route({
     access: 'employees.salary',
-    input: z.object({ month: zMonth }),
-    handler: (ctx, input) => salary.salaryMonthSheet(ctx, input.month),
+    input: z.object({ month: zMonth, date: zDate.nullish() }),
+    handler: (ctx, input) => salary.salaryMonthSheet(ctx, input.month, input.date),
   }),
   'salary.process': route({
     access: 'employees.salary',
@@ -134,6 +135,8 @@ export const employeesRoutes = {
       month: zMonth,
       date: zDate.nullish(),
       recoverAdvances: z.boolean().default(true),
+      /** Also process employees with no attendance marked (paid for the full month). Off = they are skipped. */
+      includeUnmarked: z.boolean().default(false),
       payNow: z.object({ mode: zSettlementMode, accountId: zId.nullish() }).nullish(),
     }),
     handler: (ctx, input) => salary.processAllSalaries(ctx, input),

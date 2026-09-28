@@ -12,8 +12,8 @@ export const salesPages: AppRoute[] = [
   { path: '/sales/bills', element: <BillsList />, perm: ['billing.create', 'billing.view'] },
   { path: '/sales/bills/:id', element: <BillDetail />, perm: ['billing.create', 'billing.view'] },
   { path: '/sales/bills/:id/edit', element: <BillingScreen />, perm: 'billing.edit', fullBleed: true },
-  { path: '/sales/returns', element: <ReturnsList />, perm: ['returns.create', 'returns.cancel', 'billing.view'] },
-  { path: '/sales/returns/new', element: <ReturnNew />, perm: 'returns.create' },
-  { path: '/sales/returns/:id', element: <ReturnDetail />, perm: ['returns.create', 'returns.cancel', 'billing.view'] },
+  { path: '/sales/returns', element: <ReturnsList />, perm: ['returns.create', 'returns.adjust', 'returns.cancel', 'billing.view'] },
+  { path: '/sales/returns/new', element: <ReturnNew />, perm: ['returns.create', 'returns.adjust'] },
+  { path: '/sales/returns/:id', element: <ReturnDetail />, perm: ['returns.create', 'returns.adjust', 'returns.cancel', 'billing.view'] },
   { path: '/sales/items', element: <ItemsPage />, perm: ['items.manage', 'billing.create', 'billing.view'] },
 ];

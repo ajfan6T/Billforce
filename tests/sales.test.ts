@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { createTestApp, ledgerProblems, systemBalance, type TestApp } from './helpers';
-import { partyBalance, systemAccountId, getEntry, getEntryLines } from '../src/core/accounting/ledger';
+import { accountBalance, partyBalance, systemAccountId, getEntry, getEntryLines } from '../src/core/accounting/ledger';
 import { updateSection } from '../src/core/settings';
 import { calcBill, billPaymentMode, shareDiscount } from '../src/shared/billing';
 
@@ -21,6 +21,10 @@ function revisions(t: TestApp, billId: number) {
 
 function activity(t: TestApp, action: string) {
   return t.app.db.all<{ summary: string; entity_id: number; username: string }>('SELECT summary, entity_id, username FROM activity_log WHERE action = ? ORDER BY id', [action]);
+}
+
+function accountBal(t: TestApp, accountId: number) {
+  return accountBalance(t.app.ctx(), accountId);
 }
 
 function removePermission(t: TestApp, role: 'cashier' | 'manager', perm: string) {
@@ -744,5 +748,113 @@ describe('items (price list)', () => {
     expect((await t.fails('sales.update', { id: bill.id, items: [{ itemName: 'Pen', qty: 2, rate: 1000 }], payments: [{ mode: 'cash', amount: 2000 }] })).code).toBe('PERIOD_CLOSED');
     expect(t.app.db.value("SELECT status FROM bills WHERE id = ?", [bill.id])).toBe('active');
     expect(ledgerProblems(t.app)).toEqual([]);
+  });
+});
+
+describe('changing item rates needs "billing.rate"', () => {
+  it('refuses a changed rate on a catalogue item, but not on one-time items or items without a list rate', async () => {
+    const t = await createTestApp();
+    const rice = await item(t, 'Rice 25kg', 150000, 'bag');
+    const loose = await item(t, 'Loose tea', 0, 'kg');
+    removePermission(t, 'cashier', 'billing.rate');
+    removePermission(t, 'cashier', 'billing.discount');
+    await t.loginAs('cashier');
+    const e = await t.fails('sales.create', { items: [{ itemId: rice.id, itemName: 'Rice 25kg', qty: 1, rate: 100 }], payments: [{ mode: 'cash', amount: 100 }] });
+    expect(e).toMatchObject({
+      code: 'FORBIDDEN',
+      message: 'You are not allowed to change the rate of "Rice 25kg" (list rate ₹1,500.00). Bill it at the list rate or ask the owner for permission.',
+      fields: { 'items.0.rate': 'Rate changes need permission' },
+    });
+    expect((await t.fails('sales.create', { items: [{ itemId: rice.id, itemName: 'Rice 25kg', qty: 1, rate: 160000 }], payments: [] })).code).toBe('FORBIDDEN');
+    const ok = await t.call('sales.create', {
+      items: [
+        { itemId: rice.id, itemName: 'Rice 25kg', qty: 1, rate: 150000 },
+        { itemId: loose.id, itemName: 'Loose tea', qty: 0.5, rate: 40000 },
+        { itemName: 'Carry bag', qty: 1, rate: 500 },
+      ],
+      payments: [{ mode: 'cash', amount: 170500 }],
+    });
+    expect(ok.total).toBe(170500);
+    expect(ledgerProblems(t.app)).toEqual([]);
+  });
+
+  it('lets cashiers change rates by default and logs the changed rate', async () => {
+    const t = await createTestApp();
+    const sugar = await item(t, 'Sugar', 4800, 'kg');
+    await t.loginAs('cashier');
+    const bill = await t.call('sales.create', { items: [{ itemId: sugar.id, itemName: 'Sugar', qty: 2, rate: 4500 }], payments: [{ mode: 'cash', amount: 9000 }] });
+    const log = activity(t, 'bill.create').at(-1)!;
+    expect(log.summary).toBe(`Created bill ${bill.billNo} for ₹90.00 (Cash). Rate changed: Sugar ₹45.00 (list ₹48.00)`);
+  });
+
+  it('keeps the saved rates of an edited bill without the permission', async () => {
+    const t = await createTestApp();
+    const oil = await item(t, 'Oil 1L', 15000, 'pcs');
+    const bill = await t.call('sales.create', { items: [{ itemId: oil.id, itemName: 'Oil 1L', qty: 2, rate: 14000 }], payments: [{ mode: 'cash', amount: 28000 }] });
+    await t.call('items.update', { id: oil.id, name: 'Oil 1L', unit: 'pcs', rate: 16000 });
+    removePermission(t, 'manager', 'billing.rate');
+    await t.loginAs('manager');
+    const same = await t.call('sales.update', { id: bill.id, items: [{ itemId: oil.id, itemName: 'Oil 1L', qty: 3, rate: 14000 }], payments: [{ mode: 'cash', amount: 42000 }], reason: 'One more' });
+    expect(same.total).toBe(42000);
+    const e = await t.fails('sales.update', { id: bill.id, items: [{ itemId: oil.id, itemName: 'Oil 1L', qty: 3, rate: 13000 }], payments: [{ mode: 'cash', amount: 39000 }] });
+    expect(e.code).toBe('FORBIDDEN');
+    // Repeating the bill uses today's list rate for someone who may not change rates.
+    const rep = await t.call('sales.repeatData', { billId: bill.id });
+    expect(rep.lines[0]).toMatchObject({ rate: 16000, defaultRate: 16000 });
+    await t.loginOwner();
+    expect((await t.call('sales.repeatData', { billId: bill.id })).lines[0].rate).toBe(14000);
+  });
+});
+
+describe('editing a bill keeps its payment accounts', () => {
+  it('keeps a split row on the account it was received in when no account is sent', async () => {
+    const t = await createTestApp();
+    const c = await customer(t);
+    const hdfc = await t.call('accounts.create', { name: 'HDFC Current', groupCode: 'bank' });
+    const sbi = await t.call('accounts.create', { name: 'SBI Savings', groupCode: 'bank' });
+    updateSection(t.app.ctx(), 'accounts', { upiAccountId: hdfc.id });
+    const input = { customerId: c.id, items: [{ itemName: 'Cooler', qty: 1, rate: 100000 }] };
+    const bill = await t.call('sales.create', { ...input, payments: [{ mode: 'upi', amount: 60000, reference: 'UTR123' }] });
+    expect(bill.payments[0]).toMatchObject({ accountName: 'HDFC Current', reference: 'UTR123' });
+    expect(bill.paymentMode).toBe('split');
+
+    updateSection(t.app.ctx(), 'accounts', { upiAccountId: sbi.id });
+    // What the billing screen sent before the fix: the same row without its account.
+    const edited = await t.call('sales.update', { id: bill.id, ...input, payments: [{ mode: 'upi', amount: 60000 }], remarks: 'Deliver Sunday' });
+    expect(edited.payments[0]).toMatchObject({ accountId: hdfc.id, accountName: 'HDFC Current', reference: 'UTR123' });
+    expect(accountBal(t, hdfc.id)).toBe(60000);
+    expect(accountBal(t, sbi.id)).toBe(0);
+    // A changed amount (or an explicit account) is taken as sent.
+    const kept = await t.call('sales.update', { id: bill.id, ...input, payments: [{ mode: 'upi', amount: 60000, accountId: hdfc.id }] });
+    expect(kept.payments[0]).toMatchObject({ accountName: 'HDFC Current', reference: 'UTR123' });
+    const moved = await t.call('sales.update', { id: bill.id, ...input, payments: [{ mode: 'upi', amount: 60000, accountId: sbi.id }] });
+    expect(moved.payments[0]).toMatchObject({ accountName: 'SBI Savings', reference: null });
+    const more = await t.call('sales.update', { id: bill.id, ...input, payments: [{ mode: 'upi', amount: 70000 }] });
+    expect(more.payments[0].accountName).toBe('SBI Savings');
+    expect(ledgerProblems(t.app)).toEqual([]);
+  });
+});
+
+describe('bill receipts and labels', () => {
+  it('prints an advance, not a negative due, when the customer has paid in advance', async () => {
+    const t = await createTestApp();
+    const c = await customer(t);
+    await t.call('returns.create', { kind: 'adjustment', customerId: c.id, amount: 100000, reason: 'Advance', refundMode: 'credit' });
+    const bill = await t.call('sales.create', { customerId: c.id, items: [{ itemName: 'Kettle', qty: 1, rate: 20000 }], payments: [] });
+    const { html } = await t.call('sales.receiptHtml', { id: bill.id });
+    expect(html).toContain('Advance with us: ₹800.00 (as on 28-09-2026)');
+    expect(html).not.toContain('Total due from you: -');
+  });
+
+  it('calls a bill with a credit part "Part paid", not "Split"', async () => {
+    const t = await createTestApp();
+    const c = await customer(t);
+    const bill = await t.call('sales.create', { customerId: c.id, items: [{ itemName: 'Fan', qty: 1, rate: 200000 }], payments: [{ mode: 'cash', amount: 50000 }] });
+    expect(bill.paymentMode).toBe('split');
+    expect(activity(t, 'bill.create').at(-1)!.summary).toBe(`Created bill ${bill.billNo} for ₹2,000.00 (Part paid) - Anita Desai`);
+    const { billPaymentLabel } = await import('../src/shared/billing');
+    expect(billPaymentLabel('split', 150000)).toBe('Part paid');
+    expect(billPaymentLabel('split', 0)).toBe('Split');
+    expect(billPaymentLabel('cash')).toBe('Cash');
   });
 });

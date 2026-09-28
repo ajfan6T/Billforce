@@ -34,7 +34,8 @@ async function shop() {
   b.bill({ date: '2026-09-28', lines: [{ item: 'Samosa', qty: 1, rate: R(20) }], payments: [{ mode: 'cash', amount: R(20) }], cancel: true });
   b.creditNote({ date: '2026-09-28', billId: split.id, lines: [{ item: 'Oil', qty: 1, rate: R(180) }], refund: 'credit' });
   b.purchase('2026-09-15', gupta, R(3000), R(1000), 'cash');
-  b.expense('2026-09-18', 'Electricity', R(700), 'cash');
+  // Entered on the Expenses page (an expense voucher), as a shopkeeper would.
+  await t.call('expenses.create', { date: '2026-09-18', accountId: b.accountId('Electricity'), amount: R(700), mode: 'cash' });
   b.expense('2026-08-18', 'Rent', R(2000), 'cash');
   return { t, b, anita, ramesh };
 }
@@ -65,6 +66,26 @@ describe('dashboard summary', () => {
     expect(d.recentBills?.bills).toHaveLength(8);
     expect(d.recentBills?.bills[0].status).toBe('cancelled'); // latest first, cancelled bills shown as such
     expect(d.recentBills?.bills[0].date).toBe('2026-09-28');
+    expect(ledgerProblems(t.app)).toEqual([]);
+  });
+
+  it('shows the same expenses as the Expenses page: not discounts, round off or salaries', async () => {
+    const { t, b } = await shop();
+    // This month also has a bill discount, round off (rounded down), a salary and a cancelled expense.
+    b.bill({ date: '2026-09-25', lines: [{ item: 'Oil', qty: 1, rate: R(180.3) }], billDiscount: R(10), roundOff: true, payments: [{ mode: 'cash', amount: R(170) }] });
+    b.post('2026-09-26', 'journal', [{ account: 'SALARY', debit: R(3000) }, { account: 'CASH', credit: R(3000) }], 'Salary for September');
+    const cancelled = await t.call('expenses.create', { date: '2026-09-27', accountId: b.accountId('Electricity'), amount: R(99), mode: 'cash' });
+    await t.call('expenses.cancel', { id: cancelled.id, reason: 'Entered twice' });
+    const month = { from: '2026-09-01', to: '2026-09-28' };
+    const d = await t.call('dashboard.summary');
+    const page = await t.call('expenses.list', month);
+    const summary = await t.call('expenses.summary', month);
+    expect(d.expensesThisMonth).toBe(R(700));
+    expect(d.expensesThisMonth).toBe(page.totals.amount);
+    expect(d.expensesThisMonth).toBe(summary.summary?.find((s) => s.label === 'Total expenses')?.value);
+    // The P&L still counts every cost (discount, round off and salary are indirect expenses there).
+    const pl = profitLossFigures(t.app.ctx(), month.from, month.to);
+    expect(pl.indirectExpenses).toBe(R(700 + 10 + 0.3 + 3000));
     expect(ledgerProblems(t.app)).toEqual([]);
   });
 

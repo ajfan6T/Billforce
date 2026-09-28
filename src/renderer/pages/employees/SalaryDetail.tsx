@@ -38,7 +38,7 @@ export function SalaryDetailPage() {
     setPrinting(true);
     try {
       const res = await call('salary.print', { id: s.id });
-      if (res.printed) toast.success(`Printed salary slip ${s.salaryNo}`);
+      if (res.printed) toast.success(res.duplicate ? `Duplicate of salary slip ${s.salaryNo} sent to the printer` : `Printed salary slip ${s.salaryNo}`);
       else if (res.message) toast.warning(res.message);
     } catch (e) {
       toast.error(e);

@@ -1,4 +1,4 @@
-import { useEffect } from 'react';
+import { useEffect, type ReactNode } from 'react';
 import { Link, useNavigate } from 'react-router';
 import { AlertTriangle, ArrowDownRight, ArrowUpRight, HandCoins, Landmark, PiggyBank, Plus, Receipt, ShoppingCart, Truck, Wallet, WalletCards } from 'lucide-react';
 import { Alert, Badge, Button, Card, EmptyState, ErrorBox, LinkButton, Loading, Page, Stat, type Tone } from '../../components/ui';
@@ -6,8 +6,9 @@ import { DataTable, type Column } from '../../components/table';
 import { BarList, ColumnChart, MODE_COLORS, ShareBar } from '../../components/charts';
 import { useQuery } from '../../hooks';
 import { useAuth } from '../../auth';
+import { withPeriod, type LinkPeriod } from '../../links';
 import { formatINR, formatQty } from '../../../shared/money';
-import { formatDate, formatTime, weekdayShort } from '../../../shared/dates';
+import { formatDate, formatTime, presetRange, weekdayShort, type DatePreset } from '../../../shared/dates';
 import type { ApiOutput } from '../../api';
 import './dashboard.css';
 
@@ -18,6 +19,27 @@ const WEEKDAYS = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Frida
 const MONTHS = ['January', 'February', 'March', 'April', 'May', 'June', 'July', 'August', 'September', 'October', 'November', 'December'];
 const MODE_LABEL: Record<string, string> = { cash: 'Cash', upi: 'UPI', bank: 'Bank', credit: 'Credit', split: 'Split' };
 const MODE_TONE: Record<string, Tone> = { cash: 'green', upi: 'purple', bank: 'blue', credit: 'amber', split: 'neutral' };
+
+/** The sales figures here are bill totals less returns, which Sales insights calls "Net sales after discounts". */
+const NET_LABEL = 'Net sales after discounts';
+const SALES_TIP =
+  'Bill totals after discounts and round off, less returns: "Net sales after discounts" in Sales insights. The Profit & loss "Net sales" is before discounts (it shows them under expenses).';
+const EXPENSES_TIP =
+  'Expenses entered this month: the same total as the Expenses page. Purchases, salaries, discounts and round off are not included; the Profit & loss shows every cost.';
+
+/** A period ending on the dashboard's today, for links that must open on the dates the card shows. */
+function period(preset: DatePreset, today: string): LinkPeriod {
+  return { preset, ...presetRange(preset, today) };
+}
+
+/** A label that explains how its figure is worked out when pointed at. */
+function Defined({ tip, children }: { tip: string; children: ReactNode }) {
+  return (
+    <span className="db-defined" title={tip}>
+      {children}
+    </span>
+  );
+}
 
 /** "Monday, 28 September 2026" */
 function longDate(iso: string): string {
@@ -84,14 +106,16 @@ function TrendCard({ d, loading }: { d: Summary; loading: boolean }) {
       className="db-card"
       title="Sales in the last 30 days"
       actions={
-        <Link to="/reports/sales?tab=day" className="small">
+        <Link to={withPeriod('/reports/sales?tab=day', period('last_30_days', d.today))} className="small">
           Sales insights
         </Link>
       }
     >
       <div className="db-month">
         <div>
-          <div className="db-month-label">This month</div>
+          <div className="db-month-label">
+            <Defined tip={SALES_TIP}>This month</Defined>
+          </div>
           <div className="db-month-value">{formatINR(d.month.thisMonth)}</div>
         </div>
         <div className="db-month-meta">
@@ -102,7 +126,7 @@ function TrendCard({ d, loading }: { d: Summary; loading: boolean }) {
       <ColumnChart
         labels={d.trend.dates.map(shortDay)}
         values={d.trend.values}
-        seriesName="Net sales"
+        seriesName={NET_LABEL}
         tooltipTitles={d.trend.dates.map((x) => `${weekdayShort(x)}, ${formatDate(x)}`)}
         height={170}
         emptyMessage="No sales in the last 30 days"
@@ -112,9 +136,20 @@ function TrendCard({ d, loading }: { d: Summary; loading: boolean }) {
   );
 }
 
-function ModesCard({ today }: { today: NonNullable<Summary['todaySales']> }) {
+function ModesCard({ today, date }: { today: NonNullable<Summary['todaySales']>; date: string }) {
+  const { can } = useAuth();
   return (
-    <Card className="db-card" title="Today by payment mode">
+    <Card
+      className="db-card"
+      title="Today by payment mode"
+      actions={
+        can('reports.sales') ? (
+          <Link to={withPeriod('/reports/sales?tab=mode', period('today', date))} className="small">
+            Details
+          </Link>
+        ) : undefined
+      }
+    >
       <ShareBar
         legendColumns={1}
         emptyMessage="No bills yet today"
@@ -130,13 +165,13 @@ function ModesCard({ today }: { today: NonNullable<Summary['todaySales']> }) {
   );
 }
 
-function TopItemsCard({ items }: { items: NonNullable<Summary['topItems']> }) {
+function TopItemsCard({ items, today }: { items: NonNullable<Summary['topItems']>; today: string }) {
   return (
     <Card
       className="db-card"
       title="Top items this month"
       actions={
-        <Link to="/reports/sales?tab=item" className="small">
+        <Link to={withPeriod('/reports/sales?tab=item', period('this_month', today))} className="small">
           All items
         </Link>
       }
@@ -227,8 +262,10 @@ export function DashboardPage() {
   const firstName = d.user.name.split(' ')[0] || d.user.name;
   const t = d.todaySales;
   const statCount = (t ? 1 : 0) + (d.balances ? 2 : 0) + (d.dues ? 2 : 0) + (d.profit ? 1 : 0);
-  const modes = t ? <ModesCard today={t} /> : null;
-  const items = d.topItems ? <TopItemsCard items={d.topItems} /> : null;
+  const modes = t ? <ModesCard today={t} date={d.today} /> : null;
+  const items = d.topItems ? <TopItemsCard items={d.topItems} today={d.today} /> : null;
+  // Cards open their page on the period they show, so the figures match.
+  const thisMonth = period('this_month', d.today);
   const bills = d.recentBills ? <BillsCard recent={d.recentBills} today={d.today} /> : null;
   const nothing = !statCount && !bills && !items;
 
@@ -263,18 +300,18 @@ export function DashboardPage() {
         <div className={`db-stats${statCount >= 4 ? ` cols-${statCount}` : ''}${q.loading ? ' is-loading' : ''}`}>
           {t && (
             <Stat
-              label="Today's sales"
+              label={<Defined tip={SALES_TIP}>Today's sales</Defined>}
               value={formatINR(t.netSales)}
               tone="blue"
               icon={<Receipt size={16} />}
               hint={`${t.bills} bill${t.bills === 1 ? '' : 's'}${t.returns ? ` · returns ${formatINR(t.returns)}` : ''}`}
-              onClick={() => navigate(can('reports.sales') ? '/reports/sales?tab=day' : '/sales/bills')}
+              onClick={() => navigate(can('reports.sales') ? withPeriod('/reports/sales?tab=day', period('today', d.today)) : '/sales/bills')}
             />
           )}
           {d.balances && (
             <>
-              <Stat label="Cash in hand" value={formatINR(d.balances.cash)} icon={<Wallet size={16} />} hint="Cash book" onClick={can('accounts.view') ? () => navigate('/accounts/cash-book') : undefined} />
-              <Stat label="Bank & UPI" value={formatINR(d.balances.bank)} icon={<Landmark size={16} />} hint="Bank & UPI book" onClick={can('accounts.view') ? () => navigate('/accounts/bank-book') : undefined} />
+              <Stat label="Cash in hand" value={formatINR(d.balances.cash)} icon={<Wallet size={16} />} hint="Cash book" onClick={can('accounts.view') ? () => navigate(withPeriod('/accounts/cash-book', thisMonth)) : undefined} />
+              <Stat label="Bank & UPI" value={formatINR(d.balances.bank)} icon={<Landmark size={16} />} hint="Bank & UPI book" onClick={can('accounts.view') ? () => navigate(withPeriod('/accounts/bank-book', thisMonth)) : undefined} />
             </>
           )}
           {d.dues && (
@@ -284,14 +321,14 @@ export function DashboardPage() {
                 value={formatINR(d.dues.receivables)}
                 icon={<HandCoins size={16} />}
                 hint={`from ${d.dues.receivableCustomers} customer${d.dues.receivableCustomers === 1 ? '' : 's'}`}
-                onClick={canAny(['reports.financial', 'customers.view']) ? () => navigate('/reports/receivables-ageing') : undefined}
+                onClick={canAny(['reports.financial', 'customers.view']) ? () => navigate(`/reports/receivables-ageing?asOf=${d.today}`) : undefined}
               />
               <Stat
                 label="To pay"
                 value={formatINR(d.dues.payables)}
                 icon={<WalletCards size={16} />}
                 hint={`to ${d.dues.payableSuppliers} supplier${d.dues.payableSuppliers === 1 ? '' : 's'}`}
-                onClick={canAny(['reports.financial', 'suppliers.view']) ? () => navigate('/reports/payables-ageing') : undefined}
+                onClick={canAny(['reports.financial', 'suppliers.view']) ? () => navigate(`/reports/payables-ageing?asOf=${d.today}`) : undefined}
               />
             </>
           )}
@@ -308,13 +345,13 @@ export function DashboardPage() {
                     {formatINR(Math.abs(d.profit.thisFy))}
                   </span>
                   {d.expensesThisMonth !== null && (
-                    <span className="db-hint-line" title="Expenses this month (purchases not included)">
+                    <span className="db-hint-line" title={EXPENSES_TIP}>
                       Expenses {formatINR(d.expensesThisMonth)}
                     </span>
                   )}
                 </>
               }
-              onClick={() => navigate('/reports/profit-loss')}
+              onClick={() => navigate(withPeriod('/reports/profit-loss', thisMonth))}
             />
           )}
         </div>

@@ -41,12 +41,16 @@ export function ReceiptDetailPage() {
     void preview.reload();
   };
 
+  // Same rule as bills: the first print is free, printing again needs "Reprint bills" and is marked DUPLICATE.
+  const reprint = !!d && d.printCount > 0;
+  const canPrint = !reprint || can('billing.reprint');
+
   const print = async () => {
-    if (!d) return;
+    if (!d || !canPrint) return;
     setPrinting(true);
     try {
       const res = await call('receipts.print', { id: d.id });
-      if (res.printed) toast.success(`Printed ${d.receiptNo}`);
+      if (res.printed) toast.success(res.duplicate ? `Printed a duplicate of ${d.receiptNo}` : `Printed ${d.receiptNo}`);
       else if (res.message) toast.warning(res.message);
       reload();
     } catch (e) {
@@ -80,7 +84,7 @@ export function ReceiptDetailPage() {
   const active = d?.status === 'active';
   const canEdit = active && can('customers.receive') && can('billing.edit');
   const canCancel = active && can('customers.receive') && can('billing.cancel');
-  useHotkeys({ 'ctrl+p': () => void print() }, [d?.id]);
+  useHotkeys({ 'ctrl+p': () => void print() }, [d?.id, d?.printCount]);
 
   if (!valid) return <Page><ErrorBox error="This payment link is not valid." /></Page>;
   if (r.error) return <Page><PageHeader title="Payment" back="/customers/receipts" /><ErrorBox error={r.error} onRetry={r.reload} /></Page>;
@@ -103,9 +107,11 @@ export function ReceiptDetailPage() {
         }
         actions={
           <>
-            <Button icon={<Printer size={16} />} kbd="Ctrl+P" loading={printing} onClick={print}>
-              {d.printCount ? 'Reprint' : 'Print'}
-            </Button>
+            {canPrint && (
+              <Button icon={<Printer size={16} />} kbd="Ctrl+P" loading={printing} onClick={print}>
+                {reprint ? 'Reprint' : 'Print'}
+              </Button>
+            )}
             {canEdit && (
               <Button icon={<Pencil size={16} />} onClick={() => setEditing(true)}>
                 Edit
@@ -159,6 +165,7 @@ export function ReceiptDetailPage() {
         </div>
         <Card title="Receipt" actions={<span className="small muted">{PAYMENT_MODE_LABELS[d.mode]} · printed {d.printCount}×</span>}>
           <ReceiptPreview html={preview.data?.html} height={520} />
+          {!canPrint && <p className="faint small mt-1">This receipt was already printed. Reprinting needs permission.</p>}
         </Card>
       </div>
       <ReceiptModal open={editing} receipt={d} onClose={() => setEditing(false)} onSaved={reload} />

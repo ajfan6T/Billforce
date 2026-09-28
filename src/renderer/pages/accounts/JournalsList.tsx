@@ -7,11 +7,11 @@ import { DataTable, type Column } from '../../components/table';
 import { DateRangePicker, ExportButtons } from '../../components/report';
 import { useDebounced, useHotkeys, useQuery } from '../../hooks';
 import { useAuth } from '../../auth';
-import type { ApiOutput } from '../../api';
+import { call, type ApiOutput } from '../../api';
 import { formatINR } from '../../../shared/money';
 import { describeRange } from '../../../shared/dates';
 import type { VoucherType } from '../../../shared/constants';
-import { CancelledBadge, listReport, useRange, VOUCHER_OPTIONS, VoucherBadge } from './common';
+import { CancelledBadge, listReport, PageBar, usePage, useRange, VOUCHER_OPTIONS, VoucherBadge } from './common';
 
 type Row = ApiOutput<'journals.list'>['rows'][number];
 
@@ -23,7 +23,9 @@ export function JournalsListPage() {
   const [status, setStatus] = useState<'all' | 'active' | 'cancelled'>('all');
   const [q, setQ] = useState('');
   const dq = useDebounced(q, 250);
-  const list = useQuery('journals.list', { from: range.from, to: range.to, voucherType: type || null, q: dq || null, status });
+  const [page, setPage] = usePage(`${range.from}|${range.to}|${type}|${dq}|${status}`);
+  const input = { from: range.from, to: range.to, voucherType: type || null, q: dq || null, status, page };
+  const list = useQuery('journals.list', input);
   const canManage = can('accounts.manage');
 
   useHotkeys({ 'alt+n': () => canManage && navigate('/accounts/journals/new') });
@@ -59,9 +61,8 @@ export function JournalsListPage() {
     { key: 'amount', label: 'Amount', type: 'money', width: 140 },
   ];
 
-  const report = useMemo(() => {
-    if (!list.data) return undefined;
-    return listReport(
+  const toReport = (data: ApiOutput<'journals.list'>) =>
+    listReport(
       'Journal entries',
       describeRange(range),
       [
@@ -73,10 +74,13 @@ export function JournalsListPage() {
         { key: 'cr', label: 'Credit', width: 24, get: (r) => r.creditNames },
         { key: 'amount', label: 'Amount', type: 'money', width: 14, get: (r) => (r.isVoid ? null : r.amount) },
       ],
-      list.data.rows,
-      { totals: { date: null, no: 'Total', type: null, narration: null, dr: null, cr: null, amount: list.data.totalAmount }, link: (r) => ({ kind: 'journal', id: r.id }), landscape: true },
+      data.rows,
+      { totals: { date: null, no: 'Total', type: null, narration: null, dr: null, cr: null, amount: data.totalAmount }, link: (r) => ({ kind: 'journal', id: r.id }), landscape: true },
     );
-  }, [list.data, range]);
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  const report = useMemo(() => (list.data ? toReport(list.data) : undefined), [list.data, range]);
+  // The export has every matching entry, not just the page on screen (its total covers them all).
+  const loadAll = list.data && list.data.pageCount > 1 ? async () => toReport(await call('journals.list', { ...input, page: null, all: true })) : undefined;
 
   return (
     <Page>
@@ -85,7 +89,7 @@ export function JournalsListPage() {
         subtitle="Every entry in your books, including those made automatically by bills, purchases and salaries"
         actions={
           <>
-            <ExportButtons report={report} />
+            <ExportButtons report={report} load={loadAll} />
             {canManage && (
               <Button variant="primary" icon={<Plus size={16} />} kbd="Alt+N" onClick={() => navigate('/accounts/journals/new')}>
                 New journal
@@ -112,6 +116,7 @@ export function JournalsListPage() {
             <SearchInput value={q} onChange={setQ} placeholder="Number, narration, account, party or amount" />
           </Toolbar>
         </div>
+        <PageBar info={list.data} total={list.data?.total ?? 0} what="entries (newest first)" onPage={setPage} figuresNote={false} />
         {list.error ? (
           <div className="card-body">
             <ErrorBox error={list.error} onRetry={list.reload} />
@@ -145,7 +150,7 @@ export function JournalsListPage() {
             }
           />
         )}
-        {list.data?.truncated && <div className="ac-note">Showing the latest {list.data.rows.length} of {list.data.total} entries. Choose a shorter period or search to see the rest.</div>}
+        <PageBar info={list.data} total={list.data?.total ?? 0} what="entries (newest first)" onPage={setPage} figuresNote={false} bottom />
       </Card>
     </Page>
   );

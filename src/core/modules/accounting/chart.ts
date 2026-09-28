@@ -13,6 +13,7 @@ import { accountBalance, getAccount, paymentAccountId, postEntry, replaceEntry, 
 import { ACCOUNT_TYPE_LABELS, ACCOUNT_TYPES, type AccountType, type PartyType, type SettlementMode } from '../../../shared/constants';
 import { formatDrCr } from '../../../shared/money';
 import { listAccounts } from './accounts';
+import { openingLockedReason } from './common';
 
 export interface GroupInfo {
   code: string;
@@ -83,7 +84,7 @@ export function accountOpeningEntry(ctx: Ctx, accountId: number): { id: number; 
   const row = ctx.db.get<{ id: number; is_void: number; narration: string | null }>(
     `SELECT e.id, e.is_void, e.narration FROM journal_entries e
       WHERE e.voucher_type = 'opening' AND e.source_type = 'opening' AND (e.source_id = ? OR e.source_id IS NULL)
-        AND EXISTS (SELECT 1 FROM journal_lines l WHERE l.entry_id = e.id AND l.account_id = ? AND l.party_type IS NULL)
+        AND EXISTS (SELECT 1 FROM journal_lines l WHERE l.entry_id = e.id AND +l.account_id = ? AND +l.party_type IS NULL)
       ORDER BY e.is_void, e.id LIMIT 1`,
     [accountId, accountId],
   );
@@ -110,6 +111,12 @@ export function setAccountOpening(ctx: Ctx, acct: AccountRow, debitBalance: numb
   if (problem && debitBalance !== 0) throw fail.validation(problem, { openingBalance: problem });
   const date = getSection(ctx, 'accounts').booksStartDate;
   const existing = accountOpeningEntry(ctx, acct.id);
+  const locked = openingLockedReason(ctx);
+  if (locked) {
+    // The first year is closed: the opening entry is final (a rename keeps its old narration).
+    if (debitBalance !== (existing?.amount ?? 0)) throw fail.validation(locked, { openingBalance: locked });
+    return existing?.id ?? null;
+  }
   const narration = `Opening balance - ${acct.name}`;
   const lines =
     debitBalance > 0
@@ -179,8 +186,9 @@ export interface ChartType {
 export function chartTree(
   ctx: Ctx,
   opts: { includeInactive?: boolean; asOf?: string } = {},
-): { types: ChartType[]; totalDebit: number; totalCredit: number; booksStartDate: string } {
-  const accounts = listAccounts(ctx, { includeInactive: opts.includeInactive, withBalances: true, asOf: opts.asOf });
+): { types: ChartType[]; totalDebit: number; totalCredit: number; booksStartDate: string; openingLockedReason: string | null } {
+  // Inactive accounts that still have a balance (e.g. an expense head no longer used this year) always show, so the totals agree.
+  const accounts = listAccounts(ctx, { includeInactive: true, withBalances: true, asOf: opts.asOf }).filter((a) => opts.includeInactive || a.isActive || a.balance);
   const counts = new Map(
     ctx.db.all<{ account_id: number; n: number }>('SELECT account_id, COUNT(DISTINCT entry_id) AS n FROM journal_lines GROUP BY account_id').map((r) => [r.account_id, r.n]),
   );
@@ -220,7 +228,7 @@ export function chartTree(
     if ((a.balance ?? 0) > 0) totalDebit += a.balance!;
     else totalCredit -= a.balance ?? 0;
   }
-  return { types, totalDebit, totalCredit, booksStartDate: getSection(ctx, 'accounts').booksStartDate };
+  return { types, totalDebit, totalCredit, booksStartDate: getSection(ctx, 'accounts').booksStartDate, openingLockedReason: openingLockedReason(ctx) };
 }
 
 /* ------------------------------ Account detail ------------------------------ */
@@ -244,6 +252,8 @@ export interface AccountDetail {
   /** Opening balance on the books start date (debit - credit); null when the account cannot have one. */
   openingBalance: number | null;
   openingBlockedReason: string | null;
+  /** Set when the first financial year is closed: the opening balance is shown but can no longer be changed. */
+  openingLockedReason: string | null;
   booksStartDate: string;
   loan: { id: number; name: string } | null;
   defaultFor: SettlementMode[];
@@ -259,7 +269,10 @@ export interface AccountDetail {
 function deleteProblem(ctx: Ctx, a: AccountRow, entries: number, loan: { name: string } | null, defaults: SettlementMode[]): string | null {
   if (a.system_key) return 'Built-in accounts are used automatically by Billforce and cannot be deleted.';
   if (loan) return `This is the account of the loan "${loan.name}". Manage it from Accounts > Loans.`;
-  if (entries) return `This account has ${entries} ${entries === 1 ? 'entry' : 'entries'}, so it cannot be deleted. You can deactivate it instead once its balance is zero.`;
+  if (entries) {
+    const when = a.type === 'income' || a.type === 'expense' ? '' : ' once its balance is zero';
+    return `This account has ${entries} ${entries === 1 ? 'entry' : 'entries'}, so it cannot be deleted. You can deactivate it instead${when}.`;
+  }
   if (defaults.length) return `This account is used for ${defaults.map((m) => MODE_NAMES[m]).join(' / ')} payments. Choose another account under "Payment accounts" first.`;
   const used =
     ctx.db.value<number>('SELECT COUNT(*) FROM expenses WHERE account_id = ? OR pay_account_id = ?', [a.id, a.id], 0) +
@@ -272,6 +285,8 @@ function deactivateProblem(ctx: Ctx, a: AccountRow, loan: { name: string } | nul
   if (a.system_key) return 'Built-in accounts are used automatically by Billforce and cannot be deactivated.';
   if (loan) return `This is the account of the loan "${loan.name}". Close the loan from Accounts > Loans instead.`;
   if (defaults.length) return `This account is used for ${defaults.map((m) => MODE_NAMES[m]).join(' / ')} payments. Choose another account under "Payment accounts" first.`;
+  // Income and expense heads just leave the pickers; their figures stay in the reports.
+  if (a.type === 'income' || a.type === 'expense') return null;
   const bal = accountBalance(ctx, a.id);
   if (bal !== 0) return `This account has a balance of ${formatDrCr(bal)}. Move the balance to another account with a journal entry first.`;
   return null;
@@ -313,6 +328,7 @@ export function getAccountDetail(ctx: Ctx, id: number): AccountDetail {
     entryCount: entries,
     openingBalance: openingBlocked ? null : (accountOpeningEntry(ctx, id)?.amount ?? 0),
     openingBlockedReason: openingBlocked,
+    openingLockedReason: openingBlocked ? null : openingLockedReason(ctx),
     booksStartDate: getSection(ctx, 'accounts').booksStartDate,
     loan,
     defaultFor: defaults,

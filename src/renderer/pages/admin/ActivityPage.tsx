@@ -63,53 +63,62 @@ function LazyExport({ filters, disabled }: { filters: ApiInput<'activity.report'
   );
 }
 
-/** "paperWidth" -> "Paper width" */
-function prettyKey(k: string): string {
-  const w = k.replace(/([a-z0-9])([A-Z])/g, '$1 $2').replace(/[_.]+/g, ' ').toLowerCase();
-  return w.charAt(0).toUpperCase() + w.slice(1);
-}
+type Detail = ApiOutput<'activity.get'>;
 
-function short(v: unknown): string {
-  if (v === null || v === undefined || v === '') return '—';
-  if (typeof v === 'boolean') return v ? 'Yes' : 'No';
-  if (typeof v === 'object') return JSON.stringify(v);
-  return String(v);
-}
-
-/** Before / after tables when the details have that shape; otherwise the raw details. */
-function DetailsView({ details }: { details: unknown }) {
-  if (details === null || details === undefined) return <p className="muted">No further details were recorded.</p>;
-  const d = details as Record<string, unknown>;
-  if (d && typeof d === 'object' && d.before && d.after && typeof d.before === 'object' && typeof d.after === 'object') {
-    const before = d.before as Record<string, unknown>;
-    const after = d.after as Record<string, unknown>;
-    const keys = [...new Set([...Object.keys(before), ...Object.keys(after)])].filter((k) => JSON.stringify(before[k]) !== JSON.stringify(after[k]));
-    if (keys.length) {
-      return (
-        <div className="table-wrap">
-          <table className="table compact change-table">
-            <thead>
-              <tr>
-                <th>What</th>
-                <th>Before</th>
-                <th>After</th>
-              </tr>
-            </thead>
-            <tbody>
-              {keys.map((k) => (
-                <tr key={k}>
-                  <td>{prettyKey(k)}</td>
-                  <td className="change-old">{short(before[k])}</td>
-                  <td className="change-new">{short(after[k])}</td>
+/**
+ * The details in plain words (worked out by the core: ₹ amounts, DD-MM-YYYY dates, readable labels, internal
+ * fields left out), with the stored data behind "Technical details" for whoever needs it.
+ */
+function DetailsView({ d }: { d: Detail }) {
+  const { changes, facts } = d.view;
+  return (
+    <>
+      {changes.length > 0 && (
+        <div>
+          <div className="section-title mt-0">What changed</div>
+          <div className="table-wrap">
+            <table className="table compact change-table">
+              <thead>
+                <tr>
+                  <th>What</th>
+                  <th>Before</th>
+                  <th>After</th>
                 </tr>
-              ))}
-            </tbody>
-          </table>
+              </thead>
+              <tbody>
+                {changes.map((c, i) => (
+                  <tr key={i}>
+                    <td>{c.label}</td>
+                    <td className="change-old detail-value">{c.before}</td>
+                    <td className="change-new detail-value">{c.after}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
         </div>
-      );
-    }
-  }
-  return <pre className="detail-json">{typeof details === 'string' ? details : JSON.stringify(details, null, 2)}</pre>;
+      )}
+      {facts.length > 0 && (
+        <div>
+          <div className="section-title mt-0">Details</div>
+          <KeyValues items={facts.map((f) => [f.label, <span className="detail-value" key={f.label}>{f.value}</span>])} />
+        </div>
+      )}
+      <details className="tech-details">
+        <summary>Technical details</summary>
+        <div className="stack-sm mt-1">
+          <div className="muted small">
+            Code: <span className="perm-key">{d.action}</span>
+            {d.entityType && d.entityId ? ` · ${d.entityType} #${d.entityId}` : ''}
+          </div>
+          {d.details !== null && d.details !== undefined && (
+            <pre className="detail-json">{typeof d.details === 'string' ? d.details : JSON.stringify(d.details, null, 2)}</pre>
+          )}
+          <div className="muted small">Amounts here are in paise (₹1 = 100 paise) and dates are year-month-day.</div>
+        </div>
+      </details>
+    </>
+  );
 }
 
 function ActivityDetailModal({ id, onClose }: { id: number | null; onClose: () => void }) {
@@ -146,19 +155,13 @@ function ActivityDetailModal({ id, onClose }: { id: number | null; onClose: () =
               ['When', formatDateTime(d.at)],
               ['Who', d.username && d.userName !== d.username ? `${d.userName} (${d.username})` : d.userName],
               ['Action', d.actionLabel],
-              ['Code', <span className="perm-key" key="c">{d.action}</span>],
             ]}
           />
           <div>
             <div className="section-title mt-0">What happened</div>
             <p className="mt-0">{d.summary}</p>
           </div>
-          {d.details !== null && (
-            <div>
-              <div className="section-title mt-0">Details</div>
-              <DetailsView details={d.details} />
-            </div>
-          )}
+          <DetailsView d={d} />
         </div>
       )}
     </Modal>

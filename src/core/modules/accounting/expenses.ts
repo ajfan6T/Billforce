@@ -14,7 +14,17 @@ import { formatINR } from '../../../shared/money';
 import { describeRange } from '../../../shared/dates';
 import { PAYMENT_MODE_LABELS, type PaymentMode } from '../../../shared/constants';
 import type { ReportData, ReportRow } from '../../../shared/report';
-import { activeAccount, assertSameYear, closedYearReason, entryLines, resolveVoucherDate, userName, type EntryLineView } from './common';
+import {
+  activeAccount,
+  assertClosedAccountsUntouched,
+  assertSameYear,
+  closedYearReason,
+  entryLines,
+  outflowWarnings,
+  resolveVoucherDate,
+  userName,
+  type EntryLineView,
+} from './common';
 import { createAccount } from './chart';
 
 export interface ExpenseInput {
@@ -219,8 +229,13 @@ function howPaid(r: Resolved): string {
   return r.mode === 'credit' ? `on credit from ${r.supplier!.name}` : `by ${PAYMENT_MODE_LABELS[r.mode]}`;
 }
 
-export function createExpense(ctx: Ctx, input: ExpenseInput): ExpenseDetail {
+/** An expense just saved, with warnings to show (e.g. cash going below zero). */
+export type SavedExpense = ExpenseDetail & { warnings: string[] };
+
+export function createExpense(ctx: Ctx, input: ExpenseInput): SavedExpense {
   const r = resolve(ctx, input);
+  // Paying more than the cash / bank account holds is allowed (a receipt may not be entered yet) but the user is told.
+  const warnings = outflowWarnings(ctx, linesOf(r), r.date);
   const no = nextDocNumber(ctx, 'expense', r.date);
   const ts = now(ctx);
   const id = ctx.db.insert('expenses', {
@@ -255,14 +270,16 @@ export function createExpense(ctx: Ctx, input: ExpenseInput): ExpenseDetail {
     entityType: 'expense',
     entityId: id,
   });
-  return getExpense(ctx, id);
+  return { ...getExpense(ctx, id), warnings };
 }
 
-export function updateExpense(ctx: Ctx, id: number, input: ExpenseInput & { reason?: string | null }): ExpenseDetail {
+export function updateExpense(ctx: Ctx, id: number, input: ExpenseInput & { reason?: string | null }): SavedExpense {
   const before = getExpenseSimple(ctx, id);
   if (before.status === 'cancelled') throw fail.validation('This expense is cancelled and cannot be edited.');
   const r = resolve(ctx, input, before.date);
   assertSameYear(before.date, r.date, `Expense ${before.expenseNo}`);
+  assertClosedAccountsUntouched(ctx, before.journalEntryId!, linesOf(r), 'change');
+  const warnings = outflowWarnings(ctx, linesOf(r), r.date, before.journalEntryId!);
   replaceEntry(ctx, before.journalEntryId!, {
     date: r.date,
     voucherType: 'expense',
@@ -299,7 +316,7 @@ export function updateExpense(ctx: Ctx, id: number, input: ExpenseInput & { reas
     entityId: id,
     details: { before, after, reason },
   });
-  return getExpense(ctx, id);
+  return { ...getExpense(ctx, id), warnings };
 }
 
 export function cancelExpense(ctx: Ctx, id: number, reason: string): ExpenseDetail {
@@ -307,7 +324,10 @@ export function cancelExpense(ctx: Ctx, id: number, reason: string): ExpenseDeta
   if (before.status === 'cancelled') throw fail.validation('This expense is already cancelled.');
   const why = reason.trim();
   if (!why) throw fail.validation('Enter the reason for cancelling', { reason: 'Enter a reason' });
-  if (before.journalEntryId) voidEntry(ctx, before.journalEntryId, `Expense cancelled: ${why}`);
+  if (before.journalEntryId) {
+    assertClosedAccountsUntouched(ctx, before.journalEntryId, null, 'cancel');
+    voidEntry(ctx, before.journalEntryId, `Expense cancelled: ${why}`);
+  }
   ctx.db.update('expenses', id, {
     status: 'cancelled',
     revision: before.revision + 1,

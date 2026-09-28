@@ -1,6 +1,7 @@
 import { useEffect, useRef, type ReactNode } from 'react';
 import { createPortal } from 'react-dom';
 import { X } from 'lucide-react';
+import { isScreenLocked } from '../guards';
 
 export interface ModalProps {
   open: boolean;
@@ -17,6 +18,11 @@ export interface ModalProps {
 const stack: number[] = [];
 let nextModalId = 1;
 
+/** How many modal dialogs are open right now (0 = none). useHotkeys uses it to keep page shortcuts away from dialogs. */
+export function modalDepth(): number {
+  return stack.length;
+}
+
 /** Accessible modal dialog. Escape and backdrop click close it; focus moves inside on open. */
 export function Modal({ open, title, onClose, children, footer, width = 560, locked }: ModalProps) {
   const ref = useRef<HTMLDivElement>(null);
@@ -28,6 +34,8 @@ export function Modal({ open, title, onClose, children, footer, width = 560, loc
     stack.push(id);
     const prev = document.activeElement as HTMLElement | null;
     const h = (e: KeyboardEvent) => {
+      // While the lock screen is up, dialogs underneath must not react to the keyboard.
+      if (isScreenLocked()) return;
       if (e.key === 'Escape' && stack[stack.length - 1] === id) {
         e.stopImmediatePropagation();
         e.preventDefault();

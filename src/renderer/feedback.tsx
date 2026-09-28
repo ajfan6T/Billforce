@@ -3,6 +3,7 @@ import { AlertTriangle, CheckCircle2, Info, X, XCircle } from 'lucide-react';
 import { errorMessage } from './api';
 import { Button } from './components/ui';
 import { Modal } from './components/modal';
+import { registerDirtyForm, setLeaveConfirmer } from './guards';
 
 /* ------------------------------ Toasts ------------------------------ */
 
@@ -85,6 +86,20 @@ export function FeedbackProvider({ children }: { children: ReactNode }) {
       }),
   }).current;
 
+  // In-app navigation away from a form with unsaved changes asks with this dialog (see guards.ts).
+  useEffect(() => {
+    setLeaveConfirmer(() =>
+      dialogApi.confirm({
+        title: 'Leave without saving?',
+        message: 'You have unsaved changes on this page. If you leave now, they will be lost.',
+        confirmText: 'Leave',
+        cancelText: 'Stay',
+        danger: true,
+      }),
+    );
+    return () => setLeaveConfirmer(null);
+  }, [dialogApi]);
+
   const close = (value: boolean | string | null) => {
     if (!dialog) return;
     if (dialog.type === 'confirm') dialog.resolve(value === true);
@@ -104,10 +119,11 @@ export function FeedbackProvider({ children }: { children: ReactNode }) {
             width={440}
             footer={
               <>
-                <Button variant="ghost" onClick={() => close(false)}>
+                {/* A destructive confirm starts on Cancel, so a stray Enter never deletes anything. */}
+                <Button variant="ghost" autoFocus={!!dialog.opts.danger} onClick={() => close(false)}>
                   {dialog.opts.cancelText ?? 'Cancel'}
                 </Button>
-                <Button variant={dialog.opts.danger ? 'danger' : 'primary'} autoFocus onClick={() => close(true)}>
+                <Button variant={dialog.opts.danger ? 'danger' : 'primary'} autoFocus={!dialog.opts.danger} onClick={() => close(true)}>
                   {dialog.opts.confirmText ?? 'OK'}
                 </Button>
               </>
@@ -206,14 +222,26 @@ export function useDialogs(): DialogApi {
   return d;
 }
 
-/** Warn before leaving a page with unsaved changes (window close / reload). */
-export function useUnsavedWarning(dirty: boolean): void {
+/**
+ * Warn before leaving a page with unsaved changes: closing the window (the desktop app asks
+ * "Leave without saving?") and, unless `navigation: false`, moving to another page from the
+ * sidebar, "Back" links, link buttons and F2 (they ask with the same question first).
+ * Pass `navigation: false` when the page keeps its own draft (the billing screen).
+ */
+export function useUnsavedWarning(dirty: boolean, opts: { navigation?: boolean } = {}): void {
+  const guardNavigation = opts.navigation !== false;
   useEffect(() => {
     if (!dirty) return;
     const h = (e: BeforeUnloadEvent) => {
       e.preventDefault();
+      // Older Chromium needs returnValue set to show the leave prompt.
+      e.returnValue = '';
     };
     window.addEventListener('beforeunload', h);
-    return () => window.removeEventListener('beforeunload', h);
-  }, [dirty]);
+    const unregister = guardNavigation ? registerDirtyForm() : null;
+    return () => {
+      window.removeEventListener('beforeunload', h);
+      unregister?.();
+    };
+  }, [dirty, guardNavigation]);
 }

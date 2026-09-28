@@ -2,15 +2,17 @@ import { useCallback } from 'react';
 import { call } from '../../api';
 import { useToast } from '../../feedback';
 import { Alert, Badge, Button, LinkButton, type Tone } from '../../components/ui';
-import { BILL_PAYMENT_MODE_LABELS, type BillPaymentMode } from '../../../shared/billing';
+import { billPaymentLabel, type BillPaymentMode } from '../../../shared/billing';
 import { PAYMENT_MODE_LABELS, type PaymentMode } from '../../../shared/constants';
 import { formatQty, parseMoney } from '../../../shared/money';
 import './sales.css';
 
 const MODE_TONE: Record<BillPaymentMode, Tone> = { cash: 'green', upi: 'purple', bank: 'blue', credit: 'amber', split: 'neutral' };
 
-export function ModeBadge({ mode }: { mode: BillPaymentMode }) {
-  return <Badge tone={MODE_TONE[mode]}>{BILL_PAYMENT_MODE_LABELS[mode]}</Badge>;
+/** How a bill was paid; pass the credit part so a part-credit bill reads "Part paid", not "Split". */
+export function ModeBadge({ mode, credit = 0 }: { mode: BillPaymentMode; credit?: number }) {
+  const partPaid = mode === 'split' && credit > 0;
+  return <Badge tone={partPaid ? 'amber' : MODE_TONE[mode]}>{billPaymentLabel(mode, credit)}</Badge>;
 }
 
 export function RefundBadge({ mode }: { mode: PaymentMode }) {

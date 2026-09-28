@@ -35,14 +35,18 @@ function Root() {
   if (!status.setupDone) return <SetupWizard />;
   if (!session) return <LoginScreen />;
   if (session.mustChangePassword) return <ForcePasswordChange />;
+  // While locked the page stays mounted (nothing typed is lost) but is inert: no focus, clicks or
+  // screen-reader access. LockScreen also makes open dialogs inert and useHotkeys ignores every key.
   return (
     <>
-      <Routes>
-        {APP_ROUTES.map((r) => (
-          <Route key={r.path} path={r.path} element={<Guard route={r} />} />
-        ))}
-        <Route path="*" element={<Navigate to="/" replace />} />
-      </Routes>
+      <div className="app-root" inert={locked} aria-hidden={locked || undefined}>
+        <Routes>
+          {APP_ROUTES.map((r) => (
+            <Route key={r.path} path={r.path} element={<Guard route={r} />} />
+          ))}
+          <Route path="*" element={<Navigate to="/" replace />} />
+        </Routes>
+      </div>
       {locked && <LockScreen />}
     </>
   );

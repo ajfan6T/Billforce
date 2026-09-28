@@ -224,16 +224,6 @@ export function voidEntry(ctx: Ctx, entryId: number, reason: string, opts: PostO
   });
 }
 
-/** Un-void an entry (used when a cancelled document is restored). */
-export function unvoidEntry(ctx: Ctx, entryId: number): void {
-  ctx.db.tx(() => {
-    const e = getEntry(ctx, entryId);
-    assertDateOpen(ctx, e.date);
-    ctx.db.update('journal_entries', entryId, { is_void: 0, void_reason: null, updated_by: currentUserId(ctx), updated_at: now(ctx) });
-    ctx.app.markDirty();
-  });
-}
-
 export function getEntryLines(ctx: Ctx, entryId: number): JournalLineRow[] {
   return ctx.db.all<JournalLineRow>(
     `SELECT l.id, l.entry_id, l.line_no, l.account_id, a.name AS account_name, a.code AS account_code,
@@ -349,14 +339,6 @@ export function paymentAccountId(ctx: Ctx, mode: SettlementMode, accountId?: num
     if (ok) return configured;
   }
   return systemAccountId(ctx, mode === 'cash' ? 'CASH' : mode === 'upi' ? 'UPI' : 'BANK');
-}
-
-/** Find the (non-void or void) entry produced by a document. */
-export function entryForSource(ctx: Ctx, sourceType: string, sourceId: number): JournalEntryRow | undefined {
-  return ctx.db.get<JournalEntryRow>(
-    'SELECT * FROM journal_entries WHERE source_type = ? AND source_id = ? ORDER BY id DESC LIMIT 1',
-    [sourceType, sourceId],
-  );
 }
 
 /**

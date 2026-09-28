@@ -42,6 +42,7 @@ export function ExpensesPage() {
     try {
       const x = await create.run(expensePayload(draft));
       toast.success(`Saved ${x.expenseNo}: ${x.accountName} ${formatINR(x.amount)}`, { label: 'Open', onClick: () => navigate(`/accounts/expenses/${x.id}`) });
+      for (const w of x.warnings) toast.warning(w);
       setLastMode(draft.pay.mode);
       // Keep the date and payment mode for the next entry.
       setDraft({ ...emptyExpense(draft.pay.mode), date: draft.date, pay: draft.pay });

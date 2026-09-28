@@ -49,6 +49,7 @@ export function PaySalaryModal({ open, slip, onClose, onSaved }: { open: boolean
     try {
       const res = await m.run({ salaryId: slip.id, amount: amount!, date, mode: pay.mode, accountId: pay.accountId, remarks: remarks.trim() || null });
       toast.success(`Paid ${formatINR(amount!)} to ${slip.employeeName}${res.balance > 0 ? ` · ${formatINR(res.balance)} still due` : ''}`);
+      for (const w of res.warnings) toast.warning(w);
       onSaved(res);
     } catch {
       /* shown below */

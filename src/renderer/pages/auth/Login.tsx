@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from 'react';
+import { createPortal } from 'react-dom';
 import { Lock, UserCircle2 } from 'lucide-react';
 import { Button, Alert } from '../../components/ui';
 import { Field, TextInput } from '../../components/forms';
@@ -138,11 +139,89 @@ export function LoginScreen() {
   );
 }
 
-/** Shown over the app after inactivity or "Lock screen": same user must re-enter the password. */
+/**
+ * Make everything on the page except `keep` inert (no focus, clicks or screen reader), including dialogs
+ * that open later. Returns the function that undoes it.
+ */
+function isolate(keep: HTMLElement): () => void {
+  const changed = new Map<Element, { inert: boolean; ariaHidden: string | null }>();
+  const hide = (el: Element) => {
+    if (el === keep || changed.has(el) || !(el instanceof HTMLElement) || el.tagName === 'SCRIPT') return;
+    changed.set(el, { inert: el.inert, ariaHidden: el.getAttribute('aria-hidden') });
+    el.inert = true;
+    el.setAttribute('aria-hidden', 'true');
+  };
+  Array.from(document.body.children).forEach(hide);
+  const observer = new MutationObserver((records) => records.forEach((r) => r.addedNodes.forEach((n) => n.parentNode === document.body && hide(n as Element))));
+  observer.observe(document.body, { childList: true });
+  return () => {
+    observer.disconnect();
+    changed.forEach((prev, el) => {
+      (el as HTMLElement).inert = prev.inert;
+      if (prev.ariaHidden === null) el.removeAttribute('aria-hidden');
+      else el.setAttribute('aria-hidden', prev.ariaHidden);
+    });
+  };
+}
+
+/**
+ * Shown over the app after inactivity or "Lock screen": same user must re-enter the password.
+ * The app underneath stays as it was but cannot be reached: it is inert, keyboard shortcuts are off
+ * (useHotkeys checks the lock) and focus stays inside this card.
+ */
 export function LockScreen() {
   const { session, unlock, logout, refresh } = useAuth();
   const [password, setPassword] = useState('');
   const m = useMutation('auth.login');
+  const overlayRef = useRef<HTMLDivElement>(null);
+  const pwRef = useRef<HTMLInputElement>(null);
+
+  useEffect(() => {
+    const overlay = overlayRef.current;
+    if (!overlay) return;
+    const before = document.activeElement as HTMLElement | null;
+    const restore = isolate(overlay);
+    const focusables = () => Array.from(overlay.querySelectorAll<HTMLElement>('input, button, [tabindex]:not([tabindex="-1"])')).filter((el) => !(el as HTMLButtonElement).disabled);
+    pwRef.current?.focus();
+    // Tab cycles inside the card.
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key !== 'Tab') return;
+      const list = focusables();
+      if (!list.length) return;
+      const i = list.indexOf(document.activeElement as HTMLElement);
+      const next = e.shiftKey ? (i <= 0 ? list.length - 1 : i - 1) : i === list.length - 1 ? 0 : i + 1;
+      e.preventDefault();
+      list[next].focus();
+    };
+    // Keys typed in the card reach its own (React) handlers but never page-level window listeners.
+    const onDocKey = (e: KeyboardEvent) => {
+      if (overlay.contains(e.target as Node)) e.stopPropagation();
+    };
+    // Keys that start outside the card (e.g. after clicking the dark background) are swallowed.
+    const onWindowKey = (e: KeyboardEvent) => {
+      if (overlay.contains(e.target as Node)) return;
+      e.stopImmediatePropagation();
+      e.preventDefault();
+      pwRef.current?.focus();
+    };
+    const onFocusOut = (e: FocusEvent) => {
+      if (!e.relatedTarget || !overlay.contains(e.relatedTarget as Node)) setTimeout(() => overlay.isConnected && !overlay.contains(document.activeElement) && pwRef.current?.focus(), 0);
+    };
+    overlay.addEventListener('keydown', onKey);
+    overlay.addEventListener('focusout', onFocusOut);
+    document.addEventListener('keydown', onDocKey);
+    window.addEventListener('keydown', onWindowKey, true);
+    return () => {
+      overlay.removeEventListener('keydown', onKey);
+      overlay.removeEventListener('focusout', onFocusOut);
+      document.removeEventListener('keydown', onDocKey);
+      window.removeEventListener('keydown', onWindowKey, true);
+      restore();
+      // Back to where the user was before the lock (after the page is no longer inert).
+      setTimeout(() => before?.isConnected && before.focus?.(), 0);
+    };
+  }, []);
+
   if (!session) return null;
   const submit = async () => {
     try {
@@ -152,15 +231,16 @@ export function LockScreen() {
       unlock();
     } catch {
       setPassword('');
+      pwRef.current?.focus();
     }
   };
-  return (
-    <div className="lock-overlay">
+  return createPortal(
+    <div className="lock-overlay" ref={overlayRef} role="dialog" aria-modal="true" aria-labelledby="lock-title" onMouseDown={(e) => e.target === e.currentTarget && e.preventDefault()}>
       <div className="auth-card">
         <div className="auth-icon">
           <Lock size={28} />
         </div>
-        <h1>Screen locked</h1>
+        <h1 id="lock-title">Screen locked</h1>
         <p className="muted">
           {session.fullName} ({ROLE_LABELS[session.role]})
         </p>
@@ -172,7 +252,7 @@ export function LockScreen() {
           }}
         >
           <Field label="Password">
-            <TextInput type="password" value={password} onChange={(e) => setPassword(e.target.value)} autoFocus />
+            <TextInput ref={pwRef} type="password" value={password} onChange={(e) => setPassword(e.target.value)} autoFocus autoComplete="current-password" />
           </Field>
           {m.error && <Alert tone="red">{m.error}</Alert>}
           <Button type="submit" variant="primary" size="lg" block loading={m.loading} disabled={!password}>
@@ -183,6 +263,7 @@ export function LockScreen() {
           Switch user
         </button>
       </div>
-    </div>
+    </div>,
+    document.body,
   );
 }

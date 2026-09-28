@@ -101,7 +101,7 @@ function BillView({ bill, reload, tab, setTab }: { bill: Bill; reload: () => Pro
             Bill {bill.billNo}
             <span className="sl-header-badges">
               <StatusBadge status={bill.status} />
-              <ModeBadge mode={bill.paymentMode} />
+              <ModeBadge mode={bill.paymentMode} credit={bill.credit} />
               {bill.revision > 1 && <Badge tone="blue">Edited {bill.revision - 1}×</Badge>}
             </span>
           </>
@@ -193,7 +193,7 @@ function BillView({ bill, reload, tab, setTab }: { bill: Bill; reload: () => Pro
                   ],
                   ['Phone', bill.customerPhone],
                   bill.customer ? ['Balance now', <Money key="b" value={bill.customer.balance} colored={false} />] : ['Bill date', formatDate(bill.date)],
-                  ['Payment', <ModeBadge key="m" mode={bill.paymentMode} />],
+                  ['Payment', <ModeBadge key="m" mode={bill.paymentMode} credit={bill.credit} />],
                   ['Paid now', <Money key="p" value={bill.paid} />],
                   ['On credit', bill.credit ? <Money key="c" value={bill.credit} /> : '—'],
                   bill.remarks ? ['Remarks', bill.remarks] : null,

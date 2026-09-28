@@ -93,9 +93,9 @@ export function ReturnsList() {
         actions={
           <>
             <ExportButtons report={report} disabled={!data?.rows.length} />
-            {can('returns.create') && (
-              <LinkButton to="/sales/returns/new" variant="primary" icon={<Plus size={16} />}>
-                New return
+            {(can('returns.create') || can('returns.adjust')) && (
+              <LinkButton to={can('returns.create') ? '/sales/returns/new' : '/sales/returns/new?kind=adjustment'} variant="primary" icon={<Plus size={16} />}>
+                {can('returns.create') ? 'New return' : 'New credit note'}
               </LinkButton>
             )}
           </>
@@ -146,7 +146,7 @@ export function ReturnsList() {
           </div>
         </div>
       )}
-      <div className="card">
+      <div className="card sl-list-card">
         <DataTable<Row>
           columns={columns}
           rows={data?.rows}
@@ -161,9 +161,9 @@ export function ReturnsList() {
               title={dq || kind || status ? 'Nothing matches your search' : `No returns ${range.from === range.to ? `on ${formatDate(range.from)}` : 'in this period'}`}
               message="When a customer returns goods, open the bill and choose “Sales return”, or start here."
               action={
-                can('returns.create') ? (
-                  <LinkButton to="/sales/returns/new" icon={<Plus size={16} />}>
-                    New return
+                can('returns.create') || can('returns.adjust') ? (
+                  <LinkButton to={can('returns.create') ? '/sales/returns/new' : '/sales/returns/new?kind=adjustment'} icon={<Plus size={16} />}>
+                    {can('returns.create') ? 'New return' : 'New credit note'}
                   </LinkButton>
                 ) : undefined
               }

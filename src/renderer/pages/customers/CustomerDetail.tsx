@@ -1,13 +1,13 @@
 import { useMemo, useState } from 'react';
 import { useNavigate, useParams } from 'react-router';
-import { IndianRupee, Mail, MapPin, Pencil, Phone, Power, ReceiptText, StickyNote, Trash2, Wallet } from 'lucide-react';
+import { IndianRupee, Mail, MapPin, Pencil, Phone, Power, ReceiptText, StickyNote, Trash2, Undo2, Wallet } from 'lucide-react';
 import { Alert, Badge, Button, Card, EmptyState, ErrorBox, Loading, Page, PageHeader, Stat, StatGrid, Tabs } from '../../components/ui';
 import { DataTable, type Column } from '../../components/table';
 import { DateRangePicker, ExportButtons, ReportView, rangeFromPreset, type RangeValue } from '../../components/report';
 import { useHotkeys, useQuery, useStoredState } from '../../hooks';
 import { useAuth } from '../../auth';
 import { useDialogs, useToast } from '../../feedback';
-import { useOpenLink } from '../../links';
+import { useLinkedPeriod, useOpenLink } from '../../links';
 import { call, type ApiOutput } from '../../api';
 import { formatINR } from '../../../shared/money';
 import { describeRange, formatDate } from '../../../shared/dates';
@@ -27,7 +27,9 @@ export function CustomerDetailPage() {
   const toast = useToast();
   const dialogs = useDialogs();
   const [tab, setTab] = useStoredState<'statement' | 'bills' | 'payments'>('customer.tab', 'statement');
-  const [range, setRange] = useState<RangeValue>(() => rangeFromPreset('this_fy'));
+  // A report row (e.g. Sales by customer, ageing, trial balance) opens the account on the report's period.
+  const linkedPeriod = useLinkedPeriod();
+  const [range, setRange] = useState<RangeValue>(() => linkedPeriod ?? rangeFromPreset('this_fy'));
   const [editing, setEditing] = useState(false);
   const [receiving, setReceiving] = useState(false);
   const valid = Number.isInteger(id) && id > 0;
@@ -188,7 +190,14 @@ export function CustomerDetailPage() {
           value={formatINR(c.totals.received + c.totals.paidAtBilling)}
           hint={`${formatINR(c.totals.paidAtBilling)} at billing · ${formatINR(c.totals.received)} later${c.totals.discount ? ` · ${formatINR(c.totals.discount)} discount` : ''}`}
         />
+        <Stat
+          label="Returns & credit notes"
+          value={formatINR(c.totals.returned)}
+          icon={<Undo2 size={18} />}
+          hint={c.totals.returned ? (c.totals.refunded ? `${formatINR(c.totals.refunded)} refunded · ${formatINR(c.totals.returned - c.totals.refunded)} adjusted in account` : 'Adjusted in account') : 'No returns'}
+        />
       </StatGrid>
+      <BalanceSum c={c} />
 
       <Card className="mb-2">
         <div className="info-strip">
@@ -303,5 +312,36 @@ export function CustomerDetailPage() {
       />
       <ReceiptModal open={receiving} customer={pickerCustomer} onClose={() => setReceiving(false)} onSaved={() => reloadAll()} />
     </Page>
+  );
+}
+
+type CustomerView = ApiOutput<'customers.get'>;
+
+/**
+ * "Opening ₹100 + Billed ₹930 − Payments ₹638 − Returns ₹78 = Due ₹314": how the cards above add up to the
+ * amount due (every part comes from the same totals, so it always agrees with the balance).
+ */
+function BalanceSum({ c }: { c: CustomerView }) {
+  const t = c.totals;
+  const parts: Array<{ sign: '+' | '−'; label: string; value: number }> = [];
+  if (t.opening) parts.push({ sign: t.opening > 0 ? '+' : '−', label: t.opening > 0 ? 'Opening balance' : 'Opening advance', value: Math.abs(t.opening) });
+  parts.push({ sign: '+', label: 'Billed', value: t.billed });
+  parts.push({ sign: '−', label: 'Payments', value: t.paidAtBilling + t.received });
+  if (t.discount) parts.push({ sign: '−', label: 'Discounts', value: t.discount });
+  if (t.returned) parts.push({ sign: '−', label: 'Returns', value: t.returned });
+  if (t.refunded) parts.push({ sign: '+', label: 'Refunds paid', value: t.refunded });
+  if (t.adjustments) parts.push({ sign: t.adjustments > 0 ? '+' : '−', label: 'Other entries', value: Math.abs(t.adjustments) });
+  const result = c.balance > 0 ? 'Amount due' : c.balance < 0 ? 'Advance with you' : 'Balance';
+  return (
+    <p className="balance-sum small muted" aria-label="How the balance adds up">
+      {parts.map((p, i) => (
+        <span key={p.label}>
+          {i === 0 ? (p.sign === '−' ? '− ' : '') : ` ${p.sign} `}
+          {p.label} <b className="money">{formatINR(p.value)}</b>
+        </span>
+      ))}
+      {' = '}
+      {result} <b className="money">{c.balance === 0 ? formatINR(0) : formatINR(Math.abs(c.balance))}</b>
+    </p>
   );
 }

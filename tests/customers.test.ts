@@ -3,6 +3,8 @@ import { createTestApp, ledgerProblems, systemBalance, type TestApp } from './he
 import { partyBalance, postEntry } from '../src/core/accounting/ledger';
 import { nextDocNumber } from '../src/core/numbering';
 import { lineAmount } from '../src/shared/money';
+import { PHONE_KEY_SQL, phoneKey } from '../src/core/modules/customers/common';
+import { PHONE_DUPLICATE_SQL } from '../src/core/modules/customers/service';
 
 /**
  * Bills belong to the sales module; to test statements independently we write
@@ -50,6 +52,40 @@ function addBill(t: TestApp, opts: { customerId: number; date: string; items: Ar
 }
 
 const bal = (t: TestApp, id: number) => partyBalance(t.app.ctx(), 'customer', id, { account: 'AR' });
+
+/** A sales return / credit note written exactly as the posting contract describes (refund in cash, or adjusted in the account). */
+function addCreditNote(t: TestApp, opts: { customerId: number; date: string; total: number; refund: 'cash' | 'credit' }) {
+  const ctx = t.app.ctx();
+  return t.app.db.tx(() => {
+    const num = nextDocNumber(ctx, 'credit_note', opts.date);
+    const id = t.app.db.insert('credit_notes', {
+      cn_no: num.number,
+      seq: num.seq,
+      fy_start: num.fyStart,
+      date: opts.date,
+      kind: 'adjustment',
+      customer_id: opts.customerId,
+      subtotal: opts.total,
+      total: opts.total,
+      refund_mode: opts.refund,
+      reason: 'test',
+      created_at: `${opts.date} 10:00:00`,
+    });
+    const entryId = postEntry(ctx, {
+      date: opts.date,
+      voucherType: 'sale_return',
+      voucherNo: num.number,
+      sourceType: 'credit_note',
+      sourceId: id,
+      lines: [
+        { account: 'SALES_RETURNS', debit: opts.total },
+        opts.refund === 'cash' ? { account: 'CASH', credit: opts.total } : { account: 'AR', credit: opts.total, partyType: 'customer', partyId: opts.customerId },
+      ],
+    });
+    t.app.db.update('credit_notes', id, { journal_entry_id: entryId });
+    return id;
+  });
+}
 
 describe('customer records', () => {
   it('creates customers with opening balances in both directions', async () => {
@@ -466,7 +502,7 @@ describe('payments received', () => {
     expect(html).toContain('Sharma General Store');
     expect(html).not.toContain('DUPLICATE');
 
-    expect(await t.call('receipts.print', { id: r.id })).toEqual({ printed: true });
+    expect(await t.call('receipts.print', { id: r.id })).toEqual({ printed: true, duplicate: false });
     expect(t.platform.printed).toHaveLength(1);
     expect(t.platform.printed[0].opts).toMatchObject({ paperWidthMm: 80, copies: 1, silent: false });
     await t.call('receipts.print', { id: r.id });
@@ -545,5 +581,196 @@ describe('statements and outstanding', () => {
     const earlier = await t.call('customers.outstanding', { asOf: '2026-08-31' });
     expect(earlier.rows.map((r) => r.cells.name)).toEqual(['Anita', 'Total (1 customers)']);
     expect(earlier.rows[0].cells.due).toBe(50000);
+  });
+});
+
+describe('review fixes: credit limits, opening balances and balances need the right permission', () => {
+  it('a cashier cannot remove or invent opening balances, or change credit limits (customers.credit)', async () => {
+    const t = await createTestApp();
+    const anil = await t.call('customers.create', { name: 'Anil', phone: '90000 00001', creditLimit: 100000, openingBalance: { amount: 500000, direction: 'receivable' } });
+    await t.loginAs('cashier');
+
+    // Writing off the opening dues.
+    let err = await t.fails('customers.update', { id: anil.id, name: 'Anil', phone: '90000 00001', openingBalance: null });
+    expect(err.code).toBe('FORBIDDEN');
+    expect(err.message).toContain('not allowed to set credit limits or opening balances');
+    expect(bal(t, anil.id)).toBe(500000);
+    expect(systemBalance(t.app, 'AR')).toBe(500000);
+    expect(systemBalance(t.app, 'OPENING_EQUITY')).toBe(-500000);
+    // Changing the amount or the direction.
+    err = await t.fails('customers.update', { id: anil.id, name: 'Anil', openingBalance: { amount: 500000, direction: 'advance' } });
+    expect(err.code).toBe('FORBIDDEN');
+    // Raising (or removing) the credit limit.
+    expect((await t.fails('customers.update', { id: anil.id, name: 'Anil', creditLimit: 100000000 })).code).toBe('FORBIDDEN');
+    expect((await t.fails('customers.update', { id: anil.id, name: 'Anil', creditLimit: null })).code).toBe('FORBIDDEN');
+    // Inventing an advance / a limit for a new customer.
+    expect((await t.fails('customers.create', { name: 'Friend', openingBalance: { amount: 5000000, direction: 'advance' } })).code).toBe('FORBIDDEN');
+    expect((await t.fails('customers.create', { name: 'Friend', creditLimit: 100 })).code).toBe('FORBIDDEN');
+    expect(t.app.db.value("SELECT COUNT(*) FROM customers WHERE name = 'Friend'")).toBe(0);
+
+    // Ordinary edits still work: leaving the fields out, or sending the saved values back, keeps them.
+    let u = await t.call('customers.update', { id: anil.id, name: 'Anil Kumar', phone: '90000 00001', address: 'Pune' });
+    expect(u).toMatchObject({ name: 'Anil Kumar', address: 'Pune', creditLimit: 100000, openingBalance: { amount: 500000, direction: 'receivable' }, balance: 500000 });
+    u = await t.call('customers.update', { id: anil.id, name: 'Anil K', creditLimit: 100000, openingBalance: { amount: 500000, direction: 'receivable' } });
+    expect(u).toMatchObject({ name: 'Anil K', creditLimit: 100000, balance: 500000 });
+    const plain = await t.call('customers.create', { name: 'Walk-in regular', phone: '90000 00002', creditLimit: null, openingBalance: null });
+    expect(plain).toMatchObject({ creditLimit: null, openingBalance: null, balance: 0 });
+    const quick = await t.call('customers.quickCreate', { name: 'Quick one', phone: '90000 00003' });
+    expect(quick).toMatchObject({ balance: 0, creditLimit: null });
+
+    // The manager has customers.credit by default.
+    await t.loginAs('manager');
+    u = await t.call('customers.update', { id: anil.id, name: 'Anil K', creditLimit: 200000, openingBalance: null });
+    expect(u).toMatchObject({ creditLimit: 200000, openingBalance: null, balance: 0 });
+    expect(ledgerProblems(t.app)).toEqual([]);
+  });
+
+  it('hides balances and credit limits in the customer search from users without customers.view', async () => {
+    const t = await createTestApp();
+    const anil = await t.call('customers.create', { name: 'Anil', phone: '90000 00001', creditLimit: 5000000, openingBalance: { amount: 4500000, direction: 'receivable' } });
+    const owner = await t.call('customers.search', { q: 'Anil' });
+    expect(owner[0]).toMatchObject({ id: anil.id, balance: 4500000, creditLimit: 5000000 });
+    expect(owner[0].balanceHidden).toBeUndefined();
+
+    await t.call('roles.update', { role: 'cashier', permissions: ['billing.create', 'billing.discount', 'billing.reprint'] });
+    await t.loginAs('cashier');
+    expect((await t.fails('customers.get', { id: anil.id })).code).toBe('FORBIDDEN');
+    expect((await t.fails('customers.list', {})).code).toBe('FORBIDDEN');
+    const hidden = await t.call('customers.search', { q: 'Anil' });
+    expect(hidden).toEqual([{ id: anil.id, name: 'Anil', phone: '90000 00001', balance: 0, creditLimit: null, balanceHidden: true }]);
+    expect((await t.call('customers.search', { q: '' }))[0]).toMatchObject({ balance: 0, creditLimit: null, balanceHidden: true });
+
+    // Taking payments needs the amount due, so "Record payments received" shows it (as customers.get does).
+    await t.loginOwner();
+    await t.call('roles.update', { role: 'cashier', permissions: ['billing.create', 'customers.receive'] });
+    await t.loginAs('cashier');
+    expect((await t.call('customers.search', { q: 'Anil' }))[0]).toMatchObject({ balance: 4500000, creditLimit: 5000000 });
+  });
+
+  it('a settlement discount on a payment needs "Give discounts"', async () => {
+    const t = await createTestApp();
+    const anil = await t.call('customers.create', { name: 'Anil', openingBalance: { amount: 3000000, direction: 'receivable' } });
+    await t.call('roles.update', { role: 'cashier', permissions: ['billing.create', 'billing.edit', 'customers.view', 'customers.manage', 'customers.receive'] });
+    await t.loginAs('cashier');
+    const err = await t.fails('receipts.create', { customerId: anil.id, amount: 100, discount: 2999900, mode: 'cash' });
+    expect(err.code).toBe('FORBIDDEN');
+    expect(err.message).toContain('not allowed to give discounts');
+    expect(bal(t, anil.id)).toBe(3000000);
+    expect(systemBalance(t.app, 'DISCOUNT_ALLOWED')).toBe(0);
+    // Without a discount the payment is fine.
+    const plain = await t.call('receipts.create', { customerId: anil.id, amount: 100000, discount: 0, mode: 'cash' });
+    expect(bal(t, anil.id)).toBe(2900000);
+    // ...and it cannot be edited into a discount.
+    expect((await t.fails('receipts.update', { id: plain.id, customerId: anil.id, amount: 100000, discount: 2800000, mode: 'cash' })).code).toBe('FORBIDDEN');
+
+    // A discount the owner gave can be kept (or lowered) by the cashier when editing, but not raised.
+    await t.loginOwner();
+    const withDisc = await t.call('receipts.create', { customerId: anil.id, amount: 100000, discount: 5000, mode: 'cash' });
+    await t.loginAs('cashier');
+    const kept = await t.call('receipts.update', { id: withDisc.id, customerId: anil.id, amount: 100000, discount: 5000, mode: 'cash', remarks: 'note added' });
+    expect(kept).toMatchObject({ discount: 5000, remarks: 'note added' });
+    expect((await t.call('receipts.update', { id: withDisc.id, customerId: anil.id, amount: 100000, discount: 2000, mode: 'cash' })).discount).toBe(2000);
+    expect((await t.fails('receipts.update', { id: withDisc.id, customerId: anil.id, amount: 100000, discount: 900000, mode: 'cash' })).code).toBe('FORBIDDEN');
+    expect(systemBalance(t.app, 'DISCOUNT_ALLOWED')).toBe(2000);
+    expect(ledgerProblems(t.app)).toEqual([]);
+  });
+
+  it('reprinting a payment receipt needs "Reprint bills" and prints one DUPLICATE copy', async () => {
+    const t = await createTestApp();
+    await t.call('settings.update', { section: 'receipt', values: { copies: 2 } });
+    const anil = await t.call('customers.create', { name: 'Anil', openingBalance: { amount: 50000, direction: 'receivable' } });
+    await t.call('roles.update', { role: 'cashier', permissions: ['billing.create', 'customers.view', 'customers.receive'] });
+    await t.loginAs('cashier');
+    const r = await t.call('receipts.create', { customerId: anil.id, amount: 20000, mode: 'cash' });
+    expect(await t.call('receipts.print', { id: r.id })).toMatchObject({ printed: true, duplicate: false });
+    expect(t.platform.printed[0].opts.copies).toBe(2);
+    expect(t.platform.printed[0].html).not.toContain('DUPLICATE');
+    const err = await t.fails('receipts.print', { id: r.id });
+    expect(err.code).toBe('FORBIDDEN');
+    expect(t.platform.printed).toHaveLength(1);
+    expect((await t.call('receipts.get', { id: r.id })).printCount).toBe(1);
+
+    await t.loginOwner();
+    await t.call('roles.update', { role: 'cashier', permissions: ['billing.create', 'billing.reprint', 'customers.view', 'customers.receive'] });
+    await t.loginAs('cashier');
+    expect(await t.call('receipts.print', { id: r.id })).toMatchObject({ printed: true, duplicate: true });
+    expect(t.platform.printed[1].html).toContain('DUPLICATE');
+    expect(t.platform.printed[1].opts.copies).toBe(1);
+    expect(t.app.db.value<string>("SELECT summary FROM activity_log WHERE action = 'receipt.print' ORDER BY id DESC LIMIT 1")).toBe(
+      `Reprinted payment receipt ${r.receiptNo} marked DUPLICATE`,
+    );
+  });
+});
+
+describe('review fixes: customer page totals and fast duplicate-phone check', () => {
+  it('the customer summary adds up to the amount due, including returns, refunds and other entries', async () => {
+    const t = await createTestApp({ openingCash: 1000000 });
+    const c = await t.call('customers.create', { name: 'Mohammed Irfan', openingBalance: { amount: 10000, direction: 'receivable' } });
+    addBill(t, { customerId: c.id, date: '2026-05-01', items: [{ name: 'Rice', qty: 1, rate: 50000 }], paid: 20000 });
+    addBill(t, { customerId: c.id, date: '2026-05-02', items: [{ name: 'Oil', qty: 1, rate: 43000 }], paid: 43000 });
+    await t.call('receipts.create', { customerId: c.id, date: '2026-06-01', amount: 15000, discount: 500, mode: 'cash' });
+    addCreditNote(t, { customerId: c.id, date: '2026-06-05', total: 5000, refund: 'credit' });
+    addCreditNote(t, { customerId: c.id, date: '2026-06-06', total: 2800, refund: 'cash' });
+    const ctx = t.app.ctx();
+    t.app.db.tx(() =>
+      postEntry(ctx, {
+        date: '2026-06-10',
+        voucherType: 'journal',
+        narration: 'Cheque bounce charges',
+        lines: [
+          { account: 'AR', debit: 300, partyType: 'customer', partyId: c.id },
+          { account: 'CASH', credit: 300 },
+        ],
+      }),
+    );
+
+    const d = await t.call('customers.get', { id: c.id });
+    expect(d.totals).toMatchObject({ billed: 93000, paidAtBilling: 63000, received: 15000, discount: 500, returned: 7800, refunded: 2800, opening: 10000, adjustments: 300 });
+    const x = d.totals;
+    expect(x.opening + x.billed - x.paidAtBilling - x.received - x.discount - x.returned + x.refunded + x.adjustments).toBe(d.balance);
+    expect(d.balance).toBe(bal(t, c.id));
+    expect(d.balance).toBe(10000 + 30000 - 15500 - 5000 + 300);
+
+    // The statement names its totals on the same basis (only the unpaid part of each bill is in the account).
+    const st = await t.call('customers.statement', { customerId: c.id, from: '2026-04-01', to: '2026-09-28' });
+    expect(st.summary?.find((s) => s.label === 'Billed on credit & other dues')?.value).toBe(10000 + 30000 + 300);
+    expect(st.summary?.find((s) => s.label === 'Payments, discounts & returns')?.value).toBe(15500 + 5000);
+    expect(st.notes?.some((n) => n.includes('Only the unpaid part of a bill'))).toBe(true);
+  });
+
+  it('checks duplicate phones with an index lookup that agrees with phoneKey()', async () => {
+    const t = await createTestApp();
+    const plan = t.app.db.all<{ detail: string }>(`EXPLAIN QUERY PLAN ${PHONE_DUPLICATE_SQL}`, ['9820011111', 0]).map((r) => r.detail).join(' | ');
+    expect(plan).toContain('idx_customers_phone_key');
+    for (const p of ['+91 98200-11111', '09820011111', '919820011111', '(982) 001 1111', '98200 11111', '020 2567 8900', '12345', '+44 20 7946 0958', '0']) {
+      expect(t.app.db.value<string>(`SELECT ${PHONE_KEY_SQL} FROM (SELECT ? AS phone)`, [p])).toBe(phoneKey(p) ?? '');
+    }
+    const a = await t.call('customers.create', { name: 'Anita', phone: '+91 98200-11111' });
+    for (const p of ['09820011111', '9820011111', '(98200) 11111', '91 98200 11111']) {
+      expect((await t.fails('customers.create', { name: 'Other', phone: p })).message).toBe('This phone number already belongs to Anita');
+    }
+    // Deactivated customers free their number; the customer's own number is not a duplicate.
+    await t.call('customers.update', { id: a.id, name: 'Anita D', phone: '98200 11111' });
+    await t.call('customers.setActive', { id: a.id, active: false });
+    const b = await t.call('customers.create', { name: 'Bala', phone: '9820011111' });
+    expect((await t.fails('customers.setActive', { id: a.id, active: true })).message).toBe('This phone number already belongs to Bala');
+    expect(b.phone).toBe('9820011111');
+    // Stored phones are tidied: runs of spaces become one.
+    expect((await t.call('customers.create', { name: 'Chitra', phone: '98200   22222' })).phone).toBe('98200 22222');
+  });
+
+  it('imports thousands of customers with phones quickly (no per-row scan of all customers)', async () => {
+    const t = await createTestApp();
+    const ctx = t.app.ctx();
+    const { createCustomer } = await import('../src/core/modules/customers/service');
+    const started = performance.now();
+    t.app.db.tx(() => {
+      for (let i = 0; i < 4000; i++) createCustomer(ctx, { name: `Customer ${i}`, phone: `98${String(10000000 + i)}` });
+    });
+    const ms = performance.now() - started;
+    expect(t.app.db.value('SELECT COUNT(*) FROM customers')).toBe(4000);
+    // Before the fix this took ~12 s (every row read every customer); now it is well under a second on a normal PC.
+    expect(ms).toBeLessThan(6000);
+    expect((await t.fails('customers.create', { name: 'Dup', phone: '+91 98 1000 3999' })).message).toBe('This phone number already belongs to Customer 3999');
   });
 });

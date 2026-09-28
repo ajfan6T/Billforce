@@ -16,10 +16,10 @@ import { getSection } from '../../settings';
 import { accountBalance, getAccount, paymentAccountId, systemAccountId, type EntryLineInput } from '../../accounting/ledger';
 import { entrySourceLink } from '../../accounting/links';
 import { formatINR } from '../../../shared/money';
-import { addDays, describeRange, formatDate } from '../../../shared/dates';
+import { addDays, describeRange, formatDate, fyOf } from '../../../shared/dates';
 import { PAYMENT_MODE_LABELS, type SettlementMode } from '../../../shared/constants';
 import type { ReportData, ReportRow } from '../../../shared/report';
-import { activeAccount, closedYearReason, lockReason, resolveVoucherDate, userName } from './common';
+import { activeAccount, closedYearReason, lockReason, openingLockedReason, resolveVoucherDate, userName } from './common';
 import { nextAccountCode, setAccountOpening } from './chart';
 import { getEntryDetail, postManualVoucher, type EntryDetail } from './journals';
 
@@ -140,10 +140,23 @@ function summarize(ctx: Ctx, loan: LoanRow): LoanSummary {
   };
 }
 
+/** Why an older loan can no longer be brought in with an opening balance (the first year is closed); null when it can. */
+function loanOpeningLockedReason(ctx: Ctx): string | null {
+  if (!openingLockedReason(ctx)) return null;
+  const start = getSection(ctx, 'accounts').booksStartDate;
+  return `Financial year ${fyOf(start).name}, when your books start, is closed, so an older loan can no longer be brought in with an opening balance. Save it with a start date from ${formatDate(start)} without recording any money, then enter the amount outstanding with a journal entry against the loan account.`;
+}
+
 export function listLoans(
   ctx: Ctx,
   opts: { includeClosed?: boolean } = {},
-): { rows: LoanSummary[]; totals: { taken: number; given: number; interestPaid: number; interestReceived: number }; booksStartDate: string } {
+): {
+  rows: LoanSummary[];
+  totals: { taken: number; given: number; interestPaid: number; interestReceived: number };
+  booksStartDate: string;
+  /** Why an older loan's opening balance can no longer be entered (first year closed); null when it can. */
+  openingLockedReason: string | null;
+} {
   const rows = ctx.db
     .all<LoanRow>(`SELECT * FROM loans ${opts.includeClosed ? '' : 'WHERE is_active = 1'} ORDER BY is_active DESC, direction DESC, name COLLATE NOCASE`)
     .map((l) => summarize(ctx, l));
@@ -157,7 +170,7 @@ export function listLoans(
       totals.interestReceived += r.interestToDate;
     }
   }
-  return { rows, totals, booksStartDate: getSection(ctx, 'accounts').booksStartDate };
+  return { rows, totals, booksStartDate: getSection(ctx, 'accounts').booksStartDate, openingLockedReason: loanOpeningLockedReason(ctx) };
 }
 
 /* ------------------------------ Transactions ------------------------------ */
@@ -187,7 +200,7 @@ function kindNarration(loan: LoanRow, kind: LoanKind, principal: number, interes
   }
 }
 
-function postLoanTransaction(ctx: Ctx, loan: LoanRow, input: Omit<LoanTransactionInput, 'loanId'>): number {
+function postLoanTransaction(ctx: Ctx, loan: LoanRow, input: Omit<LoanTransactionInput, 'loanId'>): { id: number; warnings: string[] } {
   if (!loan.is_active) throw fail.validation(`The loan "${loan.name}" is closed. Re-open it to add transactions.`);
   if (!KINDS[loan.direction].includes(input.kind)) {
     throw fail.validation(loan.direction === 'taken' ? 'For a loan taken, choose "Loan received" or "Repayment".' : 'For a loan given, choose "Loan given" or "Repayment received".', {
@@ -257,10 +270,11 @@ function postLoanTransaction(ctx: Ctx, loan: LoanRow, input: Omit<LoanTransactio
   );
 }
 
-export function loanTransaction(ctx: Ctx, input: LoanTransactionInput): { entry: EntryDetail; loan: LoanSummary } {
+/** Record a loan transaction; `warnings` when a repayment / loan given would leave the cash or bank account below zero. */
+export function loanTransaction(ctx: Ctx, input: LoanTransactionInput): { entry: EntryDetail; loan: LoanSummary; warnings: string[] } {
   const loan = loanRow(ctx, input.loanId);
-  const id = postLoanTransaction(ctx, loan, input);
-  return { entry: getEntryDetail(ctx, id), loan: summarize(ctx, loanRow(ctx, loan.id)) };
+  const { id, warnings } = postLoanTransaction(ctx, loan, input);
+  return { entry: getEntryDetail(ctx, id), loan: summarize(ctx, loanRow(ctx, loan.id)), warnings };
 }
 
 /* ------------------------------ Create / update ------------------------------ */
@@ -279,7 +293,7 @@ export interface LoanInput {
   disburse?: { date?: string | null; mode: SettlementMode; accountId?: number | null; amount: number } | null;
 }
 
-export function createLoan(ctx: Ctx, input: LoanInput): LoanDetail {
+export function createLoan(ctx: Ctx, input: LoanInput): LoanDetail & { warnings: string[] } {
   const name = input.name.trim();
   if (!name) throw fail.validation('Enter who the loan is from / to, e.g. "HDFC Bank"', { name: 'Enter a name' });
   const dup = ctx.db.value<number>('SELECT COUNT(*) FROM loans WHERE name = ? AND direction = ? AND is_active = 1', [name, input.direction], 0);
@@ -293,6 +307,8 @@ export function createLoan(ctx: Ctx, input: LoanInput): LoanDetail {
       openingOutstanding: 'Only for older loans',
     });
   }
+  const locked = input.openingOutstanding ? loanOpeningLockedReason(ctx) : null;
+  if (locked) throw fail.validation(locked, { openingOutstanding: 'The first year is closed' });
   const ts = now(ctx);
   const group = input.direction === 'taken' ? 'loans' : 'loans_advances';
   const accountId = ctx.db.insert('accounts', {
@@ -322,17 +338,18 @@ export function createLoan(ctx: Ctx, input: LoanInput): LoanDetail {
     `Added loan ${input.direction === 'taken' ? 'taken from' : 'given to'} ${name}: ${formatINR(input.principal)}${input.interestRate ? ` at ${input.interestRate}% a year` : ''}`,
     { entityType: 'loan', entityId: id, details: input },
   );
+  let warnings: string[] = [];
   if (input.disburse && input.disburse.amount > 0) {
-    postLoanTransaction(ctx, loanRow(ctx, id), {
+    ({ warnings } = postLoanTransaction(ctx, loanRow(ctx, id), {
       date: input.disburse.date || input.startDate,
       kind: input.direction === 'taken' ? 'receive' : 'give',
       principal: input.disburse.amount,
       interest: 0,
       mode: input.disburse.mode,
       accountId: input.disburse.accountId,
-    });
+    }));
   }
-  return getLoan(ctx, id);
+  return { ...getLoan(ctx, id), warnings };
 }
 
 export interface LoanUpdate {
@@ -412,8 +429,10 @@ export function getLoan(ctx: Ctx, id: number, range?: { from?: string | null; to
   const summary = summarize(ctx, loan);
   const interestAcct = systemAccountId(ctx, loan.direction === 'taken' ? 'INTEREST_EXPENSE' : 'INTEREST_INCOME');
   const entries = ctx.db.all<{ id: number; date: string; voucher_no: string | null; voucher_type: string; narration: string | null; source_type: string | null; source_id: number | null; is_void: number }>(
+    // The loan's own vouchers plus anything else posted to its account, found through the source and account indexes.
     `SELECT e.id, e.date, e.voucher_no, e.voucher_type, e.narration, e.source_type, e.source_id, e.is_void FROM journal_entries e
-      WHERE e.is_void = 0 AND ((e.source_type = 'loan' AND e.source_id = ?) OR EXISTS (SELECT 1 FROM journal_lines l WHERE l.entry_id = e.id AND l.account_id = ?))
+      WHERE e.is_void = 0 AND e.id IN (SELECT id FROM journal_entries WHERE source_type = 'loan' AND source_id = ?
+                                       UNION SELECT entry_id FROM journal_lines WHERE account_id = ?)
       ORDER BY e.date, e.id`,
     [loan.id, loan.account_id],
   );
@@ -449,7 +468,8 @@ export function getLoan(ctx: Ctx, id: number, range?: { from?: string | null; to
       cashAccount: [...new Set(cash)].join(', ') || null,
       narration: e.narration,
       balance,
-      editable: !lockReason({ source_type: e.source_type, is_void: e.is_void, voucher_type: e.voucher_type as any }) && !closedYearReason(ctx, e.date),
+      // A closed loan's transactions are frozen until it is re-opened.
+      editable: !!loan.is_active && !lockReason({ source_type: e.source_type, is_void: e.is_void, voucher_type: e.voucher_type as any }) && !closedYearReason(ctx, e.date),
       // On the loan page, a loan transaction opens its journal voucher; anything else opens its own document.
       link: e.source_type === 'loan' ? { kind: 'journal', id: e.id } : entrySourceLink(ctx, e),
     };

@@ -65,6 +65,10 @@ export interface LedgerFilter {
   to?: string;
   /** Entries dated strictly before (used for opening balances). */
   before?: string;
+  /** With `before`: opening-balance vouchers dated up to this date count too (they are opening, not movement). */
+  openingThrough?: string;
+  /** Leave out opening-balance vouchers dated up to this date (counted in the opening instead). */
+  excludeOpeningThrough?: string;
   /** Leave out every year-end closing entry (P&L style figures). */
   excludeClosing?: boolean;
   /** Leave out closing entries dated on or after this date (the closing entry of the report's own year). */
@@ -83,9 +87,16 @@ function filterSql(f: LedgerFilter, params: unknown[]): string {
     sql += ' AND e.date <= ?';
     params.push(f.to);
   }
-  if (f.before) {
+  if (f.before && f.openingThrough) {
+    sql += " AND (e.date < ? OR (e.voucher_type = 'opening' AND e.date <= ?))";
+    params.push(f.before, f.openingThrough);
+  } else if (f.before) {
     sql += ' AND e.date < ?';
     params.push(f.before);
+  }
+  if (f.excludeOpeningThrough) {
+    sql += " AND NOT (e.voucher_type = 'opening' AND e.date <= ?)";
+    params.push(f.excludeOpeningThrough);
   }
   if (f.excludeClosing) sql += " AND e.voucher_type <> 'closing'";
   if (f.excludeClosingFrom) {

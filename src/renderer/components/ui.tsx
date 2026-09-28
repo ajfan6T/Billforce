@@ -2,6 +2,7 @@ import { forwardRef, type ButtonHTMLAttributes, type ReactNode } from 'react';
 import { Link } from 'react-router';
 import { Loader2 } from 'lucide-react';
 import { formatDrCr, formatINR } from '../../shared/money';
+import { useGuardedNavigate } from '../guards';
 
 type ButtonVariant = 'primary' | 'secondary' | 'ghost' | 'danger' | 'success' | 'link';
 
@@ -43,8 +44,9 @@ export function IconButton({ label, icon, className = '', ...rest }: ButtonHTMLA
 }
 
 export function LinkButton({ to, children, icon, variant = 'secondary', size = 'md' }: { to: string; children?: ReactNode; icon?: ReactNode; variant?: ButtonVariant; size?: 'sm' | 'md' | 'lg' }) {
+  const { onLinkClick } = useGuardedNavigate();
   return (
-    <Link to={to} className={`btn btn-${variant} btn-${size}`}>
+    <Link to={to} className={`btn btn-${variant} btn-${size}`} onClick={onLinkClick(to)}>
       {icon}
       {children && <span>{children}</span>}
     </Link>
@@ -89,11 +91,12 @@ export function Badge({ tone = 'neutral', children }: { tone?: Tone; children: R
 }
 
 export function PageHeader({ title, subtitle, actions, back }: { title: ReactNode; subtitle?: ReactNode; actions?: ReactNode; back?: string }) {
+  const { onLinkClick } = useGuardedNavigate();
   return (
     <div className="page-header">
       <div>
         {back && (
-          <Link to={back} className="back-link">
+          <Link to={back} className="back-link" onClick={onLinkClick(back)}>
             ← Back
           </Link>
         )}
@@ -216,12 +219,4 @@ export function KeyValues({ items, columns = 2 }: { items: Array<[ReactNode, Rea
       })}
     </dl>
   );
-}
-
-export function Kbd({ children }: { children: ReactNode }) {
-  return <kbd>{children}</kbd>;
-}
-
-export function Divider() {
-  return <hr className="divider" />;
 }

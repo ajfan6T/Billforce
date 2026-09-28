@@ -146,6 +146,7 @@ function TransactionCard({ loan, onSaved }: { loan: LoanDetail; onSaved: () => v
     try {
       const r = await m.run({ loanId: loan.id, date, kind, principal: principal ?? 0, interest: isRepay ? (interest ?? 0) : 0, mode: pay.mode, accountId: pay.accountId, narration: narration.trim() || null });
       toast.success(`Saved ${r.entry.voucherNo}: ${r.entry.narration}`);
+      for (const w of r.warnings) toast.warning(w);
       setPrincipal(null);
       setInterest(null);
       setNarration('');
