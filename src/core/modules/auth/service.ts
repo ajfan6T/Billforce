@@ -10,6 +10,8 @@ import { seedDefaultAccounts } from '../../seed';
 import { ensureFinancialYear } from '../../accounting/periods';
 import { postEntry } from '../../accounting/ledger';
 import { toTimestamp } from '../../../shared/dates';
+import { gstConfig } from '../gst/common';
+import type { GstMode } from '../../../shared/gst';
 
 export interface UserRow {
   id: number;
@@ -254,5 +256,23 @@ export function appStatus(ctx: Ctx) {
     version: ctx.info.version,
     autoLockMinutes: getSection(ctx, 'security').autoLockMinutes,
     platform: ctx.platform.kind,
+    /** Optional features the business has turned on (the UI shows their screens only then). */
+    features: setupDone ? enabledFeatures(ctx) : NO_FEATURES,
   };
+}
+
+export interface EnabledFeatures {
+  /** GST treatment of new documents: 'none' = not registered. */
+  gst: GstMode;
+  /** Usual GST rate (for items without their own rate). */
+  gstDefaultRate: number;
+  /** Item rates include GST. */
+  gstInclusive: boolean;
+}
+
+const NO_FEATURES: EnabledFeatures = { gst: 'none', gstDefaultRate: 18, gstInclusive: true };
+
+export function enabledFeatures(ctx: Ctx): EnabledFeatures {
+  const g = gstConfig(ctx);
+  return { gst: g.mode, gstDefaultRate: g.defaultRate, gstInclusive: g.inclusive };
 }

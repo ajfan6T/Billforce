@@ -6,7 +6,7 @@ import { ReceiptPreview } from '../../components/pickers';
 import { useDebounced, useHotkeys, useQuery } from '../../hooks';
 import { useToast } from '../../feedback';
 import { call } from '../../api';
-import type { AppSettings, BusinessSettings, ReceiptSettings } from '../../../shared/settings';
+import type { AppSettings, BusinessSettings, GstSettings, ReceiptSettings } from '../../../shared/settings';
 import { useSectionForm } from './useSectionForm';
 import { BoxField, SwitchRow } from './common';
 
@@ -17,9 +17,19 @@ function CharCount({ value }: { value: string }) {
 }
 
 /** Live preview of a sample bill with the (unsaved) business and receipt values. */
-export function LivePreview({ business, receipt, showDuplicateToggle = true }: { business?: Partial<BusinessSettings>; receipt?: Partial<ReceiptSettings>; showDuplicateToggle?: boolean }) {
+export function LivePreview({
+  business,
+  receipt,
+  gst,
+  showDuplicateToggle = true,
+}: {
+  business?: Partial<BusinessSettings>;
+  receipt?: Partial<ReceiptSettings>;
+  gst?: Partial<GstSettings>;
+  showDuplicateToggle?: boolean;
+}) {
   const [duplicate, setDuplicate] = useState(false);
-  const input = useDebounced(JSON.stringify({ business: business ?? null, receipt: receipt ?? null, duplicate }), 300);
+  const input = useDebounced(JSON.stringify({ business: business ?? null, receipt: receipt ?? null, gst: gst ?? null, duplicate }), 300);
   const q = useQuery('settings.receiptPreview', JSON.parse(input));
   const width = (receipt?.paperWidth ?? q.data?.paperWidth ?? 80) as 80 | 58;
   return (

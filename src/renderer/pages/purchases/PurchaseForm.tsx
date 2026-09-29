@@ -12,6 +12,7 @@ import { formatINR } from '../../../shared/money';
 import { formatDate, todayISO } from '../../../shared/dates';
 import type { SettlementMode } from '../../../shared/constants';
 import { purchaseTotals } from '../../../shared/purchase';
+import { GST_RATES, formatRate, gstinState } from '../../../shared/gst';
 import { BoxField } from '../customers/common';
 import { DescriptionInput } from './DescriptionInput';
 import '../customers/parties.css';
@@ -28,6 +29,8 @@ interface Line {
   rate: number | null;
   /** Rate of the last purchase of this description (from history), for the "check the rate" warning. */
   lastRate?: number | null;
+  /** GST rate on the supplier's bill (purchases with GST); null = the usual rate. */
+  gstRate?: number | null;
 }
 
 /** A rate this many times the last purchase rate is almost always a typing mistake (e.g. digits added to the old rate). */
@@ -64,6 +67,10 @@ interface State {
   splitRows: PayRow[];
   remarks: string;
   reason: string;
+  /** GST: the supplier's rates include the tax. */
+  gstInclusive: boolean;
+  /** GST: claim input tax credit. */
+  itc: boolean;
 }
 
 function fromPurchase(p: PurchaseDetail, supplier: SupplierOption | null, defaultRoundOff: boolean): State {
@@ -76,7 +83,7 @@ function fromPurchase(p: PurchaseDetail, supplier: SupplierOption | null, defaul
     supplierBillNo: p.supplierBillNo ?? '',
     supplierBillDate: p.supplierBillDate ?? '',
     accountId: p.expenseAccountId,
-    lines: [...p.items.map((i) => ({ key: nextKey++, description: i.description, qty: i.qty, unit: i.unit ?? '', rate: i.rate })), blankLine()],
+    lines: [...p.items.map((i) => ({ key: nextKey++, description: i.description, qty: i.qty, unit: i.unit ?? '', rate: i.rate, gstRate: i.gstRate })), blankLine()],
     discount: p.discount || null,
     otherCharges: p.otherCharges || null,
     // Not stored: rounding was on if it changed the total, or (by default) when the total is a whole rupee.
@@ -87,6 +94,8 @@ function fromPurchase(p: PurchaseDetail, supplier: SupplierOption | null, defaul
     splitRows: !single && p.payments.length ? p.payments.map((x) => ({ key: nextKey++, mode: x.mode, accountId: x.accountId, amount: x.amount, reference: x.reference ?? '' })) : [blankPay()],
     remarks: p.remarks ?? '',
     reason: '',
+    gstInclusive: p.gst.inclusive,
+    itc: p.gst.mode === 'regular' ? p.gst.itc : true,
   };
 }
 
@@ -109,6 +118,8 @@ function fresh(opts: FormOptions, supplier: SupplierOption | null, keep?: Partia
     splitRows: [blankPay()],
     remarks: '',
     reason: '',
+    gstInclusive: false,
+    itc: true,
   };
 }
 
@@ -130,7 +141,7 @@ export function PurchaseFormPage() {
       if (!p) return;
       if (p.supplierId) {
         call('suppliers.get', { id: p.supplierId })
-          .then((s) => setInitial(fromPurchase(p, { id: s.id, name: s.name, phone: s.phone, payable: s.payable }, opts.data!.roundOff)))
+          .then((s) => setInitial(fromPurchase(p, { id: s.id, name: s.name, phone: s.phone, payable: s.payable, gstin: s.gstin, stateCode: s.stateCode }, opts.data!.roundOff)))
           .catch((e) => setLoadError(String(e?.message ?? e)));
       } else setInitial(fromPurchase(p, null, opts.data.roundOff));
     } else if (presetSupplierId) {
@@ -258,11 +269,18 @@ function PurchaseEditor({ options, initial, existing }: { options: FormOptions; 
   const lineProblem = filled
     .map((l, i) => (!l.description.trim() ? `Line ${i + 1}: enter what was bought` : !l.qty ? `Line ${i + 1}: enter the quantity` : l.rate === null ? `Line ${i + 1}: enter the rate` : null))
     .find(Boolean);
+  // GST as the core will record it: a purchase keeps its treatment; IGST from a supplier in another state.
+  const gstOn = existing ? existing.gst.mode === 'regular' : options.gst.mode === 'regular';
+  const supplierState = !s.cashPurchase && s.supplier ? (gstinState(s.supplier.gstin) ?? s.supplier.stateCode ?? null) : null;
+  const interState = gstOn && !!supplierState && !!options.gst.stateCode && supplierState !== options.gst.stateCode;
+  const supplierGstin = !s.cashPurchase && s.supplier?.gstin ? s.supplier.gstin : null;
+  const claimItc = gstOn && !!supplierGstin && s.itc;
   const totals = purchaseTotals({
-    items: filled.map((l) => ({ qty: l.qty ?? 0, rate: l.rate ?? 0 })),
+    items: filled.map((l) => ({ qty: l.qty ?? 0, rate: l.rate ?? 0, gstRate: l.gstRate ?? options.gst.defaultRate })),
     discount: s.discount ?? 0,
     otherCharges: s.otherCharges ?? 0,
     roundOff: s.roundOff,
+    gst: gstOn ? { inclusive: s.gstInclusive, interState } : null,
   });
   const payments = s.split
     ? s.splitRows.filter((p) => (p.amount ?? 0) > 0).map((p) => ({ mode: p.mode, accountId: p.accountId, amount: p.amount!, reference: p.reference.trim() || null }))
@@ -340,12 +358,19 @@ function PurchaseEditor({ options, initial, existing }: { options: FormOptions; 
       supplierBillNo: s.supplierBillNo.trim() || null,
       supplierBillDate: s.supplierBillDate || null,
       expenseAccountId: s.accountId,
-      items: filled.map((l) => ({ description: l.description.trim(), qty: l.qty!, unit: l.unit.trim() || null, rate: l.rate ?? 0 })),
+      items: filled.map((l) => ({
+        description: l.description.trim(),
+        qty: l.qty!,
+        unit: l.unit.trim() || null,
+        rate: l.rate ?? 0,
+        ...(gstOn ? { gstRate: l.gstRate ?? options.gst.defaultRate } : {}),
+      })),
       discount: s.discount ?? 0,
       otherCharges: s.otherCharges ?? 0,
       roundOff: s.roundOff,
       payments,
       remarks: s.remarks.trim() || null,
+      ...(gstOn ? { gstInclusive: s.gstInclusive, itc: claimItc } : {}),
     };
     try {
       const saved = existing ? await update.run({ id: existing.id, ...input, reason: s.reason.trim() || null }) : await create.run(input);
@@ -456,13 +481,14 @@ function PurchaseEditor({ options, initial, existing }: { options: FormOptions; 
           </Card>
 
           <Card title="Items" padded={false} actions={<span className="small muted">Enter moves to the next box · Ctrl+S saves</span>}>
-            <div className="line-grid" role="table">
+            <div className={`line-grid${gstOn ? ' with-gst' : ''}`} role="table">
               <div className="lg-row lg-head" role="row">
                 <span>#</span>
                 <span>Description</span>
                 <span className="r">Qty</span>
                 <span>Unit</span>
                 <span className="r">Rate (₹)</span>
+                {gstOn && <span>GST</span>}
                 <span className="r">Amount</span>
                 <span />
               </div>
@@ -508,6 +534,16 @@ function PurchaseEditor({ options, initial, existing }: { options: FormOptions; 
                       onChange={(v) => setLine(l.key, { rate: v })}
                       onKeyDown={(e) => onCellKey(e, i, 3)}
                     />
+                    {gstOn && isBlank && <span />}
+                    {gstOn && !isBlank && (
+                      <Select<number>
+                        value={l.gstRate ?? options.gst.defaultRate}
+                        onChange={(v) => setLine(l.key, { gstRate: v })}
+                        aria-label={`Line ${i + 1} GST rate`}
+                        tabIndex={-1}
+                        options={GST_RATES.map((r) => ({ value: r, label: formatRate(r) }))}
+                      />
+                    )}
                     <span className="lg-amount money">{amount === null ? '' : formatINR(amount, { symbol: false })}</span>
                     {isBlank ? <span /> : <IconButton label="Remove line" icon={<Trash2 size={15} />} className="danger" tabIndex={-1} onClick={() => removeLine(l.key)} />}
                   </div>
@@ -636,6 +672,43 @@ function PurchaseEditor({ options, initial, existing }: { options: FormOptions; 
                 </label>
                 <MoneyInput id="purchase-other" value={s.otherCharges} onChange={(v) => patch({ otherCharges: v })} placeholder="0.00" />
               </div>
+              {totals.gst && (
+                <>
+                  <div className="tb-row">
+                    <Checkbox checked={s.gstInclusive} onChange={(v) => patch({ gstInclusive: v })} label="Rates include GST" />
+                  </div>
+                  <div className="tb-row muted">
+                    <span>Taxable value</span>
+                    <span className="money">{formatINR(totals.gst.taxable)}</span>
+                  </div>
+                  {interState ? (
+                    <div className="tb-row">
+                      <span>IGST{s.gstInclusive ? ' (included)' : ''}</span>
+                      <span className="money">{formatINR(totals.gst.igst)}</span>
+                    </div>
+                  ) : (
+                    <>
+                      <div className="tb-row">
+                        <span>CGST{s.gstInclusive ? ' (included)' : ''}</span>
+                        <span className="money">{formatINR(totals.gst.cgst)}</span>
+                      </div>
+                      <div className="tb-row">
+                        <span>SGST{s.gstInclusive ? ' (included)' : ''}</span>
+                        <span className="money">{formatINR(totals.gst.sgst)}</span>
+                      </div>
+                    </>
+                  )}
+                  <div className="tb-row">
+                    <Checkbox
+                      checked={claimItc}
+                      disabled={!supplierGstin}
+                      onChange={(v) => patch({ itc: v })}
+                      label="Claim GST credit"
+                      hint={supplierGstin ? 'The GST paid is set off against the GST you collect' : 'Needs the supplier with their GSTIN; without it the GST is part of the cost'}
+                    />
+                  </div>
+                </>
+              )}
               <div className="tb-row">
                 <Checkbox checked={s.roundOff} onChange={(v) => patch({ roundOff: v })} label="Round off" />
                 <span className="money">{totals.roundOff ? formatINR(totals.roundOff, { plus: true }) : '0.00'}</span>

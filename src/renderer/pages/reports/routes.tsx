@@ -6,6 +6,7 @@ import { BalanceSheetPage } from './BalanceSheet';
 import { TrialBalancePage } from './TrialBalance';
 import { CashFlowPage } from './CashFlow';
 import { PayablesAgeingPage, ReceivablesAgeingPage } from './Ageing';
+import { GstReportsPage } from './GstReports';
 
 export const reportsPages: AppRoute[] = [
   { path: '/reports', element: <ReportsHomePage />, perm: ['reports.sales', 'reports.financial', 'customers.view', 'suppliers.view', 'accounts.view'] },
@@ -16,4 +17,5 @@ export const reportsPages: AppRoute[] = [
   { path: '/reports/cash-flow', element: <CashFlowPage />, perm: 'reports.financial' },
   { path: '/reports/receivables-ageing', element: <ReceivablesAgeingPage />, perm: ['reports.financial', 'customers.view'] },
   { path: '/reports/payables-ageing', element: <PayablesAgeingPage />, perm: ['reports.financial', 'suppliers.view'] },
+  { path: '/reports/gst', element: <GstReportsPage />, perm: 'reports.financial' },
 ];

@@ -5,6 +5,7 @@ import { useDialogs } from './feedback';
 import type { Permission } from '../shared/permissions';
 
 type Status = ApiOutput<'app.status'>;
+export type Features = Status['features'];
 export type SessionInfo = NonNullable<Status['session']>;
 
 interface AuthApi {
@@ -123,6 +124,13 @@ export function useAuth(): AuthApi {
   const a = useContext(AuthContext);
   if (!a) throw new Error('useAuth outside AuthProvider');
   return a;
+}
+
+const NO_FEATURES: Features = { gst: 'none', gstDefaultRate: 18, gstInclusive: true };
+
+/** Optional features the business has turned on (GST ...); screens for the others stay hidden. */
+export function useFeatures(): Features {
+  return useAuth().status?.features ?? NO_FEATURES;
 }
 
 /** Render children only if the user has the permission. */

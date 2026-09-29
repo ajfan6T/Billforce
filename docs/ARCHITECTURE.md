@@ -2,7 +2,8 @@
 
 Billforce is an offline Windows desktop ERP for small Indian businesses: billing,
 customers, suppliers & purchases, double-entry accounts, reports, employees,
-users & security, settings, backups and import. **No stock/inventory. No GST.**
+users & security, settings, backups and import, with optional **GST** (regular or composition).
+**No stock/inventory.**
 
 ## Stack
 
@@ -28,7 +29,7 @@ src/core/            business logic (no Electron imports)
   db/schema/*.ts     SQL schema, one file per area (all in migration v1 until release)
   accounting/        chart seeds, ledger posting engine, periods (FY lock), opening balances
   export/            ReportData -> CSV / XLSX / HTML(PDF)
-  print/receipt.ts   80/58 mm thermal receipt layout + UPI QR
+  print/receipt.ts   80/58 mm thermal receipt layout + UPI QR (+ GSTIN lines and GST table)
   modules/<name>/    service.ts (functions) + routes.ts (API)   <- feature code lives here
 src/renderer/        React UI
   api.ts hooks.ts auth.tsx feedback.tsx   typed API client, useQuery/useMutation, session, toasts/dialogs
@@ -94,6 +95,11 @@ tests/               vitest; helpers.ts gives createTestApp(), ledgerProblems(),
   full or pulled-out pen drive never keeps a cut-short file; it throws `SaveFileError` with plain words.
   Module CSS goes in `pages/<module>/<module>.css` imported by its pages.
   Tone: plain English a shop owner understands ("Payment received", "Amount due", "Cancel bill").
+* **Optional features** (GST today): off by default and invisible when off. Core: `gstConfig(ctx)`
+  (`modules/gst/common.ts`) gives the mode of new documents; `app.status.features` tells the UI, which hides menu
+  items (`feature` in `nav.ts`), report cards and form fields with `useFeatures()`. A document stores the mode it was
+  made with (`gst_mode`), so turning a feature on or off never changes old documents, and edits keep the saved mode.
+  GST fields sent by a form are optional in the API: left out = unchanged (forms of unregistered businesses omit them).
 * **Tests**: each module adds `tests/<module>.test.ts` using `createTestApp()`; assert `ledgerProblems(t.app)` is empty after
   every scenario, check postings with `systemBalance`, and test permission denials with `t.loginAs('cashier')`.
 
@@ -117,6 +123,21 @@ tests/               vitest; helpers.ts gives createTestApp(), ledgerProblems(),
 | Salary payment | **SALARY_PAYABLE(employee)** | cash/bank |
 | Opening balances | `setPartyOpeningBalance()` / opening entries against **OPENING_EQUITY**, dated books start | |
 | Year-end closing (voucher `closing`, FY end date) | each income account's credit balance; **CAPITAL** if loss | each expense account's debit balance; **CAPITAL** if profit; optional: Dr CAPITAL / Cr DRAWINGS |
+| Sales bill with GST (regular) | as above, but **DISCOUNT_ALLOWED** = discounts without tax | **SALES** = Σ qty×rate without tax; **GST_OUT_CGST + GST_OUT_SGST** (same state) or **GST_OUT_IGST**; ROUND_OFF |
+| Return against a GST bill | **SALES_RETURNS** = refund less tax; **GST_OUT_*** = tax taken back (the line's share; all that is left on a fully returned line) | refund account / AR |
+| Purchase with GST and input tax credit | purchase account = total − tax; **GST_IN_CGST + GST_IN_SGST** or **GST_IN_IGST** | cash/bank / AP (without the credit the tax stays in the purchase account) |
+| Pay GST (voucher `gst_payment`, source `manual`) | **GST_OUT_*** (set off + paid) | **GST_IN_*** (credit used, legal order: IGST first; CGST/SGST never for each other); cash/bank (paid) |
+| Pay composition tax (`gst_payment`) | **COMPOSITION_TAX** (expense) = turnover × rate | cash/bank |
+
+**GST** (`src/shared/gst.ts`, `calcBill(…, gst)` in `src/shared/billing.ts`, `purchaseTotals(…, gst)`): per line, the
+bill discount is shared over the lines first; with "rates include GST" the tax is taken out of the value
+(`lineTax(value, rate, inclusive, interState)`), otherwise added on top; CGST = SGST = half, rounded per line. The
+till and the core use the same functions, so the preview is what gets saved. Place of supply = the customer's /
+supplier's state (from the GSTIN, else `state_code`, else the business's own state); a different state means IGST.
+GST accounts (Output / Input CGST, SGST, IGST under current liabilities / current assets, Composition Tax) are created
+by `ensureGstAccounts` only when the business registers, so unregistered charts have none. Composition businesses
+print a "Bill of supply" without tax (posted like an unregistered bill) and pay tax on turnover. Credit notes without
+goods carry no GST. GST reports (`modules/gst/reports.ts`) read the documents (`gst_mode`), not the ledger.
 
 Reports read only non-void entries (`is_void = 0`). P&L style reports exclude `voucher_type = 'closing'`.
 Balance sheet as on D: balance-sheet accounts use all entries ≤ D except closing entries of D's own FY;
@@ -135,7 +156,9 @@ Balance sheet as on D: balance-sheet accounts use all entries ≤ D except closi
 | `accounts.paymentCheck` | `{ mode, accountId?, amount, date?, entryId? }` | `{ accountId, accountName, date, balance \| null, warning }` — show the balance next to "Paid from" and ask before saving a payment that takes it below zero (`pages/accounts/PaymentBalance.tsx`) |
 | `accounts.paymentAccounts` | – | `{ cash[], bank[], defaults: { cash, upi, bank } }` |
 | `employees.search` | `{ q?, includeInactive? }` | `{ id, name, phone, designation, isActive }[]` |
-| `sales.create` | `{ date?, customerId?, customerName?, customerPhone?, items: [{ itemId?, itemName, unit?, qty, rate, discount?, discountPct? }], billDiscount?, billDiscountPct?, payments: [{ mode: 'cash'|'upi'|'bank', amount, accountId?, reference? }], remarks? }` — credit part = total − Σpayments | `{ id, billNo, total, ... }` |
+| `sales.create` | `{ date?, customerId?, customerName?, customerPhone?, items: [{ itemId?, itemName, unit?, qty, rate, discount?, discountPct?, gstRate?, hsn? }], billDiscount?, billDiscountPct?, payments: [{ mode: 'cash'|'upi'|'bank', amount, accountId?, reference? }], remarks? }` — credit part = total − Σpayments; `gstRate`/`hsn` only for one-time lines (catalogue items use the item's rate) | `{ id, billNo, total, gst: { mode, taxable, cgst, sgst, igst, ... }, ... }` |
+| `gst.summary` / `gst.salesRegister` / `gst.hsnSummary` / `gst.purchaseRegister` / `gst.compositionSummary` | `{ from, to }` | `ReportData` |
+| `gst.due` / `gst.pay` | `{ upTo, from? }` / `+ { date?, mode, accountId?, reference? }` | set-off and cash per head / the voucher (`EntryDetail`) |
 | `reports.trialBalance` | `{ from?, to }` | `ReportData` |
 
 Core helpers other modules may call: `touchItemUsage`, `searchCustomers`, `quickCreateCustomer`, `searchSuppliers`,
@@ -159,6 +182,7 @@ Core helpers other modules may call: `touchItemUsage`, `searchCustomers`, `quick
 ## Schema changes
 
 Migration 1 is the release schema. Migration 2 brings data files from pre-release builds up to it (adds late
-columns and rebuilds changed indexes; a no-op on fresh files). Every future change is a new migration — never
-edit a released one. `seedReferenceData` runs on every start and grants default permissions only for permissions
+columns and rebuilds changed indexes; a no-op on fresh files). Migration 3 adds the GST columns
+(`db/schema/gst.ts`), each with a default meaning "no GST", so older data reads exactly as before. Every future
+change is a new migration — never edit a released one. `seedReferenceData` runs on every start and grants default permissions only for permissions
 a data file has not seen before (`meta.known_permissions`), so the owner's choices survive upgrades and restores.

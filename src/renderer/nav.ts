@@ -11,11 +11,16 @@ import {
   type LucideIcon,
 } from 'lucide-react';
 import type { Permission } from '../shared/permissions';
+import type { ApiOutput } from './api';
+
+export type Features = ApiOutput<'app.status'>['features'];
 
 export interface NavLinkItem {
   label: string;
   to: string;
   perm?: Permission | Permission[];
+  /** Shown only when the business uses this optional feature. */
+  feature?: (f: Features) => boolean;
 }
 
 export interface NavGroup {
@@ -77,6 +82,7 @@ export const NAV: NavGroup[] = [
       { label: 'Capital & drawings', to: '/accounts/capital', perm: 'accounts.manage' },
       { label: 'Loans', to: '/accounts/loans', perm: ['accounts.view', 'accounts.manage'] },
       { label: 'Cash & bank transfer', to: '/accounts/transfers', perm: 'accounts.manage' },
+      { label: 'Pay GST', to: '/accounts/gst-payment', perm: 'accounts.manage', feature: (f) => f.gst !== 'none' },
       { label: 'Chart of accounts', to: '/accounts/chart', perm: ['accounts.view', 'accounts.chart'] },
       { label: 'Year-end closing', to: '/accounts/year-end', perm: 'accounts.close_year' },
     ],
@@ -94,6 +100,7 @@ export const NAV: NavGroup[] = [
       { label: 'Cash flow', to: '/reports/cash-flow', perm: 'reports.financial' },
       { label: 'Receivables ageing', to: '/reports/receivables-ageing', perm: ['reports.financial', 'customers.view'] },
       { label: 'Payables ageing', to: '/reports/payables-ageing', perm: ['reports.financial', 'suppliers.view'] },
+      { label: 'GST reports', to: '/reports/gst', perm: 'reports.financial', feature: (f) => f.gst !== 'none' },
     ],
   },
   {

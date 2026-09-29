@@ -245,6 +245,9 @@ function GoodsReturn({ cfg, initialBillId }: { cfg: ApiOutput<'sales.posConfig'>
         </Card>
         {b.status !== 'active' && <Alert tone="red">This bill is cancelled, so nothing can be returned against it.</Alert>}
         {b.status === 'active' && fullyReturned && <Alert tone="amber">Everything on this bill has already been returned.</Alert>}
+        {b.gst && b.status === 'active' && !fullyReturned && (
+          <Alert tone="neutral">This bill charged GST. Refund rates include the GST, and the GST on the returned items is taken back in the accounts.</Alert>
+        )}
         <Card title="Tick the items being returned" padded={false}>
           <div className="table-wrap">
           <table className="table compact sl-return-lines">

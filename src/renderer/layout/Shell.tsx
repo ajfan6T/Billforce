@@ -2,7 +2,7 @@ import { useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 import { NavLink, useLocation } from 'react-router';
 import { ChevronDown, KeyRound, Lock, LogOut, Plus, UserCircle2 } from 'lucide-react';
 import { NAV, NEW_BILL_PATH, type NavGroup } from '../nav';
-import { useAuth } from '../auth';
+import { useAuth, useFeatures } from '../auth';
 import { useHotkeys } from '../hooks';
 import { confirmLeave, useGuardedNavigate } from '../guards';
 import { ROLE_LABELS } from '../../shared/constants';
@@ -17,14 +17,15 @@ function allowed(can: (p: Permission) => boolean, perm?: Permission | Permission
 
 function Sidebar() {
   const { can } = useAuth();
+  const features = useFeatures();
   const location = useLocation();
   const { onLinkClick } = useGuardedNavigate();
   const groups = useMemo(
     () =>
-      NAV.map((g) => ({ ...g, items: g.items?.filter((i) => allowed(can, i.perm)) }))
+      NAV.map((g) => ({ ...g, items: g.items?.filter((i) => allowed(can, i.perm) && (!i.feature || i.feature(features))) }))
         .filter((g) => allowed(can, g.perm))
         .filter((g) => g.to || (g.items && g.items.length)),
-    [can],
+    [can, features],
   );
   const activeGroup = groups.find((g) => g.items?.some((i) => location.pathname === i.to || (i.to !== '/' && location.pathname.startsWith(i.to + '/'))))?.key;
   const [open, setOpen] = useState<Record<string, boolean>>(() => {

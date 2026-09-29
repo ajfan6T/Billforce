@@ -1,3 +1,6 @@
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 import { createTestApp, ledgerProblems, systemBalance, type TestApp } from './helpers';
 import { calcBill } from '../src/shared/billing';
@@ -433,5 +436,26 @@ describe('items, parties and import', () => {
     await register(t);
     const after = (await t.call('import.types')).find((x) => x.type === 'items')!;
     expect(after.fields.map((f) => f.key)).toEqual(expect.arrayContaining(['hsn', 'gstRate']));
+  });
+
+  it('imports HSN, GST % and GSTIN columns from Excel / CSV', async () => {
+    t = await createTestApp();
+    await register(t);
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'bf-gst-import-'));
+    const items = path.join(dir, 'items.csv');
+    fs.writeFileSync(items, ['Item name,Rate,HSN code,GST %', 'Rice,52,1006,5', 'Soap,59,3401,18%', 'Odd,10,12,7'].join('\r\n'));
+    const p = await t.call('import.preview', { type: 'items', path: items });
+    expect(p.mapping).toMatchObject({ name: 0, rate: 1, hsn: 2, gstRate: 3 });
+    const odd = p.rows.find((r) => r.values.name === 'Odd')!;
+    expect(Object.keys(odd.fieldErrors).sort()).toEqual(['gstRate', 'hsn']);
+    await t.call('import.commit', { type: 'items', path: items, duplicateMode: 'skip' });
+    const list = await t.call('items.list', {});
+    expect(list.find((i) => i.name === 'Soap')).toMatchObject({ hsn: '3401', gstRate: 18 });
+    const customers = path.join(dir, 'customers.csv');
+    fs.writeFileSync(customers, ['Name,Phone,GSTIN', `Kumar Stores,90000 00001,${MH_CUSTOMER.toLowerCase()}`, 'Bad GST,90000 00002,27AAPFU0939F1ZX'].join('\r\n'));
+    const c = await t.call('import.preview', { type: 'customers', path: customers });
+    expect(c.rows.find((r) => r.values.name === 'Bad GST')!.fieldErrors.gstin).toMatch(/not valid/);
+    await t.call('import.commit', { type: 'customers', path: customers, duplicateMode: 'skip' });
+    expect((await t.call('customers.search', { q: 'Kumar' }))[0]).toMatchObject({ gstin: MH_CUSTOMER, stateCode: '27' });
   });
 });

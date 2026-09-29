@@ -244,6 +244,24 @@
   margin-left: 6px;
   vertical-align: 1px;
 }
+.sl-lines-table .sl-ln-name .sl-ln-gst,
+.sl-lines-table .sl-ln-name .sl-ln-gst-select {
+  display: inline-block;
+  white-space: nowrap;
+  font-size: 10.5px;
+  font-weight: 600;
+  color: var(--text-2);
+  background: var(--surface-3);
+  border: 0;
+  border-radius: 999px;
+  padding: 0 6px;
+  margin-left: 6px;
+  vertical-align: 1px;
+}
+.sl-lines-table .sl-ln-name .sl-ln-gst-select {
+  cursor: pointer;
+  padding-right: 2px;
+}
 .sl-lines-table .input {
   height: 32px;
   padding: 0 8px;

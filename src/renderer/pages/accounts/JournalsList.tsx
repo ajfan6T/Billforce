@@ -11,7 +11,7 @@ import { call, type ApiOutput } from '../../api';
 import { formatINR } from '../../../shared/money';
 import { describeRange } from '../../../shared/dates';
 import type { VoucherType } from '../../../shared/constants';
-import { CancelledBadge, listReport, PageBar, usePage, useRange, VOUCHER_OPTIONS, VoucherBadge } from './common';
+import { CancelledBadge, listReport, PageBar, usePage, useRange, useVoucherOptions, VoucherBadge } from './common';
 
 type Row = ApiOutput<'journals.list'>['rows'][number];
 
@@ -20,6 +20,7 @@ export function JournalsListPage() {
   const { can } = useAuth();
   const [range, setRange] = useRange('journals.range', 'this_month');
   const [type, setType] = useState<VoucherType | ''>('');
+  const voucherOptions = useVoucherOptions();
   const [status, setStatus] = useState<'all' | 'active' | 'cancelled'>('all');
   const [q, setQ] = useState('');
   const dq = useDebounced(q, 250);
@@ -102,7 +103,7 @@ export function JournalsListPage() {
         <div className="ac-filters">
           <Toolbar>
             <DateRangePicker value={range} onChange={setRange} />
-            <Select<VoucherType | ''> value={type} onChange={setType} aria-label="Voucher type" options={[{ value: '', label: 'All types' }, ...VOUCHER_OPTIONS]} />
+            <Select<VoucherType | ''> value={type} onChange={setType} aria-label="Voucher type" options={[{ value: '', label: 'All types' }, ...voucherOptions]} />
             <Select<'all' | 'active' | 'cancelled'>
               value={status}
               onChange={setStatus}

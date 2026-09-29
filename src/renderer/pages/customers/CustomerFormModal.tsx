@@ -3,7 +3,8 @@ import { Modal } from '../../components/modal';
 import { Alert, Button } from '../../components/ui';
 import { Field, FormGrid, MoneyInput, SegmentedControl, TextArea, TextInput } from '../../components/forms';
 import { useMutation, useQuery } from '../../hooks';
-import { useAuth } from '../../auth';
+import { useAuth, useFeatures } from '../../auth';
+import { PartyGstFields, gstinError } from '../../components/gst';
 import { useToast } from '../../feedback';
 import type { ApiOutput } from '../../api';
 import { formatDate } from '../../../shared/dates';
@@ -21,6 +22,8 @@ interface FormState {
   notes: string;
   openingAmount: number | null;
   openingDirection: 'receivable' | 'advance';
+  gstin: string;
+  stateCode: string;
 }
 
 function initial(c?: CustomerDetail | null, name?: string): FormState {
@@ -33,6 +36,8 @@ function initial(c?: CustomerDetail | null, name?: string): FormState {
     notes: c?.notes ?? '',
     openingAmount: c?.openingBalance?.amount ?? null,
     openingDirection: c?.openingBalance?.direction ?? 'receivable',
+    gstin: c?.gstin ?? '',
+    stateCode: c?.stateCode ?? '',
   };
 }
 
@@ -61,6 +66,7 @@ export function CustomerFormModal({
   const toast = useToast();
   const { can } = useAuth();
   const canCredit = can('customers.credit');
+  const withGst = useFeatures().gst !== 'none';
 
   useEffect(() => {
     if (open) {
@@ -74,8 +80,9 @@ export function CustomerFormModal({
   const set = <K extends keyof FormState>(k: K, v: FormState[K]) => setF((s) => ({ ...s, [k]: v }));
   const locked = !!info.data?.openingLocked;
 
+  const badGstin = withGst ? gstinError(f.gstin) : null;
   const save = async () => {
-    if (!f.name.trim()) return;
+    if (!f.name.trim() || badGstin) return;
     const payload = {
       name: f.name.trim(),
       phone: f.phone.trim() || null,
@@ -85,6 +92,8 @@ export function CustomerFormModal({
       // Left out = kept as saved (the server refuses changes without customers.credit).
       ...(canCredit ? { creditLimit: f.creditLimit } : {}),
       ...(locked || !canCredit ? {} : { openingBalance: f.openingAmount ? { amount: f.openingAmount, direction: f.openingDirection } : null }),
+      // GST details only for businesses registered for GST (left out = kept as saved).
+      ...(withGst ? { gstin: f.gstin.trim() || null, stateCode: f.stateCode || null } : {}),
     };
     try {
       const saved = customer ? await update.run({ id: customer.id, ...payload }) : await create.run(payload);
@@ -108,7 +117,7 @@ export function CustomerFormModal({
           <Button variant="ghost" onClick={onClose}>
             Cancel
           </Button>
-          <Button variant="primary" type="submit" form="customer-form" loading={m.loading} disabled={!f.name.trim()}>
+          <Button variant="primary" type="submit" form="customer-form" loading={m.loading} disabled={!f.name.trim() || !!badGstin}>
             {customer ? 'Save changes' : 'Add customer'}
           </Button>
         </>
@@ -146,6 +155,7 @@ export function CustomerFormModal({
           <Field label="Address" className="span-all">
             <TextArea rows={2} value={f.address} maxLength={500} onChange={(e) => set('address', e.target.value)} />
           </Field>
+          {withGst && <PartyGstFields who="customer" gstin={f.gstin} stateCode={f.stateCode} errors={fe} onChange={(v) => setF((s) => ({ ...s, ...v }))} />}
         </FormGrid>
         <div className="section-title" style={{ margin: '4px 0 0' }}>
           Opening balance

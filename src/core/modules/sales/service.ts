@@ -175,6 +175,9 @@ export interface BillCustomer {
   isActive: boolean;
   /** The user may not see customer balances: balance is 0 and creditLimit null. */
   balanceHidden?: boolean;
+  /** GST details (place of supply). */
+  gstin: string | null;
+  stateCode: string | null;
 }
 
 export interface BillCreditNoteRef {
@@ -287,7 +290,7 @@ export function customerSummary(ctx: Ctx, id: number): BillCustomer {
   if (!c) throw fail.notFound('Customer');
   // Same rule as customers.search: balances only for users who may see them.
   if (!canSeeCustomerBalances(ctx)) {
-    return { id: c.id, name: c.name, phone: c.phone, balance: 0, creditLimit: null, isActive: !!c.is_active, balanceHidden: true };
+    return { id: c.id, name: c.name, phone: c.phone, balance: 0, creditLimit: null, isActive: !!c.is_active, balanceHidden: true, gstin: c.gstin, stateCode: c.state_code };
   }
   return {
     id: c.id,
@@ -296,6 +299,8 @@ export function customerSummary(ctx: Ctx, id: number): BillCustomer {
     balance: partyBalance(ctx, 'customer', c.id, { account: 'AR' }),
     creditLimit: c.credit_limit,
     isActive: !!c.is_active,
+    gstin: c.gstin,
+    stateCode: c.state_code,
   };
 }
 
@@ -1290,6 +1295,9 @@ export interface RepeatLine {
   defaultRate: number | null;
   discount: number | null;
   discountPct: number | null;
+  /** GST rate the new bill will use (item's own rate; null = the usual rate). */
+  gstRate: number | null;
+  hsn: string | null;
 }
 
 export interface RepeatData {
@@ -1312,7 +1320,7 @@ export function repeatData(ctx: Ctx, billId: number): RepeatData {
   const allowRate = can(ctx, 'billing.rate');
   let rateChanges = 0;
   const lines = b.items.map((i): RepeatLine => {
-    const item = i.itemId ? ctx.db.get<{ rate: number; unit: string }>('SELECT rate, unit FROM items WHERE id = ?', [i.itemId]) : undefined;
+    const item = i.itemId ? ctx.db.get<{ rate: number; unit: string; gst_rate: number | null; hsn: string | null }>('SELECT rate, unit, gst_rate, hsn FROM items WHERE id = ?', [i.itemId]) : undefined;
     if (item && item.rate !== i.rate) rateChanges++;
     return {
       itemId: item ? i.itemId : null,
@@ -1323,6 +1331,8 @@ export function repeatData(ctx: Ctx, billId: number): RepeatData {
       defaultRate: item ? item.rate : null,
       discount: allowDiscount && !i.discountPct && i.discount ? i.discount : null,
       discountPct: allowDiscount && i.discountPct ? i.discountPct : null,
+      gstRate: item ? item.gst_rate : i.gstRate,
+      hsn: item ? item.hsn : i.hsn,
     };
   });
   const customer = b.customer && b.customer.isActive ? b.customer : null;
@@ -1350,12 +1360,26 @@ export interface CustomerItem {
   /** Current default rate (null for free-text lines or deleted items). */
   defaultRate: number | null;
   times: number;
+  /** GST rate (item's own rate, or the one-time line's last rate; null = the usual rate). */
+  gstRate: number | null;
 }
 
 /** Items a customer bought recently, newest first (for one-tap repeat on the billing screen). */
 export function customerItems(ctx: Ctx, customerId: number, limit = 12): CustomerItem[] {
-  const rows = ctx.db.all<{ item_id: number | null; item_name: string; unit: string | null; rate: number; qty: number; date: string; cur_rate: number | null; cur_active: number | null }>(
-    `SELECT bi.item_id, bi.item_name, bi.unit, bi.rate, bi.qty, b.date, it.rate AS cur_rate, it.is_active AS cur_active
+  const rows = ctx.db.all<{
+    item_id: number | null;
+    item_name: string;
+    unit: string | null;
+    rate: number;
+    qty: number;
+    date: string;
+    cur_rate: number | null;
+    cur_active: number | null;
+    gst_rate: number | null;
+    cur_gst: number | null;
+  }>(
+    `SELECT bi.item_id, bi.item_name, bi.unit, bi.rate, bi.qty, b.date, it.rate AS cur_rate, it.is_active AS cur_active,
+            bi.gst_rate, it.gst_rate AS cur_gst
        FROM bill_items bi JOIN bills b ON b.id = bi.bill_id LEFT JOIN items it ON it.id = bi.item_id
       WHERE b.customer_id = ? AND b.status = 'active'
       ORDER BY b.date DESC, b.id DESC, bi.line_no LIMIT 400`,
@@ -1379,6 +1403,7 @@ export function customerItems(ctx: Ctx, customerId: number, limit = 12): Custome
       lastDate: r.date,
       defaultRate: r.cur_rate,
       times: 1,
+      gstRate: r.item_id ? r.cur_gst : r.gst_rate,
     });
   }
   return [...map.values()].slice(0, limit);

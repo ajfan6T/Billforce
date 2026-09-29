@@ -7,6 +7,7 @@ import { useAuth } from '../../auth';
 import { useDialogs, useToast } from '../../feedback';
 import { call } from '../../api';
 import { formatINR, formatQty } from '../../../shared/money';
+import { formatRate } from '../../../shared/gst';
 import { formatDate, formatDateTime } from '../../../shared/dates';
 import { CancelledBadge, fmtDate, fmtMode, fmtMoney, ModeBadge, PayableText, PostingTable, RevisionHistory, type DiffField } from '../customers/common';
 import { SupplierPaymentModal } from './SupplierPaymentModal';
@@ -140,7 +141,10 @@ export function PurchaseDetailPage() {
                   {p.items.map((i) => (
                     <tr key={i.lineNo}>
                       <td className="faint">{i.lineNo}</td>
-                      <td className="desc">{i.description}</td>
+                      <td className="desc">
+                        {i.description}
+                        {p.gst.mode === 'regular' && <span className="faint small"> · GST {formatRate(i.gstRate ?? 0)}</span>}
+                      </td>
                       <td className="money" style={{ textAlign: 'right' }}>
                         {formatQty(i.qty)} {i.unit ?? ''}
                       </td>
@@ -171,6 +175,36 @@ export function PurchaseDetailPage() {
                   <span>Other charges</span>
                   <span>{formatINR(p.otherCharges)}</span>
                 </div>
+              )}
+              {p.gst.mode === 'regular' && (
+                <>
+                  <div className="dt-row">
+                    <span>Taxable value</span>
+                    <span>{formatINR(p.gst.taxable ?? 0)}</span>
+                  </div>
+                  {p.gst.cgst > 0 && (
+                    <div className="dt-row">
+                      <span>CGST{p.gst.inclusive ? ' (included)' : ''}</span>
+                      <span>{formatINR(p.gst.cgst)}</span>
+                    </div>
+                  )}
+                  {p.gst.sgst > 0 && (
+                    <div className="dt-row">
+                      <span>SGST{p.gst.inclusive ? ' (included)' : ''}</span>
+                      <span>{formatINR(p.gst.sgst)}</span>
+                    </div>
+                  )}
+                  {p.gst.igst > 0 && (
+                    <div className="dt-row">
+                      <span>IGST{p.gst.inclusive ? ' (included)' : ''}</span>
+                      <span>{formatINR(p.gst.igst)}</span>
+                    </div>
+                  )}
+                  <div className="dt-row">
+                    <span>GST credit</span>
+                    <span>{p.gst.itc ? 'Claimed' : 'Not claimed (part of the cost)'}</span>
+                  </div>
+                </>
               )}
               {p.roundOff !== 0 && (
                 <div className="dt-row">

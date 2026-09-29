@@ -8,7 +8,7 @@ import { ChevronLeft, ChevronRight } from 'lucide-react';
 import { rangeFromPreset, type RangeValue } from '../../components/report';
 import { Badge, Button, type Tone } from '../../components/ui';
 import { useStoredState } from '../../hooks';
-import { useAuth } from '../../auth';
+import { useAuth, useFeatures } from '../../auth';
 import { useLinkedRange } from '../../links';
 import { formatINR } from '../../../shared/money';
 import { formatDate, formatDateTime, type DatePreset } from '../../../shared/dates';
@@ -43,6 +43,7 @@ const VOUCHER_TONES: Partial<Record<VoucherType, Tone>> = {
   contra: 'neutral',
   opening: 'neutral',
   closing: 'neutral',
+  gst_payment: 'blue',
 };
 
 export function VoucherBadge({ type, label }: { type: VoucherType | string; label?: string }) {
@@ -58,7 +59,13 @@ export function CancelledBadge() {
   return <Badge tone="red">Cancelled</Badge>;
 }
 
-export const VOUCHER_OPTIONS = (Object.keys(VOUCHER_TYPE_LABELS) as VoucherType[]).map((v) => ({ value: v, label: VOUCHER_TYPE_LABELS[v] }));
+const VOUCHER_OPTIONS = (Object.keys(VOUCHER_TYPE_LABELS) as VoucherType[]).map((v) => ({ value: v, label: VOUCHER_TYPE_LABELS[v] }));
+
+/** Voucher types for the filters; GST payments only for businesses registered for GST. */
+export function useVoucherOptions() {
+  const gst = useFeatures().gst !== 'none';
+  return gst ? VOUCHER_OPTIONS : VOUCHER_OPTIONS.filter((o) => o.value !== 'gst_payment');
+}
 
 /* ------------------------------ Posting table ------------------------------ */
 

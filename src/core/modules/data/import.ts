@@ -25,7 +25,7 @@ import { createSupplier, getSupplier, updateSupplier } from '../suppliers/servic
 import { createEmployee, getEmployeeRow, openingAdvanceOf, updateEmployee, type EmployeeRow } from '../employees/service';
 import { openingDebit, phoneKey } from '../customers/common';
 import { gstConfig } from '../gst/common';
-import { GST_RATES, formatRate, hsnProblem, isGstRate } from '../../../shared/gst';
+import { GST_RATES, formatRate, gstinProblem, hsnProblem, isGstRate, normalizeGstin } from '../../../shared/gst';
 import { cellText, normHeader, normHeaderFull, parseAmount, parseDateCell, phoneText, readSheet, type Cell, type ParsedSheet, type SheetRow } from './sheet';
 
 export const IMPORT_TYPES = ['items', 'customers', 'suppliers', 'employees'] as const;
@@ -98,10 +98,11 @@ const DEFS: Record<ImportType, TypeDef> = {
       { key: 'creditLimit', label: 'Credit limit', hint: 'Maximum credit in ₹ (blank = no limit)', synonyms: ['credit limit', 'limit', 'max credit', 'credit allowed', 'udhar limit'] },
       { key: 'opening', label: 'Opening balance', hint: 'Amount due on your books start date', synonyms: OPENING },
       { key: 'openingType', label: 'Balance type', hint: 'Receivable (they owe you) or Advance', synonyms: OPENING_TYPE },
+      { key: 'gstin', label: 'GSTIN', hint: '15 characters (registered businesses only)', gst: true, synonyms: ['gstin', 'gst no', 'gst number', 'gstin no', 'gstin number', 'gst', 'gst id', 'gstin uin'] },
     ],
     examples: [
-      ['Anita Desai', '98200 11111', 'Kothrud, Pune', 'anita@example.com', '5,000', '1,250.50', 'Receivable'],
-      ['Rahul Traders', '98765 43210', 'MG Road, Pune', '', '', '500', 'Advance'],
+      ['Anita Desai', '98200 11111', 'Kothrud, Pune', 'anita@example.com', '5,000', '1,250.50', 'Receivable', ''],
+      ['Rahul Traders', '98765 43210', 'MG Road, Pune', '', '', '500', 'Advance', '27AAPFU0939F1ZV'],
     ],
     notes: (ctx) => [
       'One row per customer. Keep the first row (the column names) as it is and delete the two example rows.',
@@ -123,10 +124,11 @@ const DEFS: Record<ImportType, TypeDef> = {
       { key: 'email', label: 'Email', synonyms: EMAIL },
       { key: 'opening', label: 'Opening balance', hint: 'Amount you owed them on your books start date', synonyms: OPENING },
       { key: 'openingType', label: 'Balance type', hint: 'Payable (you owe them) or Advance', synonyms: OPENING_TYPE },
+      { key: 'gstin', label: 'GSTIN', hint: '15 characters (registered businesses only)', gst: true, synonyms: ['gstin', 'gst no', 'gst number', 'gstin no', 'gstin number', 'gst', 'gst id', 'gstin uin'] },
     ],
     examples: [
-      ['Balaji Distributors', '98220 55555', 'Market Yard, Pune', 'Suresh Patil', '', '12,500.00', 'Payable'],
-      ['Fresh Dairy Farm', '90110 22222', 'Hadapsar, Pune', 'Mahesh', 'dairy@example.com', '', ''],
+      ['Balaji Distributors', '98220 55555', 'Market Yard, Pune', 'Suresh Patil', '', '12,500.00', 'Payable', '27AAPFU0939F1ZV'],
+      ['Fresh Dairy Farm', '90110 22222', 'Hadapsar, Pune', 'Mahesh', 'dairy@example.com', '', '', ''],
     ],
     notes: (ctx) => [
       'One row per supplier. Keep the first row (the column names) as it is and delete the two example rows.',
@@ -491,6 +493,7 @@ interface ExistingCustomer {
   email: string | null;
   credit_limit: number | null;
   opening_entry_id: number | null;
+  gstin: string | null;
 }
 interface ExistingSupplier {
   id: number;
@@ -500,6 +503,22 @@ interface ExistingSupplier {
   email: string | null;
   contact_person: string | null;
   opening_entry_id: number | null;
+  gstin: string | null;
+}
+
+/** GSTIN column (registered businesses): checked like the customer / supplier forms do. */
+function gstinOf(r: RowCtx, def: TypeDef): string | undefined {
+  if (!def.fields.some((f) => f.key === 'gstin')) return undefined;
+  const raw = r.text('gstin', 20);
+  if (!raw) return undefined;
+  const g = normalizeGstin(raw);
+  const problem = gstinProblem(g);
+  if (problem) {
+    r.error('gstin', problem.replace(/^This GSTIN is not valid/, 'not valid'));
+    return undefined;
+  }
+  r.values.gstin = g;
+  return g;
 }
 
 const lower = (s: string) => s.trim().replace(/\s+/g, ' ').toLowerCase();
@@ -536,7 +555,7 @@ function prepareRows(ctx: Ctx, def: TypeDef, sheet: ParsedSheet, headerIdx: numb
       items.set(lower(it.name), it);
     }
   } else if (def.type === 'customers') {
-    for (const c of ctx.db.all<ExistingCustomer>('SELECT id, name, phone, address, email, credit_limit, opening_entry_id FROM customers WHERE is_active = 1')) {
+    for (const c of ctx.db.all<ExistingCustomer>('SELECT id, name, phone, address, email, credit_limit, opening_entry_id, gstin FROM customers WHERE is_active = 1')) {
       const pk = phoneKey(c.phone);
       if (pk) customersByPhone.set(pk, c);
       const list = customersByName.get(lower(c.name)) ?? [];
@@ -544,7 +563,7 @@ function prepareRows(ctx: Ctx, def: TypeDef, sheet: ParsedSheet, headerIdx: numb
       customersByName.set(lower(c.name), list);
     }
   } else if (def.type === 'suppliers') {
-    for (const s of ctx.db.all<ExistingSupplier>('SELECT id, name, phone, address, email, contact_person, opening_entry_id FROM suppliers WHERE is_active = 1')) suppliers.set(lower(s.name), s);
+    for (const s of ctx.db.all<ExistingSupplier>('SELECT id, name, phone, address, email, contact_person, opening_entry_id, gstin FROM suppliers WHERE is_active = 1')) suppliers.set(lower(s.name), s);
   } else {
     for (const e of ctx.db.all<EmployeeRow>('SELECT * FROM employees WHERE is_active = 1')) employees.set(lower(e.name), e);
   }
@@ -614,6 +633,7 @@ function prepareRows(ctx: Ctx, def: TypeDef, sheet: ParsedSheet, headerIdx: numb
       const email = r.email('email');
       const creditLimit = r.amount('creditLimit');
       const opening = openingOf(r, 'customer');
+      const gstin = gstinOf(r, def);
       if (name) {
         const pk = phoneKey(phone);
         if (pk) {
@@ -646,6 +666,7 @@ function prepareRows(ctx: Ctx, def: TypeDef, sheet: ParsedSheet, headerIdx: numb
             ['email', ex.email, email],
             ['credit limit', ex.credit_limit, creditLimit],
             ['opening balance', exOpening, opening],
+            ['GSTIN', ex.gstin, gstin],
           ]);
           if (opening !== undefined && opening !== exOpening && openingLocked && mode === 'update') r.error('opening', lockedMsg);
           if (!mayCredit && mode === 'update') {
@@ -658,13 +679,14 @@ function prepareRows(ctx: Ctx, def: TypeDef, sheet: ParsedSheet, headerIdx: numb
           if (!mayCredit && opening) r.error('opening', creditDenied);
         }
       }
-      data = { name, phone, address, email, creditLimit, opening };
+      data = { name, phone, address, email, creditLimit, opening, gstin };
     } else if (def.type === 'suppliers') {
       const phone = r.phone('phone');
       const address = r.text('address', 500, { multiline: true });
       const contactPerson = r.text('contactPerson', 120);
       const email = r.email('email');
       const opening = openingOf(r, 'supplier');
+      const gstin = gstinOf(r, def);
       if (name) {
         const key = `n:${lower(name)}`;
         const earlier = seen.get(key);
@@ -682,6 +704,7 @@ function prepareRows(ctx: Ctx, def: TypeDef, sheet: ParsedSheet, headerIdx: numb
             ['contact person', ex.contact_person, contactPerson],
             ['email', ex.email, email],
             ['opening balance', exOpening, opening],
+            ['GSTIN', ex.gstin, gstin],
           ]);
           if (opening !== undefined && opening !== exOpening && openingLocked && mode === 'update') r.error('opening', lockedMsg);
           if (opening !== undefined && opening !== exOpening && !maySupplierOpening && mode === 'update') r.error('opening', supplierOpeningDenied);
@@ -690,7 +713,7 @@ function prepareRows(ctx: Ctx, def: TypeDef, sheet: ParsedSheet, headerIdx: numb
           if (opening && !maySupplierOpening) r.error('opening', supplierOpeningDenied);
         }
       }
-      data = { name, phone, address, contactPerson, email, opening };
+      data = { name, phone, address, contactPerson, email, opening, gstin };
     } else {
       const phone = r.phone('phone');
       const designation = r.text('designation', 60);
@@ -889,7 +912,15 @@ function applyRow(ctx: Ctx, type: ImportType, row: Prepared): void {
     }
   } else if (type === 'customers') {
     if (row.action === 'create') {
-      createCustomer(ctx, { name: d.name, phone: d.phone ?? null, address: d.address ?? null, email: d.email ?? null, creditLimit: d.creditLimit ?? null, openingBalance: customerOpening(d.opening) ?? null });
+      createCustomer(ctx, {
+        name: d.name,
+        phone: d.phone ?? null,
+        address: d.address ?? null,
+        email: d.email ?? null,
+        creditLimit: d.creditLimit ?? null,
+        openingBalance: customerOpening(d.opening) ?? null,
+        ...(d.gstin ? { gstin: d.gstin } : {}),
+      });
     } else {
       const ex = getCustomer(ctx, row.matchId!);
       updateCustomer(ctx, ex.id, {
@@ -900,11 +931,20 @@ function applyRow(ctx: Ctx, type: ImportType, row: Prepared): void {
         creditLimit: d.creditLimit ?? ex.creditLimit,
         notes: ex.notes,
         openingBalance: customerOpening(d.opening),
+        ...(d.gstin ? { gstin: d.gstin } : {}),
       });
     }
   } else if (type === 'suppliers') {
     if (row.action === 'create') {
-      createSupplier(ctx, { name: d.name, phone: d.phone ?? null, address: d.address ?? null, email: d.email ?? null, contactPerson: d.contactPerson ?? null, openingBalance: supplierOpening(d.opening) ?? null });
+      createSupplier(ctx, {
+        name: d.name,
+        phone: d.phone ?? null,
+        address: d.address ?? null,
+        email: d.email ?? null,
+        contactPerson: d.contactPerson ?? null,
+        openingBalance: supplierOpening(d.opening) ?? null,
+        ...(d.gstin ? { gstin: d.gstin } : {}),
+      });
     } else {
       const ex = getSupplier(ctx, row.matchId!);
       updateSupplier(ctx, ex.id, {
@@ -915,6 +955,7 @@ function applyRow(ctx: Ctx, type: ImportType, row: Prepared): void {
         contactPerson: d.contactPerson ?? ex.contactPerson,
         notes: ex.notes,
         openingBalance: supplierOpening(d.opening),
+        ...(d.gstin ? { gstin: d.gstin } : {}),
       });
     }
   } else {

@@ -48,6 +48,12 @@
 .lg-head .r {
   text-align: right;
 }
+.line-grid.with-gst .lg-row {
+  grid-template-columns: 28px minmax(140px, 1fr) 80px 72px 112px 92px 108px 32px;
+}
+.line-grid.with-gst .lg-row .select {
+  padding-right: 22px;
+}
 .lg-row .input {
   height: 34px;
 }
@@ -181,6 +187,9 @@
   }
   .lg-row {
     grid-template-columns: 24px minmax(140px, 1fr) 80px 80px 110px 104px 30px;
+  }
+  .line-grid.with-gst .lg-row {
+    grid-template-columns: 24px minmax(110px, 1fr) 68px 64px 96px 88px 92px 30px;
   }
 }
 .tb-input .input-adorn {

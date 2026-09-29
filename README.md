@@ -18,10 +18,15 @@ completely offline, and all data stays on your PC.
 - **Users & security**: Owner, Manager and Cashier roles with editable permissions, an activity log, auto-lock, and an
   owner recovery code.
 - **Employees**: employee records, attendance, salary slips and advances.
+- **GST (optional)**: choose *Not registered*, *Registered (regular)* or *Composition scheme* in *Settings → GST*.
+  Registered businesses print tax invoices with CGST/SGST or IGST, HSN codes and a tax table, take the GST back on
+  returns, record input tax credit on purchases, and get a GST summary, sales and purchase registers (B2B/B2C) and an
+  HSN summary for filing, plus *Pay GST* to set off credit and record the payment. Composition businesses print bills
+  of supply and pay tax on turnover. Businesses that are not registered see no GST anywhere.
 - **Settings & data**: business and receipt details, automatic daily backups, manual backup and restore, and import
   from Excel/CSV.
 
-Stock/inventory and GST are intentionally not included.
+Stock/inventory is intentionally not included.
 
 ## Installing (for the shop owner)
 
@@ -75,6 +80,7 @@ straight away without a dialog. Choose *Ask every time* to get the normal Window
 | **Typed API between UI and core** | The UI calls named routes over IPC. Each route checks the user's permission and validates its input with zod, and every change runs in a single transaction together with its audit log entry. |
 | **Generic report format** | Every report returns one structure that the app can show on screen or export as Excel (with Indian number formats), CSV (UTF-8 with BOM) or PDF. |
 | **Purchases are treated as expenses** | Stock is out of scope, so Profit & Loss treats purchases as expenses when they are made, and the report says so. |
+| **GST is a setting, stored on each document** | Every bill and purchase keeps the GST treatment it was made with, so registering (or cancelling registration) never changes old bills. The till and the core share one tax calculator, so the preview is exactly what is saved. |
 
 See `docs/ARCHITECTURE.md` for the full design and the accounting posting rules.
 

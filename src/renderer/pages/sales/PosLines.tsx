@@ -2,6 +2,7 @@ import { type KeyboardEvent, type ReactNode } from 'react';
 import { Minus, Plus, ScanLine, Trash2 } from 'lucide-react';
 import type { BillCalc } from '../../../shared/billing';
 import { formatINR } from '../../../shared/money';
+import { GST_RATES, formatRate } from '../../../shared/gst';
 import { parseDiscountText } from './common';
 import { FastMoneyInput, FastNumberInput, FastTextInput } from './inputs';
 
@@ -17,6 +18,10 @@ export interface PosLine {
   discText: string;
   /** Current list rate of the item, to offer "use list rate". */
   defaultRate: number | null;
+  /** GST rate (bills with GST): the item's own rate, or the one picked for a one-time line; null = the usual rate. */
+  gstRate?: number | null;
+  /** HSN / SAC of a one-time line. */
+  hsn?: string | null;
 }
 
 export type CellField = 'qty' | 'rate' | 'disc';
@@ -35,9 +40,12 @@ export function PosLines({
   onCellEnter,
   onFocusLine,
   empty,
+  gst,
 }: {
   lines: PosLine[];
   calc: BillCalc;
+  /** The bill charges GST: show each line's rate (one-time lines can pick theirs). */
+  gst?: { defaultRate: number } | null;
   canDiscount: boolean;
   /** True when the rate of this line may not be changed (list rate only). */
   rateLocked: (l: PosLine) => boolean;
@@ -106,6 +114,26 @@ export function PosLines({
                 <td className="sl-ln-name">
                   {l.itemName}
                   {!l.itemId && <span className="sl-ln-free">one-time</span>}
+                  {gst &&
+                    (l.itemId ? (
+                      <span className="sl-ln-gst" title="GST rate of the item (change it in Items & rates)">
+                        GST {formatRate(calc.gst?.lines[i]?.gstRate ?? l.gstRate ?? gst.defaultRate)}
+                      </span>
+                    ) : (
+                      <select
+                        className="sl-ln-gst-select"
+                        tabIndex={-1}
+                        aria-label={`GST rate of ${l.itemName}`}
+                        value={String(l.gstRate ?? gst.defaultRate)}
+                        onChange={(e) => onChange(l.key, { gstRate: Number(e.target.value) })}
+                      >
+                        {GST_RATES.map((r) => (
+                          <option key={r} value={r}>
+                            GST {formatRate(r)}
+                          </option>
+                        ))}
+                      </select>
+                    ))}
                 </td>
                 <td>
                   <div className="sl-qty-cell">

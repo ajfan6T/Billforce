@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { Link, useSearchParams } from 'react-router';
-import { FolderOpen, Save } from 'lucide-react';
+import { FolderOpen } from 'lucide-react';
 import { Alert, Button, Card, ErrorBox, KeyValues, Loading, Page, PageHeader, Tabs } from '../../components/ui';
 import { Field, FormGrid, NumberInput, SegmentedControl, Switch, TextArea, TextInput } from '../../components/forms';
 import { useHotkeys, useQuery } from '../../hooks';
@@ -12,12 +12,14 @@ import { formatDate, formatDateTime, fyOf, todayISO } from '../../../shared/date
 import type { AppSettings } from '../../../shared/settings';
 import { useSectionForm } from './useSectionForm';
 import { LivePreview, ReceiptTab } from './ReceiptTab';
-import { SwitchRow, formatBytes } from './common';
+import { GstTab } from './GstTab';
+import { SaveBar, SwitchRow, formatBytes } from './common';
 import './admin.css';
 
-type TabKey = 'business' | 'receipt' | 'billing' | 'security' | 'about';
+type TabKey = 'business' | 'gst' | 'receipt' | 'billing' | 'security' | 'about';
 const TABS: Array<{ key: TabKey; label: string }> = [
   { key: 'business', label: 'Business' },
+  { key: 'gst', label: 'GST' },
   { key: 'receipt', label: 'Receipt & printer' },
   { key: 'billing', label: 'Billing' },
   { key: 'security', label: 'Security' },
@@ -28,22 +30,6 @@ interface TabProps<K extends keyof AppSettings> {
   settings: AppSettings;
   onSaved: (v: AppSettings[K]) => void;
   onDirty: (d: boolean) => void;
-}
-
-function SaveBar({ dirty, saving, onUndo, disabled }: { dirty: boolean; saving: boolean; onUndo: () => void; disabled?: boolean }) {
-  return (
-    <div className="settings-save">
-      {dirty && <span className="unsaved-dot">Unsaved changes</span>}
-      {dirty && (
-        <Button variant="ghost" onClick={onUndo}>
-          Undo changes
-        </Button>
-      )}
-      <Button type="submit" variant="primary" icon={<Save size={16} />} kbd="Ctrl+S" loading={saving} disabled={!dirty || disabled}>
-        Save
-      </Button>
-    </div>
-  );
 }
 
 const UPI_RE = /^[A-Za-z0-9._-]{2,256}@[A-Za-z][A-Za-z0-9]{1,63}$/;
@@ -327,7 +313,7 @@ export function SettingsPage() {
 
   return (
     <Page wide>
-      <PageHeader title="Business settings" subtitle="Your business details, receipts, bill numbers and security" />
+      <PageHeader title="Business settings" subtitle="Your business details, GST, receipts, bill numbers and security" />
       <Tabs tabs={TABS} value={tab} onChange={(k) => void change(k)} />
       {q.error ? (
         <ErrorBox error={q.error} onRetry={q.reload} />
@@ -335,6 +321,8 @@ export function SettingsPage() {
         <Loading />
       ) : tab === 'business' ? (
         <BusinessTab settings={q.data} onSaved={saved('business')} onDirty={onDirty} />
+      ) : tab === 'gst' ? (
+        <GstTab settings={q.data} onSaved={saved('gst')} onDirty={onDirty} />
       ) : tab === 'receipt' ? (
         <ReceiptTab settings={q.data} onSaved={saved('receipt')} onDirty={onDirty} />
       ) : tab === 'billing' ? (

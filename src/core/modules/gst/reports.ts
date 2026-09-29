@@ -42,6 +42,8 @@ const TAX_COLUMNS: ReportColumn[] = [
   { key: 'tax', label: 'Total tax', type: 'money', width: 12 },
 ];
 
+const n = (count: number, one: string, many = `${one}s`) => `${count} ${count === 1 ? one : many}`;
+
 const taxCells = (h: Heads) => ({ taxable: h.taxable, cgst: h.cgst, sgst: h.sgst, igst: h.igst, tax: taxOf(h) });
 
 function checkRange(r: GstRange): void {
@@ -111,17 +113,17 @@ export function gstSummary(ctx: Ctx, r: GstRange): ReportData {
   const net = minus(output, withItc);
   const rows: ReportRow[] = [
     { cells: { particulars: 'Tax on sales (output tax)' }, style: 'section' },
-    { cells: { particulars: `Sales to registered businesses (B2B, ${b2b.count} bills)`, ...taxCells(b2b) }, indent: 1 },
-    { cells: { particulars: `Sales to others (B2C, ${b2c.count} bills)`, ...taxCells(b2c) }, indent: 1 },
-    { cells: { particulars: `Less: sales returns (${returns.count} credit notes)`, ...taxCells({ taxable: -returns.taxable, cgst: -returns.cgst, sgst: -returns.sgst, igst: -returns.igst }) }, indent: 1 },
+    { cells: { particulars: `Sales to registered businesses (B2B, ${n(b2b.count, 'bill')})`, ...taxCells(b2b) }, indent: 1 },
+    { cells: { particulars: `Sales to others (B2C, ${n(b2c.count, 'bill')})`, ...taxCells(b2c) }, indent: 1 },
+    { cells: { particulars: `Less: sales returns (${n(returns.count, 'credit note')})`, ...taxCells({ taxable: -returns.taxable, cgst: -returns.cgst, sgst: -returns.sgst, igst: -returns.igst }) }, indent: 1 },
     { cells: { particulars: 'Output tax', ...taxCells(output) }, style: 'subtotal' },
     { cells: { particulars: 'Tax on purchases (input tax credit)' }, style: 'section' },
-    { cells: { particulars: `Purchases with GST credit claimed (${withItc.count} bills)`, ...taxCells(withItc) }, indent: 1 },
+    { cells: { particulars: `Purchases with GST credit claimed (${n(withItc.count, 'bill')})`, ...taxCells(withItc) }, indent: 1 },
     { cells: { particulars: 'Input tax credit', ...taxCells(withItc) }, style: 'subtotal' },
     { cells: { particulars: 'Output tax less input tax credit', ...taxCells(net), taxable: null }, style: 'total' },
   ];
   if (withoutItc.count) {
-    rows.push({ cells: { particulars: `Not claimed: purchases without GST credit (${withoutItc.count} bills; the tax is part of their cost)`, ...taxCells(withoutItc) }, style: 'muted' });
+    rows.push({ cells: { particulars: `Not claimed: purchases without GST credit (${n(withoutItc.count, 'bill')}; the tax is part of their cost)`, ...taxCells(withoutItc) }, style: 'muted' });
   }
   const netTax = taxOf(net);
   return {
@@ -400,7 +402,7 @@ export function compositionSummary(ctx: Ctx, r: GstRange): ReportData {
       { key: 'amount', label: 'Amount', type: 'money', width: 16 },
     ],
     rows: [
-      { cells: { particulars: `Sales (${t.bills} bills of supply)`, amount: t.billed } },
+      { cells: { particulars: `Sales (${n(t.bills, 'bill')} of supply)`, amount: t.billed } },
       { cells: { particulars: 'Less: sales returns', amount: -t.returns } },
       { cells: { particulars: 'Turnover', amount: t.turnover }, style: 'subtotal' },
       { cells: { particulars: `Central tax (CGST) @ ${formatRate(t.rate / 2)}`, amount: t.cgst } },

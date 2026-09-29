@@ -9,6 +9,7 @@ import { Alert, Button, ErrorBox, Loading } from '../../components/ui';
 import { Combobox, DateInput, SegmentedControl, Select, TextInput } from '../../components/forms';
 import { CustomerPicker, PaymentModePicker, type CustomerOption, type PaymentChoice } from '../../components/pickers';
 import { calcBill, roundQty } from '../../../shared/billing';
+import { gstinState } from '../../../shared/gst';
 import { PAYMENT_MODE_LABELS, type SettlementMode } from '../../../shared/constants';
 import { formatINR, formatQty } from '../../../shared/money';
 import { formatDate, fyOf } from '../../../shared/dates';
@@ -20,8 +21,26 @@ type ItemOption = ApiOutput<'items.search'>[number];
 type BillDetail = ApiOutput<'sales.get'>;
 
 /** The customer as the picker holds it, keeping balanceHidden (a hidden balance is 0, not "owes nothing"). */
-function customerOption(c: { id: number; name: string; phone: string | null; balance: number; creditLimit: number | null; balanceHidden?: boolean }): CustomerOption {
-  return { id: c.id, name: c.name, phone: c.phone, balance: c.balance, creditLimit: c.creditLimit, ...(c.balanceHidden ? { balanceHidden: true } : {}) };
+function customerOption(c: {
+  id: number;
+  name: string;
+  phone: string | null;
+  balance: number;
+  creditLimit: number | null;
+  balanceHidden?: boolean;
+  gstin?: string | null;
+  stateCode?: string | null;
+}): CustomerOption {
+  return {
+    id: c.id,
+    name: c.name,
+    phone: c.phone,
+    balance: c.balance,
+    creditLimit: c.creditLimit,
+    gstin: c.gstin ?? null,
+    stateCode: c.stateCode ?? null,
+    ...(c.balanceHidden ? { balanceHidden: true } : {}),
+  };
 }
 
 const NOT_IN_LIST = (name: string) => `"${name}" is not in the item list. Choose the item from the item list — your role cannot set prices.`;
@@ -275,6 +294,8 @@ function PosForm({
             rate: l.itemId && !canRate && l.defaultRate ? l.defaultRate : l.rate,
             discText: discountToText(l.discount, l.discountPct),
             defaultRate: l.defaultRate,
+            gstRate: l.gstRate,
+            hsn: l.hsn,
           })),
         );
         setCustomer(data.customer ? customerOption(data.customer) : null);
@@ -314,6 +335,8 @@ function PosForm({
           rate: i.rate,
           discText: discountToText(i.discount, i.discountPct),
           defaultRate: null,
+          gstRate: i.gstRate,
+          hsn: i.hsn,
         })),
       );
       setCustomer(b.customer ? customerOption(b.customer) : null);
@@ -399,18 +422,32 @@ function PosForm({
   }, [editing, ready, userId, lines, customer, walkInName, walkInPhone, billDiscMode, billDiscValue, pay, split, splitRows, remarks]);
 
   /* ------------------------------ calculations ------------------------------ */
+  // GST exactly as the core will charge it: a bill keeps the treatment it was made with, IGST for customers in another state.
+  const gstMode = editBill ? editBill.gst.mode : cfg.gst.mode;
+  const gstOn = gstMode === 'regular';
+  const gstInclusive = editBill && editBill.gst.mode === 'regular' ? editBill.gst.inclusive : cfg.gst.inclusive;
+  const sellerState = editBill ? gstinState(editBill.gst.sellerGstin) : cfg.gst.stateCode;
+  const customerState = customer ? (gstinState(customer.gstin) ?? customer.stateCode ?? sellerState) : sellerState;
+  const interState = gstOn && !!customerState && !!sellerState && customerState !== sellerState;
   const calc = useMemo(
     () =>
       calcBill({
         lines: lines.map((l) => {
           const d = parseDiscountText(l.discText);
-          return { qty: l.qty ?? 0, rate: l.rate ?? 0, discount: canDiscount || editing ? d.discount : null, discountPct: canDiscount || editing ? d.discountPct : null };
+          return {
+            qty: l.qty ?? 0,
+            rate: l.rate ?? 0,
+            discount: canDiscount || editing ? d.discount : null,
+            discountPct: canDiscount || editing ? d.discountPct : null,
+            gstRate: l.gstRate ?? cfg.gst.defaultRate,
+          };
         }),
         billDiscount: billDiscMode === 'amt' ? billDiscValue : null,
         billDiscountPct: billDiscMode === 'pct' ? billDiscValue : null,
         roundOff: cfg.roundOff,
+        gst: gstOn ? { inclusive: gstInclusive, interState } : null,
       }),
-    [lines, billDiscMode, billDiscValue, cfg.roundOff, canDiscount, editing],
+    [lines, billDiscMode, billDiscValue, cfg.roundOff, canDiscount, editing, gstOn, gstInclusive, interState, cfg.gst.defaultRate],
   );
   const total = calc.total;
   const splitPaid = splitRows.reduce((s, r) => s + (r.amount ?? 0), 0);
@@ -504,8 +541,8 @@ function PosForm({
     return key;
   };
 
-  const addItem = (item: { id: number; name: string; unit: string; rate: number }, qty: number, rate?: number) => {
-    const key = addLine({ itemId: item.id, itemName: item.name, unit: item.unit, qty, rate: rate ?? item.rate, discText: '', defaultRate: item.rate });
+  const addItem = (item: { id: number; name: string; unit: string; rate: number; gstRate?: number | null }, qty: number, rate?: number) => {
+    const key = addLine({ itemId: item.id, itemName: item.name, unit: item.unit, qty, rate: rate ?? item.rate, discText: '', defaultRate: item.rate, gstRate: item.gstRate ?? null });
     if ((rate ?? item.rate) === 0) focusCell(key, 'rate');
     else focusSearch();
   };
@@ -725,7 +762,17 @@ function PosForm({
       items: lines.map((l) => {
         const d = parseDiscountText(l.discText);
         const allow = canDiscount || editing;
-        return { itemId: l.itemId, itemName: l.itemName, unit: l.unit, qty: l.qty!, rate: l.rate!, discount: allow ? d.discount : null, discountPct: allow ? d.discountPct : null };
+        return {
+          itemId: l.itemId,
+          itemName: l.itemName,
+          unit: l.unit,
+          qty: l.qty!,
+          rate: l.rate!,
+          discount: allow ? d.discount : null,
+          discountPct: allow ? d.discountPct : null,
+          // A one-time line's GST rate (catalogue items always use the item's own rate).
+          ...(gstOn && !l.itemId ? { gstRate: l.gstRate ?? null, hsn: l.hsn ?? null } : {}),
+        };
       }),
       billDiscount: billDiscMode === 'amt' && (canDiscount || editing) ? billDiscValue || null : null,
       billDiscountPct: billDiscMode === 'pct' && (canDiscount || editing) ? billDiscValue || null : null,
@@ -982,9 +1029,9 @@ function PosForm({
                 title={`Last bought ${formatQty(ci.lastQty)}${ci.unit ? ' ' + ci.unit : ''} at ${formatINR(ci.lastRate)} on ${formatDate(ci.lastDate)}`}
                 onClick={() => {
                   // Without "change rates" a catalogue item goes in at its list rate, not last time's rate.
-                  if (ci.itemId) addItem({ id: ci.itemId, name: ci.itemName, unit: ci.unit ?? 'pcs', rate: ci.defaultRate ?? ci.lastRate }, 1, canRate || !ci.defaultRate ? ci.lastRate : undefined);
+                  if (ci.itemId) addItem({ id: ci.itemId, name: ci.itemName, unit: ci.unit ?? 'pcs', rate: ci.defaultRate ?? ci.lastRate, gstRate: ci.gstRate }, 1, canRate || !ci.defaultRate ? ci.lastRate : undefined);
                   else {
-                    addLine({ itemId: null, itemName: ci.itemName, unit: ci.unit, qty: 1, rate: ci.lastRate, discText: '', defaultRate: null });
+                    addLine({ itemId: null, itemName: ci.itemName, unit: ci.unit, qty: 1, rate: ci.lastRate, discText: '', defaultRate: null, gstRate: ci.gstRate });
                     focusSearch();
                   }
                 }}
@@ -1021,6 +1068,7 @@ function PosForm({
             registerCell={registerCell}
             onCellEnter={onCellEnter}
             onFocusLine={setFocusedLine}
+            gst={gstOn ? { defaultRate: cfg.gst.defaultRate } : null}
             empty={
               <>
                 <div className="pe-title">No items yet</div>
@@ -1168,6 +1216,37 @@ function PosForm({
                     ))}
                   {calc.billDiscount > 0 && <span className="money muted">−{formatINR(calc.billDiscount)}</span>}
                 </span>
+              </div>
+            )}
+            {calc.gst && !calc.gst.inclusive && (
+              <>
+                <div className="tr muted">
+                  <span>Taxable value</span>
+                  <span className="money">{formatINR(calc.gst.taxable)}</span>
+                </div>
+                {calc.gst.interState ? (
+                  <div className="tr">
+                    <span>IGST</span>
+                    <span className="money">{formatINR(calc.gst.igst)}</span>
+                  </div>
+                ) : (
+                  <>
+                    <div className="tr">
+                      <span>CGST</span>
+                      <span className="money">{formatINR(calc.gst.cgst)}</span>
+                    </div>
+                    <div className="tr">
+                      <span>SGST</span>
+                      <span className="money">{formatINR(calc.gst.sgst)}</span>
+                    </div>
+                  </>
+                )}
+              </>
+            )}
+            {calc.gst?.inclusive && calc.gst.tax > 0 && (
+              <div className="tr muted" title={calc.gst.interState ? `IGST ${formatINR(calc.gst.igst)}` : `CGST ${formatINR(calc.gst.cgst)} + SGST ${formatINR(calc.gst.sgst)}`}>
+                <span>Includes GST{calc.gst.interState ? ' (IGST)' : ''}</span>
+                <span className="money">{formatINR(calc.gst.tax)}</span>
               </div>
             )}
             {calc.roundOff !== 0 && (

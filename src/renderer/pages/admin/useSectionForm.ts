@@ -3,7 +3,7 @@ import { useMutation } from '../../hooks';
 import { useToast } from '../../feedback';
 import type { AppSettings } from '../../../shared/settings';
 
-export type FormSection = 'business' | 'receipt' | 'billing' | 'security' | 'backup';
+export type FormSection = 'business' | 'gst' | 'receipt' | 'billing' | 'security' | 'backup';
 
 /**
  * Local draft of one settings section: dirty tracking, save (only the changed

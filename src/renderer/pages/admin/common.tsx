@@ -1,5 +1,6 @@
 import type { ReactNode } from 'react';
-import { Badge, type Tone } from '../../components/ui';
+import { Save } from 'lucide-react';
+import { Badge, Button, type Tone } from '../../components/ui';
 import { ROLE_LABELS, type Role } from '../../../shared/constants';
 import { formatDateTime, toTimestamp } from '../../../shared/dates';
 import { formatIndianNumber } from '../../../shared/money';
@@ -88,6 +89,23 @@ export function SwitchRow({ title, hint, children }: { title: ReactNode; hint?: 
         {hint && <div className="switch-row-hint">{hint}</div>}
       </div>
       {children}
+    </div>
+  );
+}
+
+/** Save / undo buttons at the bottom of a settings tab. */
+export function SaveBar({ dirty, saving, onUndo, disabled }: { dirty: boolean; saving: boolean; onUndo: () => void; disabled?: boolean }) {
+  return (
+    <div className="settings-save">
+      {dirty && <span className="unsaved-dot">Unsaved changes</span>}
+      {dirty && (
+        <Button variant="ghost" onClick={onUndo}>
+          Undo changes
+        </Button>
+      )}
+      <Button type="submit" variant="primary" icon={<Save size={16} />} kbd="Ctrl+S" loading={saving} disabled={!dirty || disabled}>
+        Save
+      </Button>
     </div>
   );
 }

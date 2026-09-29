@@ -12,6 +12,7 @@ import { LoanDetailPage } from './LoanDetail';
 import { TransfersPage } from './Transfers';
 import { ChartOfAccountsPage } from './ChartOfAccounts';
 import { YearEndPage } from './YearEnd';
+import { GstPaymentPage } from './GstPayment';
 
 export const accountsPages: AppRoute[] = [
   { path: '/accounts/expenses', element: <ExpensesPage />, perm: 'expenses.manage' },
@@ -30,4 +31,5 @@ export const accountsPages: AppRoute[] = [
   { path: '/accounts/transfers', element: <TransfersPage />, perm: 'accounts.manage' },
   { path: '/accounts/chart', element: <ChartOfAccountsPage />, perm: ['accounts.view', 'accounts.chart'] },
   { path: '/accounts/year-end', element: <YearEndPage />, perm: 'accounts.close_year' },
+  { path: '/accounts/gst-payment', element: <GstPaymentPage />, perm: 'accounts.manage' },
 ];

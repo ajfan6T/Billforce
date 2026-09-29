@@ -1,6 +1,6 @@
 import { useMemo, useState } from 'react';
 import { useNavigate, useParams } from 'react-router';
-import { IndianRupee, Mail, MapPin, Pencil, Phone, Power, ReceiptText, StickyNote, Trash2, Undo2, Wallet } from 'lucide-react';
+import { FileBadge, IndianRupee, Mail, MapPin, Pencil, Phone, Power, ReceiptText, StickyNote, Trash2, Undo2, Wallet } from 'lucide-react';
 import { Alert, Badge, Button, Card, EmptyState, ErrorBox, Loading, Page, PageHeader, Stat, StatGrid, Tabs } from '../../components/ui';
 import { DataTable, type Column } from '../../components/table';
 import { DateRangePicker, ExportButtons, ReportView, rangeFromPreset, type RangeValue } from '../../components/report';
@@ -203,6 +203,7 @@ export function CustomerDetailPage() {
         <div className="info-strip">
           <InfoRow icon={<Phone size={16} />}>{c.phone ?? <span className="faint">No phone</span>}</InfoRow>
           {c.email && <InfoRow icon={<Mail size={16} />}>{c.email}</InfoRow>}
+          {c.gstin && <InfoRow icon={<FileBadge size={16} />}>GSTIN {c.gstin}</InfoRow>}
           <InfoRow icon={<MapPin size={16} />}>{c.address ? <span className="muted">{c.address}</span> : <span className="faint">No address</span>}</InfoRow>
           <InfoRow icon={<Wallet size={16} />}>
             {c.openingBalance ? (

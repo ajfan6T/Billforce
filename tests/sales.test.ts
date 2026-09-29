@@ -711,8 +711,8 @@ describe('quick repeat', () => {
     expect(rep.sourceBillNo).toBe(bill.billNo);
     expect(rep.customer?.id).toBe(c.id);
     expect(rep.lines).toEqual([
-      { itemId: sugar.id, itemName: 'Sugar', unit: 'kg', qty: 2, rate: 4200, defaultRate: 4800, discount: null, discountPct: 5 },
-      { itemId: null, itemName: 'Loose tea', unit: null, qty: 0.25, rate: 40000, defaultRate: null, discount: null, discountPct: null },
+      { itemId: sugar.id, itemName: 'Sugar', unit: 'kg', qty: 2, rate: 4200, defaultRate: 4800, discount: null, discountPct: 5, gstRate: null, hsn: null },
+      { itemId: null, itemName: 'Loose tea', unit: null, qty: 0.25, rate: 40000, defaultRate: null, discount: null, discountPct: null, gstRate: null, hsn: null },
     ]);
     expect(rep.billDiscount).toBe(100);
     expect(rep.rateChanges).toBe(1);

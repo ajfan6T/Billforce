@@ -4,7 +4,8 @@ import { Alert, Button } from '../../components/ui';
 import { Field, FormGrid, MoneyInput, SegmentedControl, TextArea, TextInput } from '../../components/forms';
 import { useMutation, useQuery } from '../../hooks';
 import { useToast } from '../../feedback';
-import { useAuth } from '../../auth';
+import { useAuth, useFeatures } from '../../auth';
+import { PartyGstFields, gstinError } from '../../components/gst';
 import type { ApiOutput } from '../../api';
 import { formatDate } from '../../../shared/dates';
 import { formatINR } from '../../../shared/money';
@@ -21,6 +22,8 @@ interface FormState {
   notes: string;
   openingAmount: number | null;
   openingDirection: 'payable' | 'advance';
+  gstin: string;
+  stateCode: string;
 }
 
 function initial(s?: SupplierDetail | null, name?: string): FormState {
@@ -33,6 +36,8 @@ function initial(s?: SupplierDetail | null, name?: string): FormState {
     notes: s?.notes ?? '',
     openingAmount: s?.openingBalance?.amount ?? null,
     openingDirection: s?.openingBalance?.direction ?? 'payable',
+    gstin: s?.gstin ?? '',
+    stateCode: s?.stateCode ?? '',
   };
 }
 
@@ -62,6 +67,7 @@ export function SupplierFormModal({
   const toast = useToast();
   const { can } = useAuth();
   const canOpening = can('accounts.manage');
+  const withGst = useFeatures().gst === 'regular';
 
   useEffect(() => {
     if (open) {
@@ -75,8 +81,9 @@ export function SupplierFormModal({
   const set = <K extends keyof FormState>(k: K, v: FormState[K]) => setF((s) => ({ ...s, [k]: v }));
   const locked = !!info.data?.openingLocked;
 
+  const badGstin = withGst ? gstinError(f.gstin) : null;
   const save = async () => {
-    if (!f.name.trim()) return;
+    if (!f.name.trim() || badGstin) return;
     const payload = {
       name: f.name.trim(),
       phone: f.phone.trim() || null,
@@ -86,6 +93,8 @@ export function SupplierFormModal({
       notes: f.notes.trim() || null,
       // Left out = kept as saved (the server refuses changes without accounts.manage).
       ...(locked || !canOpening ? {} : { openingBalance: f.openingAmount ? { amount: f.openingAmount, direction: f.openingDirection } : null }),
+      // GST details only for businesses registered for GST (left out = kept as saved).
+      ...(withGst ? { gstin: f.gstin.trim() || null, stateCode: f.stateCode || null } : {}),
     };
     try {
       const saved = supplier ? await update.run({ id: supplier.id, ...payload }) : await create.run(payload);
@@ -109,7 +118,7 @@ export function SupplierFormModal({
           <Button variant="ghost" onClick={onClose}>
             Cancel
           </Button>
-          <Button variant="primary" type="submit" form="supplier-form" loading={m.loading} disabled={!f.name.trim()}>
+          <Button variant="primary" type="submit" form="supplier-form" loading={m.loading} disabled={!f.name.trim() || !!badGstin}>
             {supplier ? 'Save changes' : 'Add supplier'}
           </Button>
         </>
@@ -136,6 +145,7 @@ export function SupplierFormModal({
           <Field label="Email" error={fe.email}>
             <TextInput value={f.email} maxLength={120} type="email" onChange={(e) => set('email', e.target.value)} />
           </Field>
+          {withGst && <PartyGstFields who="supplier" gstin={f.gstin} stateCode={f.stateCode} errors={fe} onChange={(v) => setF((s) => ({ ...s, ...v }))} />}
           <Field label="Address" className="span-all">
             <TextArea rows={2} value={f.address} maxLength={500} onChange={(e) => set('address', e.target.value)} />
           </Field>

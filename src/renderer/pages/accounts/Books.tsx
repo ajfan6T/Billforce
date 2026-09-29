@@ -9,7 +9,7 @@ import { call } from '../../api';
 import { formatINR } from '../../../shared/money';
 import { describeRange } from '../../../shared/dates';
 import type { VoucherType } from '../../../shared/constants';
-import { PageBar, usePage, useRange, VOUCHER_OPTIONS } from './common';
+import { PageBar, usePage, useRange, useVoucherOptions } from './common';
 
 const BOOK_HEIGHT = 'calc(100vh - 330px)';
 
@@ -94,6 +94,7 @@ export function DayBookPage() {
   const openLink = useOpenLink();
   const [range, setRange] = useRange('dayBook.range', 'today');
   const [type, setType] = useState<VoucherType | ''>('');
+  const voucherOptions = useVoucherOptions();
   const [page, setPage] = usePage(`${range.from}|${range.to}|${type}`);
   const input = { from: range.from, to: range.to, voucherType: type || null, page };
   const book = useQuery('books.dayBook', input);
@@ -110,7 +111,7 @@ export function DayBookPage() {
         <div className="ac-filters">
           <Toolbar>
             <DateRangePicker value={range} onChange={setRange} />
-            <Select<VoucherType | ''> value={type} onChange={setType} aria-label="Voucher type" options={[{ value: '', label: 'All vouchers' }, ...VOUCHER_OPTIONS]} />
+            <Select<VoucherType | ''> value={type} onChange={setType} aria-label="Voucher type" options={[{ value: '', label: 'All vouchers' }, ...voucherOptions]} />
             <span className="spacer" />
             <span className="small muted">{d ? `${d.voucherCount.toLocaleString('en-IN')} ${d.voucherCount === 1 ? 'voucher' : 'vouchers'} · ${describeRange(d)}` : book.loading ? 'Loading…' : ''}</span>
           </Toolbar>

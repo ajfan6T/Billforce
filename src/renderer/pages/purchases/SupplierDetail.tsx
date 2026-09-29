@@ -1,6 +1,6 @@
 import { useMemo, useState } from 'react';
 import { useNavigate, useParams } from 'react-router';
-import { Mail, MapPin, Pencil, Phone, Plus, Power, StickyNote, Trash2, User, Wallet } from 'lucide-react';
+import { FileBadge, Mail, MapPin, Pencil, Phone, Plus, Power, StickyNote, Trash2, User, Wallet } from 'lucide-react';
 import { Alert, Button, Card, EmptyState, ErrorBox, Loading, Page, PageHeader, Stat, StatGrid, Tabs } from '../../components/ui';
 import { DataTable, type Column } from '../../components/table';
 import { DateRangePicker, ExportButtons, ReportView, rangeFromPreset, type RangeValue } from '../../components/report';
@@ -186,6 +186,7 @@ export function SupplierDetailPage() {
           {s.contactPerson && <InfoRow icon={<User size={16} />}>{s.contactPerson}</InfoRow>}
           <InfoRow icon={<Phone size={16} />}>{s.phone ?? <span className="faint">No phone</span>}</InfoRow>
           {s.email && <InfoRow icon={<Mail size={16} />}>{s.email}</InfoRow>}
+          {s.gstin && <InfoRow icon={<FileBadge size={16} />}>GSTIN {s.gstin}</InfoRow>}
           <InfoRow icon={<MapPin size={16} />}>{s.address ? <span className="muted">{s.address}</span> : <span className="faint">No address</span>}</InfoRow>
           <InfoRow icon={<Wallet size={16} />}>
             {s.openingBalance ? (

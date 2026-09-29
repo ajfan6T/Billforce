@@ -11,6 +11,7 @@ import { ReceiptPreview } from '../../components/pickers';
 import { PAYMENT_MODE_LABELS } from '../../../shared/constants';
 import { formatINR, formatQty } from '../../../shared/money';
 import { formatDate, formatDateTime } from '../../../shared/dates';
+import { formatRate, stateLabel } from '../../../shared/gst';
 import { LoadError, ModeBadge, RefundBadge, StatusBadge, qtyUnit, usePrintDoc } from './common';
 
 type Bill = ApiOutput<'sales.get'>;
@@ -197,6 +198,9 @@ function BillView({ bill, reload, tab, setTab }: { bill: Bill; reload: () => Pro
                   ['Payment', <ModeBadge key="m" mode={bill.paymentMode} credit={bill.credit} />],
                   ['Paid now', <Money key="p" value={bill.paid} />],
                   ['On credit', bill.credit ? <Money key="c" value={bill.credit} /> : '—'],
+                  bill.gst.mode === 'regular' ? ['GST', `Tax invoice${bill.gst.inclusive ? ' (rates include GST)' : ''}`] : bill.gst.mode === 'composition' ? ['GST', 'Bill of supply (composition)'] : null,
+                  bill.gst.customerGstin ? ['Customer GSTIN', bill.gst.customerGstin] : null,
+                  bill.gst.mode === 'regular' && bill.gst.placeOfSupply ? ['Place of supply', stateLabel(bill.gst.placeOfSupply)] : null,
                   bill.remarks ? ['Remarks', bill.remarks] : null,
                   bill.updatedAt ? ['Last edited', `${formatDateTime(bill.updatedAt)} by ${bill.updatedByName ?? 'unknown'}`] : null,
                 ]}
@@ -211,6 +215,17 @@ function BillView({ bill, reload, tab, setTab }: { bill: Bill; reload: () => Pro
                   { key: 'itemName', label: 'Item', sortable: false, render: (i) => <span className="sl-cell-main">{i.itemName}</span> },
                   { key: 'qty', label: 'Qty', align: 'right', sortable: false, render: (i) => qtyUnit(i.qty, i.unit) },
                   { key: 'rate', label: 'Rate', type: 'money', sortable: false },
+                  ...(bill.gst.mode === 'regular'
+                    ? [
+                        {
+                          key: 'gstRate',
+                          label: 'GST',
+                          align: 'right' as const,
+                          sortable: false,
+                          render: (i: Bill['items'][number]) => `${formatRate(i.gstRate ?? 0)}${i.hsn ? ` · HSN ${i.hsn}` : ''}`,
+                        },
+                      ]
+                    : []),
                   ...(itemsWithDisc
                     ? [
                         {
@@ -243,6 +258,32 @@ function BillView({ bill, reload, tab, setTab }: { bill: Bill; reload: () => Pro
                     <span>Bill discount{bill.billDiscountPct ? ` (${formatQty(bill.billDiscountPct)}%)` : ''}</span>
                     <span className="money">−{formatINR(bill.billDiscount)}</span>
                   </div>
+                )}
+                {bill.gst.mode === 'regular' && (
+                  <>
+                    <div className="tr muted">
+                      <span>Taxable value</span>
+                      <Money value={bill.gst.taxable} />
+                    </div>
+                    {bill.gst.cgst > 0 && (
+                      <div className="tr muted">
+                        <span>CGST{bill.gst.inclusive ? ' (included)' : ''}</span>
+                        <Money value={bill.gst.cgst} />
+                      </div>
+                    )}
+                    {bill.gst.sgst > 0 && (
+                      <div className="tr muted">
+                        <span>SGST{bill.gst.inclusive ? ' (included)' : ''}</span>
+                        <Money value={bill.gst.sgst} />
+                      </div>
+                    )}
+                    {bill.gst.igst > 0 && (
+                      <div className="tr muted">
+                        <span>IGST{bill.gst.inclusive ? ' (included)' : ''}</span>
+                        <Money value={bill.gst.igst} />
+                      </div>
+                    )}
+                  </>
                 )}
                 {bill.roundOff !== 0 && (
                   <div className="tr muted">

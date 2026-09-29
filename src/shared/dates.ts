@@ -187,6 +187,7 @@ export type DatePreset =
   | 'last_month'
   | 'last_30_days'
   | 'this_quarter'
+  | 'last_quarter'
   | 'this_fy'
   | 'last_fy'
   | 'custom';
@@ -200,6 +201,7 @@ export const DATE_PRESET_LABELS: Record<DatePreset, string> = {
   last_month: 'Last month',
   last_30_days: 'Last 30 days',
   this_quarter: 'This quarter',
+  last_quarter: 'Last quarter',
   this_fy: 'This financial year',
   last_fy: 'Last financial year',
   custom: 'Custom range',
@@ -238,6 +240,12 @@ export function presetRange(preset: DatePreset, today: string = todayISO()): Dat
       const [y, m] = today.split('-').map(Number);
       const qStartMonth = [4, 7, 10, 1][Math.floor(((m + 8) % 12) / 3)];
       return { from: `${y}-${pad(qStartMonth)}-01`, to: today };
+    }
+    case 'last_quarter': {
+      const [y, m] = today.split('-').map(Number);
+      const qStartMonth = [4, 7, 10, 1][Math.floor(((m + 8) % 12) / 3)];
+      const from = addMonths(`${y}-${pad(qStartMonth)}-01`, -3);
+      return { from, to: endOfMonth(addMonths(from, 2)) };
     }
     case 'this_fy':
       return { from: fyOf(today).start, to: today };

@@ -8,7 +8,10 @@ Key rules:
 - Only `src/core/accounting/ledger.ts` writes journal tables. Documents are cancelled (voided), never deleted.
 - Every mutation logs activity (`logActivity`) and documents record revisions (`recordRevision`).
 - Core must not import Electron; the renderer imports only *types* from `src/core`.
-- Out of scope: stock/inventory, GST/tax invoices.
+- GST is optional (Settings > GST: unregistered / regular / composition). Unregistered businesses must see no GST
+  anywhere; GST screens and fields are shown only when registered (`useFeatures()` in the UI, `gstConfig(ctx)` in core).
+  Each bill / purchase keeps the GST mode it was made with.
+- Out of scope: stock/inventory.
 
 Commands:
 - `npm test` — vitest (core, in-memory SQLite)

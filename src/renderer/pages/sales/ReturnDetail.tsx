@@ -10,6 +10,7 @@ import { DataTable } from '../../components/table';
 import { ReceiptPreview } from '../../components/pickers';
 import { PAYMENT_MODE_LABELS } from '../../../shared/constants';
 import { formatINR } from '../../../shared/money';
+import { formatRate } from '../../../shared/gst';
 import { formatDate, formatDateTime } from '../../../shared/dates';
 import { LoadError, RefundBadge, StatusBadge, qtyUnit, usePrintDoc } from './common';
 
@@ -121,6 +122,7 @@ export function ReturnDetail() {
                 ['Refund', d.refundMode === 'credit' ? "Adjusted in customer's account" : `${PAYMENT_MODE_LABELS[d.refundMode]}${d.refundAccountName ? ` · ${d.refundAccountName}` : ''}`],
                 d.customer && !d.customer.balanceHidden ? ['Customer balance now', <Money key="b" value={d.customer.balance} />] : null,
                 ['Reason', d.reason],
+                d.gst.mode === 'regular' && d.gst.tax ? ['GST taken back', <Money key="g" value={d.gst.tax} />] : null,
               ]}
             />
           </Card>
@@ -132,6 +134,9 @@ export function ReturnDetail() {
                   { key: 'itemName', label: 'Item', sortable: false, render: (i) => <span className="sl-cell-main">{i.itemName}</span> },
                   { key: 'qty', label: 'Qty', align: 'right', sortable: false, render: (i) => qtyUnit(i.qty, i.unit) },
                   { key: 'rate', label: 'Refund rate', type: 'money', sortable: false },
+                  ...(d.gst.mode === 'regular'
+                    ? [{ key: 'gstRate', label: 'GST', align: 'right' as const, sortable: false, render: (i: (typeof d.items)[number]) => formatRate(i.gstRate ?? 0) }]
+                    : []),
                   { key: 'amount', label: 'Amount', type: 'money', sortable: false },
                 ]}
                 rows={d.items}
@@ -151,6 +156,32 @@ export function ReturnDetail() {
                     <span>Round off</span>
                     <span className="money">{formatINR(d.roundOff, { plus: true })}</span>
                   </div>
+                </>
+              )}
+              {d.gst.mode === 'regular' && d.gst.tax > 0 && (
+                <>
+                  <div className="tr muted">
+                    <span>Taxable value</span>
+                    <Money value={d.gst.taxable} />
+                  </div>
+                  {d.gst.cgst > 0 && (
+                    <div className="tr muted">
+                      <span>CGST</span>
+                      <Money value={d.gst.cgst} />
+                    </div>
+                  )}
+                  {d.gst.sgst > 0 && (
+                    <div className="tr muted">
+                      <span>SGST</span>
+                      <Money value={d.gst.sgst} />
+                    </div>
+                  )}
+                  {d.gst.igst > 0 && (
+                    <div className="tr muted">
+                      <span>IGST</span>
+                      <Money value={d.gst.igst} />
+                    </div>
+                  )}
                 </>
               )}
               <div className="tr grand">
