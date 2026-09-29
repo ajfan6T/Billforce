@@ -14,7 +14,9 @@ export type LinkKind =
   | 'supplier'
   | 'employee'
   | 'account'
-  | 'loan';
+  | 'loan'
+  | 'stock_adjustment'
+  | 'stock_item';
 
 export interface DocLink {
   kind: LinkKind;

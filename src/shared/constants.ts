@@ -98,6 +98,7 @@ export const SEQUENCE_KEYS = [
   'journal',
   'salary',
   'advance',
+  'stock_adjustment',
 ] as const;
 export type SequenceKey = (typeof SEQUENCE_KEYS)[number];
 
@@ -111,6 +112,7 @@ export const DEFAULT_PREFIXES: Record<SequenceKey, string> = {
   journal: 'JV',
   salary: 'SAL',
   advance: 'ADV',
+  stock_adjustment: 'ADJ',
 };
 
 export const SEQUENCE_LABELS: Record<SequenceKey, string> = {
@@ -123,6 +125,7 @@ export const SEQUENCE_LABELS: Record<SequenceKey, string> = {
   journal: 'Journal vouchers',
   salary: 'Salary slips',
   advance: 'Employee advances',
+  stock_adjustment: 'Stock counts & adjustments',
 };
 
 export const ATTENDANCE_STATUSES = ['P', 'A', 'H', 'L', 'W'] as const;

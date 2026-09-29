@@ -4,13 +4,16 @@
  *   Net sales - Purchases - Direct expenses            = Gross profit
  *   Gross profit + Other income - Indirect expenses    = Net profit / loss
  * Computed from the ledger (non-void entries, year-end closing entries left out).
- * Stock is not tracked, so purchases are expensed when made.
+ * Without stock tracking, purchases are expensed when made. With stock tracking (Settings > Stock) the
+ * trading part is: Net sales - (Opening stock + Purchases + Direct expenses - Closing stock), stock valued
+ * at the average purchase cost (modules/stock/accounting.ts).
  * Discounts allowed and round off are indirect expenses here, so this "Net sales" is before discounts;
  * Sales insights and the dashboard show bill totals as "Net sales after discounts" (a note says so).
  */
 import type { Ctx } from '../../context';
 import type { ReportColumn, ReportData, ReportRow } from '../../../shared/report';
 import { accountNets, accountsMeta, assertRange, comparePeriod, pct, periodLabel, rangeSubtitle, type AccountMeta } from './common';
+import { periodStock } from '../stock/accounting';
 
 export type CompareKind = 'none' | 'previous_period' | 'previous_year';
 
@@ -23,6 +26,11 @@ export interface ProfitLossFigures {
   netSales: number;
   purchases: number;
   directExpenses: number;
+  /** Stock tracking only: stock at the start and end of the period (else 0). */
+  openingStock: number;
+  closingStock: number;
+  /** Opening stock + purchases + direct expenses - closing stock. */
+  costOfGoodsSold: number;
   grossProfit: number;
   otherIncome: number;
   indirectExpenses: number;
@@ -40,6 +48,9 @@ interface PeriodAmounts {
 }
 
 function periodAmounts(ctx: Ctx, accounts: AccountMeta[], from: string, to: string, salesReturnsId: number | null): PeriodAmounts {
+  const stock = periodStock(ctx, from, to);
+  const openingStock = stock?.opening ?? 0;
+  const closingStock = stock?.closing ?? 0;
   const nets = accountNets(ctx, { from, to, excludeClosing: true, types: ['income', 'expense'] });
   const byAccount = new Map<number, number>();
   let sales = 0;
@@ -89,7 +100,8 @@ function periodAmounts(ctx: Ctx, accounts: AccountMeta[], from: string, to: stri
     }
   }
   const netSales = sales - salesReturns;
-  const grossProfit = netSales - purchases - directExpenses;
+  const costOfGoodsSold = openingStock + purchases + directExpenses - closingStock;
+  const grossProfit = netSales - costOfGoodsSold;
   const netProfit = grossProfit + otherIncome - indirectExpenses;
   return {
     byAccount,
@@ -101,6 +113,9 @@ function periodAmounts(ctx: Ctx, accounts: AccountMeta[], from: string, to: stri
       netSales,
       purchases,
       directExpenses,
+      openingStock,
+      closingStock,
+      costOfGoodsSold,
       grossProfit,
       otherIncome,
       indirectExpenses,
@@ -176,7 +191,15 @@ export function profitLoss(ctx: Ctx, input: { from: string; to: string; compare?
   line('Net sales', cur.figures.netSales, cf ? cf.netSales : null, 'subtotal');
 
   const costAccounts = accountsIn((a) => a.groupCode === 'purchases' || a.groupCode === 'direct_expenses');
-  if (costAccounts.length) {
+  const withStock = periodStock(ctx, from, to) !== null;
+  if (withStock) {
+    // Cost of goods sold = opening stock + purchases + direct expenses - closing stock.
+    header('Less: Cost of goods sold');
+    line('Opening stock', cur.figures.openingStock, cf ? cf.openingStock : null, undefined, 1);
+    for (const a of costAccounts) accountLine(a);
+    line('Less: Closing stock', -cur.figures.closingStock, cf ? -cf.closingStock : null, undefined, 1);
+    line('Cost of goods sold', cur.figures.costOfGoodsSold, cf ? cf.costOfGoodsSold : null, 'subtotal');
+  } else if (costAccounts.length) {
     header('Less: Purchases & direct expenses');
     for (const a of costAccounts) accountLine(a);
     line(
@@ -206,7 +229,9 @@ export function profitLoss(ctx: Ctx, input: { from: string; to: string; compare?
 
   const f = cur.figures;
   const notes = [
-    'Stock is not tracked; purchases are treated as expenses when made.',
+    withStock
+      ? 'Stock is valued at the average purchase cost (Stock > Stock levels). Cost of goods sold = opening stock + purchases + direct expenses - closing stock.'
+      : 'Stock is not tracked; purchases are treated as expenses when made.',
     'Year-end closing entries are left out. Cancelled bills and vouchers are not included.',
   ];
   const billingAdjustments = accounts.filter((a) => a.systemKey === 'DISCOUNT_ALLOWED' || a.systemKey === 'ROUND_OFF').some((a) => (cur.byAccount.get(a.id) ?? 0) !== 0);

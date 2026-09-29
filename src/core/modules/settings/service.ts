@@ -18,6 +18,7 @@ import { renderReceiptHtml, upiLink, type ReceiptDoc, type ReceiptTotal } from '
 import type { AppSettings, BusinessSettings, GstSettings, ReceiptSettings } from '../../../shared/settings';
 import { calcBill } from '../../../shared/billing';
 import { gstTable, useGstAccounts } from '../gst/common';
+import { ensureStockAccounts } from '../../seed';
 import { PAYMENT_MODES, PAYMENT_MODE_LABELS, SEQUENCE_KEYS, SEQUENCE_LABELS, type SequenceKey } from '../../../shared/constants';
 import { amountInWords, formatAmount, formatINR } from '../../../shared/money';
 import { formatDate, formatTime, fyOf } from '../../../shared/dates';
@@ -120,12 +121,15 @@ export const GST_SCHEMA = z.object({
     .refine((v) => (COMPOSITION_RATES as readonly number[]).includes(v), 'Choose 1%, 5% or 6%'),
 });
 
-export const EDITABLE_SECTIONS = ['business', 'gst', 'receipt', 'billing', 'security', 'backup'] as const;
+export const STOCK_SCHEMA = z.object({ enabled: z.boolean() });
+
+export const EDITABLE_SECTIONS = ['business', 'gst', 'stock', 'receipt', 'billing', 'security', 'backup'] as const;
 export type EditableSection = (typeof EDITABLE_SECTIONS)[number];
 
 const SCHEMAS = {
   business: BUSINESS_SCHEMA,
   gst: GST_SCHEMA,
+  stock: STOCK_SCHEMA,
   receipt: RECEIPT_SCHEMA,
   billing: BILLING_SCHEMA,
   security: SECURITY_SCHEMA,
@@ -135,6 +139,7 @@ const SCHEMAS = {
 const SECTION_LABELS: Record<EditableSection, string> = {
   business: 'business',
   gst: 'GST',
+  stock: 'stock',
   receipt: 'receipt & printer',
   billing: 'billing',
   security: 'security',
@@ -153,6 +158,7 @@ const FIELD_LABELS: Record<string, string> = {
   'gst.ratesIncludeGst': 'rates include GST',
   'gst.defaultRate': 'usual GST rate',
   'gst.compositionRate': 'composition tax rate',
+  'stock.enabled': 'stock tracking',
   'receipt.header': 'receipt header',
   'receipt.footer': 'receipt footer',
   'receipt.paperWidth': 'paper width',
@@ -299,6 +305,7 @@ export function updateSettings(ctx: Ctx, section: string, values: Record<string,
   if (!changedKeys.length) return { section: sec, values: before as any, changed: [] };
   const after = updateSection(ctx, sec, patch as any) as unknown as Record<string, unknown>;
   if (sec === 'gst' && after.registration !== 'unregistered') useGstAccounts(ctx);
+  if (sec === 'stock' && after.enabled) ensureStockAccounts(ctx.db, now(ctx));
   const pick = (o: Record<string, unknown>) => Object.fromEntries(changedKeys.map((k) => [k, o[k]]));
   logActivity(ctx, 'settings.update', `Changed ${SECTION_LABELS[sec]} settings: ${changeText(sec, before, after, changedKeys)}`, {
     entityType: 'settings',

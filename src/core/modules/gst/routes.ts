@@ -19,7 +19,7 @@ export const gstRoutes = {
   /** What is due for the tax period ending `upTo` (composition: the period from `from`). */
   'gst.due': route({
     access: ['accounts.manage', 'reports.financial'],
-    input: z.object({ upTo: zDate, from: zDate.nullish() }),
+    input: z.object({ upTo: zDate, from: zDate.nullish(), kind: z.enum(['regular', 'composition']).nullish() }),
     handler: (ctx, input) => gstDue(ctx, input),
   }),
   'gst.pay': route({
@@ -32,6 +32,7 @@ export const gstRoutes = {
       mode: zSettlementMode,
       accountId: z.number().int().positive().nullish(),
       reference: zOptText(60),
+      kind: z.enum(['regular', 'composition']).nullish(),
     }),
     handler: (ctx, input) => payGst(ctx, input),
   }),

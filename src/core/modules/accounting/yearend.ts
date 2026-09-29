@@ -3,6 +3,8 @@
  * day of the year (voucher 'closing', source 'closing') that
  *   - reverses the year's balance of every income and expense account
  *     (closing entries excluded), moving the net profit / loss to CAPITAL, and
+ *   - with stock tracking, sets "Stock in Hand" to the closing stock (average cost) and adds the change
+ *     in stock to the profit moved to CAPITAL (cost of goods sold = opening + purchases - closing),
  *   - optionally moves the balance of the drawings accounts into CAPITAL,
  * and then locks the year: the ledger engine refuses any change dated in it.
  * A safety backup is always taken first. The latest closed year can be
@@ -19,6 +21,7 @@ import { addDays, formatDate, fyOf, type FinancialYear } from '../../../shared/d
 import { formatINR } from '../../../shared/money';
 import { createBackup, type BackupInfo } from '../data/backup';
 import { userName } from './common';
+import { closingStock } from '../stock/accounting';
 
 export interface YearInfo {
   name: string;
@@ -28,8 +31,10 @@ export interface YearInfo {
   isClosed: boolean;
   income: number;
   expenses: number;
-  /** Income - expenses of the year (closing entries excluded). Negative = loss. */
+  /** Income - expenses of the year (closing entries excluded), plus the change in stock with stock tracking. Negative = loss. */
   netProfit: number;
+  /** Stock tracking: closing stock of the year at average cost (null without stock tracking). */
+  closingStock: number | null;
   drawings: number;
   entryCount: number;
   canClose: boolean;
@@ -76,6 +81,7 @@ export function listYears(ctx: Ctx): YearInfo[] {
   const rows = new Map(ordered.map((s) => [s, fyRow(ctx, s)]));
   const latestClosed = ordered.filter((s) => rows.get(s)?.is_closed).pop() ?? null;
   const figures = new Map(ordered.map((s) => [s, yearFigures(ctx, fyOf(s))]));
+  const stock = new Map(ordered.map((s) => [s, rows.get(s)?.is_closed ? null : closingStock(ctx, fyOf(s))]));
   const out: YearInfo[] = ordered.map((s, i) => {
     const fy = fyOf(s);
     const row = rows.get(s);
@@ -99,7 +105,8 @@ export function listYears(ctx: Ctx): YearInfo[] {
       isClosed: closed,
       income: f.income,
       expenses: f.expenses,
-      netProfit: f.netProfit,
+      netProfit: f.netProfit + (stock.get(s)?.change ?? 0),
+      closingStock: stock.get(s)?.value ?? null,
       drawings: f.drawings,
       entryCount: f.entryCount,
       canClose: !closeBlocked,
@@ -139,6 +146,8 @@ export interface ClosingPreview {
   drawingsTransferred: number;
   /** Drawings balance available to transfer. */
   drawingsBalance: number;
+  /** Stock tracking: closing stock and its change from the opening stock (part of netProfit). */
+  stock: { value: number; change: number } | null;
   capitalAccountName: string;
   entryDate: string;
 }
@@ -168,7 +177,19 @@ function closingLines(ctx: Ctx, fy: FinancialYear, transferDrawings: boolean): O
       memo: b.type === 'income' ? 'Income for the year closed' : 'Expense for the year closed',
     });
   }
-  const netProfit = 0 - balances.reduce((s, b) => s + b.bal, 0);
+  // Stock tracking: Stock in Hand goes to the closing stock; the change is part of the year's result.
+  const stock = closingStock(ctx, fy);
+  if (stock && stock.change !== 0) {
+    lines.push({
+      accountId: stock.accountId,
+      accountName: ctx.db.value<string>('SELECT name FROM accounts WHERE id = ?', [stock.accountId], 'Stock in Hand'),
+      groupName: 'Other Current Assets',
+      debit: stock.change > 0 ? stock.change : 0,
+      credit: stock.change < 0 ? -stock.change : 0,
+      memo: `Closing stock ${formatINR(stock.value)} at average cost`,
+    });
+  }
+  const netProfit = 0 - balances.reduce((s, b) => s + b.bal, 0) + (stock?.change ?? 0);
   if (netProfit !== 0) {
     lines.push({
       accountId: capitalId,
@@ -215,6 +236,7 @@ function closingLines(ctx: Ctx, fy: FinancialYear, transferDrawings: boolean): O
     netProfit,
     drawingsTransferred,
     drawingsBalance,
+    stock: stock ? { value: stock.value, change: stock.change } : null,
     capitalAccountName: capitalName,
     entryDate: fy.end,
   };

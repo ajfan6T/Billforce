@@ -17,7 +17,7 @@ export interface GstConfig {
   /** GST treatment of new documents. */
   mode: GstMode;
   gstin: string | null;
-  /** State of the business (from its GSTIN). */
+  /** State of the business (from the GSTIN in Settings > GST, also while not registered). */
   stateCode: string | null;
   inclusive: boolean;
   defaultRate: number;
@@ -32,11 +32,31 @@ export function gstConfig(ctx: Ctx): GstConfig {
   return {
     mode,
     gstin,
-    stateCode: gstinState(gstin),
+    // From the saved GSTIN even after turning GST off: documents made with GST keep their place of supply.
+    stateCode: gstinState(normalizeGstin(g.gstin)),
     inclusive: g.ratesIncludeGst !== false,
     defaultRate: typeof g.defaultRate === 'number' ? g.defaultRate : 18,
     compositionRate: typeof g.compositionRate === 'number' ? g.compositionRate : 1,
   };
+}
+
+/**
+ * GST the books still hold from earlier registrations: regular GST documents (or a balance on the GST accounts)
+ * and composition bills. Their reports and "Pay GST" stay available after the registration changes.
+ */
+export function gstHistory(ctx: Ctx): { regular: boolean; composition: boolean } {
+  const regular =
+    ctx.db.value<number>("SELECT COUNT(*) FROM (SELECT 1 FROM bills WHERE gst_mode = 'regular' LIMIT 1)", undefined, 0) > 0 ||
+    ctx.db.value<number>("SELECT COUNT(*) FROM (SELECT 1 FROM purchases WHERE gst_mode = 'regular' LIMIT 1)", undefined, 0) > 0;
+  const composition = ctx.db.value<number>("SELECT COUNT(*) FROM (SELECT 1 FROM bills WHERE gst_mode = 'composition' LIMIT 1)", undefined, 0) > 0;
+  return { regular, composition };
+}
+
+/** Which GST can be reported and paid: the current registration plus what the books hold from earlier ones. */
+export function gstKinds(ctx: Ctx): { regular: boolean; composition: boolean } {
+  const cfg = gstConfig(ctx);
+  const h = gstHistory(ctx);
+  return { regular: cfg.mode === 'regular' || h.regular, composition: cfg.mode === 'composition' || h.composition };
 }
 
 /** Make sure the GST accounts exist before posting tax to them. */

@@ -1,7 +1,7 @@
 import { type KeyboardEvent, type ReactNode } from 'react';
 import { Minus, Plus, ScanLine, Trash2 } from 'lucide-react';
 import type { BillCalc } from '../../../shared/billing';
-import { formatINR } from '../../../shared/money';
+import { formatINR, formatQty } from '../../../shared/money';
 import { GST_RATES, formatRate } from '../../../shared/gst';
 import { parseDiscountText } from './common';
 import { FastMoneyInput, FastNumberInput, FastTextInput } from './inputs';
@@ -22,6 +22,8 @@ export interface PosLine {
   gstRate?: number | null;
   /** HSN / SAC of a one-time line. */
   hsn?: string | null;
+  /** Stock tracking: quantity in stock when the line was added (null = not tracked / not known). */
+  stock?: number | null;
 }
 
 export type CellField = 'qty' | 'rate' | 'disc';
@@ -114,6 +116,11 @@ export function PosLines({
                 <td className="sl-ln-name">
                   {l.itemName}
                   {!l.itemId && <span className="sl-ln-free">one-time</span>}
+                  {l.stock !== null && l.stock !== undefined && (
+                    <span className={`sl-ln-stock${(l.qty ?? 0) > l.stock ? ' short' : ''}`} title="Stock in hand">
+                      {(l.qty ?? 0) > l.stock ? (l.stock > 0 ? `only ${formatQty(l.stock)} in stock` : 'out of stock') : `${formatQty(l.stock)} in stock`}
+                    </span>
+                  )}
                   {gst &&
                     (l.itemId ? (
                       <span className="sl-ln-gst" title="GST rate of the item (change it in Items & rates)">

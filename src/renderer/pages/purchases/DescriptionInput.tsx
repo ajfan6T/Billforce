@@ -49,7 +49,7 @@ export function DescriptionInput({
     if (!text || lastMatched.current === text.toLowerCase()) return;
     try {
       const res = await call('purchases.descriptions', { q: text, supplierId, limit: 5 });
-      const hit = res.find((o) => o.description.toLowerCase() === text.toLowerCase());
+      const hit = res.find((o) => o.description.toLowerCase() === text.toLowerCase()) ?? null;
       if (hit) {
         lastMatched.current = hit.description.toLowerCase();
         onExactMatch(hit);
@@ -126,8 +126,8 @@ export function DescriptionInput({
               <div className="combo-option">
                 <span>{o.description}</span>
                 <span className="sub">
-                  {formatINR(o.rate)}
-                  {o.unit ? `/${o.unit}` : ''} · {formatDate(o.lastDate)}
+                  {o.itemId && <span className="badge badge-green">stock item</span>} {o.rate ? `${formatINR(o.rate)}${o.unit ? `/${o.unit}` : ''}` : o.unit ?? ''}
+                  {o.lastDate ? ` · ${formatDate(o.lastDate)}` : ''}
                 </span>
               </div>
             </li>

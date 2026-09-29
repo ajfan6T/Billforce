@@ -3,7 +3,10 @@ import { now } from '../../context';
 import { AppError } from '../../errors';
 import { logActivity } from '../../audit';
 import { formatINR } from '../../../shared/money';
+import { formatQty } from '../../../shared/money';
 import { formatRate, hsnProblem, isGstRate } from '../../../shared/gst';
+import { stockEnabled, stockOnHand } from '../stock/valuation';
+import { defaultTrackStock } from '../stock/service';
 
 export interface ItemRow {
   id: number;
@@ -14,6 +17,8 @@ export interface ItemRow {
   category: string | null;
   hsn: string | null;
   gst_rate: number | null;
+  track_stock: number;
+  reorder_level: number | null;
   is_active: number;
   use_count: number;
   last_used_at: string | null;
@@ -33,12 +38,18 @@ export interface Item {
   hsn: string | null;
   /** GST rate in percent; null = the business's default rate. */
   gstRate: number | null;
+  /** Stock is kept for this item (only matters while stock tracking is on). */
+  trackStock: boolean;
+  /** "Low stock" at or below this quantity. */
+  reorderLevel: number | null;
+  /** Quantity in stock now (stock tracking on and item tracked), else null. */
+  stock: number | null;
   isActive: boolean;
   useCount: number;
   lastUsedAt: string | null;
 }
 
-export function toItem(r: ItemRow): Item {
+export function toItem(r: ItemRow, stock: number | null = null): Item {
   return {
     id: r.id,
     name: r.name,
@@ -48,16 +59,29 @@ export function toItem(r: ItemRow): Item {
     category: r.category,
     hsn: r.hsn,
     gstRate: r.gst_rate,
+    trackStock: !!r.track_stock,
+    reorderLevel: r.reorder_level,
+    stock,
     isActive: !!r.is_active,
     useCount: r.use_count,
     lastUsedAt: r.last_used_at,
   };
 }
 
+/** Items with their quantity in stock (while stock tracking is on). */
+function withStock(ctx: Ctx, rows: ItemRow[]): Item[] {
+  if (!stockEnabled(ctx)) return rows.map((r) => toItem(r));
+  const onHand = stockOnHand(
+    ctx,
+    rows.filter((r) => r.track_stock).map((r) => r.id),
+  );
+  return rows.map((r) => toItem(r, r.track_stock ? (onHand.get(r.id) ?? 0) : null));
+}
+
 export function getItem(ctx: Ctx, id: number): Item {
   const r = ctx.db.get<ItemRow>('SELECT * FROM items WHERE id = ?', [id]);
   if (!r) throw new AppError('NOT_FOUND', 'Item not found');
-  return toItem(r);
+  return withStock(ctx, [r])[0];
 }
 
 export function listItems(ctx: Ctx, opts: { q?: string | null; category?: string | null; includeInactive?: boolean }): Item[] {
@@ -74,7 +98,7 @@ export function listItems(ctx: Ctx, opts: { q?: string | null; category?: string
     params.push(opts.category);
   }
   const sql = `SELECT * FROM items ${where.length ? 'WHERE ' + where.join(' AND ') : ''} ORDER BY name COLLATE NOCASE`;
-  return ctx.db.all<ItemRow>(sql, params).map(toItem);
+  return withStock(ctx, ctx.db.all<ItemRow>(sql, params));
 }
 
 /**
@@ -95,18 +119,19 @@ export function searchItems(ctx: Ctx, q: string, limit = 12): Item[] {
       LIMIT :limit`,
     { like: `%${text}%`, exact: text, prefix: `${text}%`, limit },
   );
-  return rows.map(toItem);
+  return withStock(ctx, rows);
 }
 
 /** Most frequently / recently billed items, for one-tap "quick repeat" buttons. */
 export function recentItems(ctx: Ctx, limit = 16): Item[] {
-  return ctx.db
-    .all<ItemRow>(
+  return withStock(
+    ctx,
+    ctx.db.all<ItemRow>(
       `SELECT * FROM items WHERE is_active = 1
         ORDER BY (use_count > 0) DESC, last_used_at DESC, use_count DESC, name COLLATE NOCASE LIMIT ?`,
       [limit],
-    )
-    .map(toItem);
+    ),
+  );
 }
 
 export function itemCategories(ctx: Ctx): string[] {
@@ -124,6 +149,23 @@ export interface ItemInput {
   /** Left out = unchanged (forms of unregistered businesses do not show GST fields). */
   hsn?: string | null;
   gstRate?: number | null;
+  /** Stock fields: left out = unchanged (new items: tracked when stock tracking is on, except services). */
+  trackStock?: boolean;
+  reorderLevel?: number | null;
+}
+
+/** The stock columns of an item input (only those given). */
+function stockColumns(input: Pick<ItemInput, 'trackStock' | 'reorderLevel'>): Record<string, unknown> {
+  const out: Record<string, unknown> = {};
+  if (input.trackStock !== undefined) out.track_stock = input.trackStock ? 1 : 0;
+  if (input.reorderLevel !== undefined) {
+    const r = input.reorderLevel;
+    if (r !== null && (!(r >= 0) || Math.abs(Math.round(r * 1000) - r * 1000) > 1e-6)) {
+      throw new AppError('VALIDATION', 'Enter the low-stock quantity (up to 3 decimals)', { reorderLevel: 'Invalid quantity' });
+    }
+    out.reorder_level = r || null;
+  }
+  return out;
 }
 
 /** The GST columns of an item input (only those given). */
@@ -156,6 +198,8 @@ export function createItem(ctx: Ctx, input: ItemInput): Item {
     rate: input.rate,
     category: input.category || null,
     ...gstColumns(input),
+    track_stock: (input.trackStock ?? defaultTrackStock(ctx, input.unit || 'pcs')) ? 1 : 0,
+    ...stockColumns({ reorderLevel: input.reorderLevel }),
     created_at: now(ctx),
   });
   logActivity(ctx, 'item.create', `Added item "${input.name}" at ${formatINR(input.rate)}/${input.unit}`, { entityType: 'item', entityId: id });
@@ -172,6 +216,7 @@ export function updateItem(ctx: Ctx, id: number, input: ItemInput): Item {
     rate: input.rate,
     category: input.category || null,
     ...gstColumns(input),
+    ...stockColumns(input),
     updated_at: now(ctx),
   });
   const after = getItem(ctx, id);
@@ -179,6 +224,10 @@ export function updateItem(ctx: Ctx, id: number, input: ItemInput): Item {
   if (before.rate !== input.rate) changes.push(`rate ${formatINR(before.rate)} → ${formatINR(input.rate)}`);
   if (before.gstRate !== after.gstRate) changes.push(`GST ${before.gstRate === null ? 'default' : formatRate(before.gstRate)} → ${after.gstRate === null ? 'default' : formatRate(after.gstRate)}`);
   if ((before.hsn ?? '') !== (after.hsn ?? '')) changes.push(`HSN ${before.hsn || 'none'} → ${after.hsn || 'none'}`);
+  if (before.trackStock !== after.trackStock) changes.push(after.trackStock ? 'stock tracked' : 'stock no longer tracked');
+  if (before.reorderLevel !== after.reorderLevel) {
+    changes.push(`low stock at ${before.reorderLevel === null ? 'none' : formatQty(before.reorderLevel)} → ${after.reorderLevel === null ? 'none' : formatQty(after.reorderLevel)}`);
+  }
   if (before.name !== input.name) changes.push(`renamed from "${before.name}"`);
   logActivity(ctx, 'item.update', `Updated item "${input.name}"${changes.length ? ': ' + changes.join(', ') : ''}`, {
     entityType: 'item',
@@ -216,7 +265,10 @@ export function removeItem(ctx: Ctx, id: number): { deleted: boolean } {
   const item = getItem(ctx, id);
   const used =
     ctx.db.value<number>('SELECT COUNT(*) FROM bill_items WHERE item_id = ?', [id], 0) +
-    ctx.db.value<number>('SELECT COUNT(*) FROM credit_note_items WHERE item_id = ?', [id], 0);
+    ctx.db.value<number>('SELECT COUNT(*) FROM credit_note_items WHERE item_id = ?', [id], 0) +
+    ctx.db.value<number>('SELECT COUNT(*) FROM purchase_items WHERE item_id = ?', [id], 0) +
+    ctx.db.value<number>('SELECT COUNT(*) FROM stock_moves WHERE item_id = ?', [id], 0) +
+    ctx.db.value<number>('SELECT COUNT(*) FROM stock_adjustment_items WHERE item_id = ?', [id], 0);
   if (used) {
     setItemActive(ctx, id, false);
     return { deleted: false };
@@ -234,5 +286,5 @@ export function touchItemUsage(ctx: Ctx, itemId: number): void {
 /** Find an active item by exact name (case-insensitive). */
 export function findItemByName(ctx: Ctx, name: string): Item | null {
   const r = ctx.db.get<ItemRow>('SELECT * FROM items WHERE name = ?', [name.trim()]);
-  return r ? toItem(r) : null;
+  return r ? withStock(ctx, [r])[0] : null;
 }

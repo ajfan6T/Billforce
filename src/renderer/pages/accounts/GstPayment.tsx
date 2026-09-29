@@ -2,7 +2,7 @@ import { useState } from 'react';
 import { Link, useNavigate } from 'react-router';
 import { Landmark } from 'lucide-react';
 import { Alert, Button, Card, EmptyState, ErrorBox, KeyValues, Loading, Money, Page, PageHeader } from '../../components/ui';
-import { DateInput, Field, FormGrid, TextInput } from '../../components/forms';
+import { DateInput, Field, FormGrid, SegmentedControl, TextInput } from '../../components/forms';
 import { SettlementPicker } from '../../components/pickers';
 import { DataTable } from '../../components/table';
 import { useMutation, useQuery } from '../../hooks';
@@ -29,7 +29,10 @@ export function GstPaymentPage() {
   const features = useFeatures();
   const navigate = useNavigate();
   const toast = useToast();
-  const composition = features.gst === 'composition';
+  const both = features.gstRegular && features.gstComposition;
+  const [kind, setKind] = useState<'regular' | 'composition'>(features.gst === 'composition' || !features.gstRegular ? 'composition' : 'regular');
+  const composition = kind === 'composition';
+  const available = features.gstRegular || features.gstComposition;
   const today = todayISO();
   const lastMonthEnd = endOfMonth(addMonths(startOfMonth(today), -1));
   const lastQuarter = presetRange('last_quarter', today);
@@ -38,12 +41,12 @@ export function GstPaymentPage() {
   const [date, setDate] = useState(today);
   const [pay, setPay] = useState<{ mode: SettlementMode; accountId: number | null }>({ mode: 'bank', accountId: null });
   const [reference, setReference] = useState('');
-  const due = useQuery('gst.due', features.gst === 'none' ? null : { upTo, from: composition ? from : null });
-  const payments = useQuery('gst.payments', features.gst === 'none' ? null : undefined);
+  const due = useQuery('gst.due', available ? { upTo, from: composition ? from : null, kind } : null);
+  const payments = useQuery('gst.payments', available ? undefined : null);
   const m = useMutation('gst.pay');
   const confirmShortfall = useShortfallConfirm();
 
-  if (features.gst === 'none') {
+  if (!available) {
     return (
       <Page>
         <PageHeader title="Pay GST" />
@@ -64,7 +67,7 @@ export function GstPaymentPage() {
     const accepted = cash > 0 ? await confirmShortfall({ mode: pay.mode, accountId: pay.accountId, amount: cash, date }) : [];
     if (accepted === null) return;
     try {
-      const saved = await m.run({ upTo, from: composition ? from : null, date, mode: pay.mode, accountId: pay.accountId, reference: reference.trim() || null });
+      const saved = await m.run({ upTo, from: composition ? from : null, date, mode: pay.mode, accountId: pay.accountId, reference: reference.trim() || null, kind });
       toast.success(`GST payment recorded (${saved.voucherNo})`);
       saved.warnings.filter((w) => !accepted.includes(w)).forEach((w) => toast.warning(w));
       setReference('');
@@ -84,6 +87,20 @@ export function GstPaymentPage() {
       <div className="stack">
         <Card title={<span className="row"><Landmark size={17} /> {composition ? 'Tax for the quarter' : 'GST due'}</span>}>
           <div className="stack">
+            {both && (
+              <SegmentedControl<'regular' | 'composition'>
+                size="sm"
+                value={kind}
+                onChange={(k) => {
+                  setKind(k);
+                  setUpTo(k === 'composition' ? lastQuarter.to : lastMonthEnd);
+                }}
+                options={[
+                  { value: 'regular', label: 'Regular GST (tax invoices)' },
+                  { value: 'composition', label: 'Composition tax' },
+                ]}
+              />
+            )}
             <FormGrid cols={3}>
               {composition && (
                 <Field label="Period from" required>

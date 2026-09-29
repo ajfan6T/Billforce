@@ -76,6 +76,11 @@ export const ACTIVITY_LABELS: Record<string, string> = {
   'journal.update': 'Edited journal voucher',
   'journal.cancel': 'Cancelled journal voucher',
   'gst.pay': 'Recorded GST payment',
+  'stock.track_all': 'Started tracking stock for all items',
+  'stock.opening': 'Set opening stock',
+  'stock.count': 'Stock count',
+  'stock.adjust': 'Stock adjustment',
+  'stock.adjust_cancel': 'Cancelled stock adjustment',
   'capital.add': 'Capital introduced',
   'drawings.add': 'Recorded drawings',
   'transfer.create': 'Cash / bank transfer',
@@ -175,7 +180,7 @@ export interface ActivityModule {
 
 /** Groups for the "What" filter of the activity log. */
 export const ACTIVITY_MODULES: ActivityModule[] = [
-  { key: 'sales', label: 'Bills, returns & items', prefixes: ['bill.', 'return.', 'credit_note.', 'item.'] },
+  { key: 'sales', label: 'Bills, returns, items & stock', prefixes: ['bill.', 'return.', 'credit_note.', 'item.', 'stock.'] },
   { key: 'customers', label: 'Customers & payments received', prefixes: ['customer.', 'receipt.'] },
   { key: 'purchases', label: 'Suppliers & purchases', prefixes: ['supplier.', 'purchase.', 'supplier_payment.'] },
   { key: 'accounts', label: 'Accounts & expenses', prefixes: ['expense.', 'journal.', 'capital.', 'drawings.', 'transfer.', 'loan.', 'account.', 'year.', 'gst.'] },

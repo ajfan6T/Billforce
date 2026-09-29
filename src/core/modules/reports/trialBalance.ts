@@ -12,6 +12,8 @@
  * Debit and credit totals always agree; a Difference row is shown if they ever don't.
  */
 import type { Ctx } from '../../context';
+import { periodStock } from '../stock/accounting';
+import { formatINR } from '../../../shared/money';
 import { addDays, formatDate, fyOf } from '../../../shared/dates';
 import { ACCOUNT_TYPE_LABELS, ACCOUNT_TYPES, type AccountType, type PartyType } from '../../../shared/constants';
 import type { ReportData, ReportRow } from '../../../shared/report';
@@ -160,6 +162,12 @@ export function trialBalanceData(ctx: Ctx, input: TrialBalanceInput): { report: 
     notes.unshift(`Warning: debit and credit totals differ by ${(Math.abs(totals.difference) / 100).toFixed(2)}. Please take a backup and contact support.`);
   }
   if (prevYearsNet) notes.push('"Profit & loss (previous years)" is the result of earlier years that have not been closed yet.');
+  const stock = periodStock(ctx, from, to);
+  if (stock) {
+    notes.push(
+      `Stock is tracked: closing stock on ${formatDate(to)} is ${formatINR(stock.closing)} at average cost (opening ${formatINR(stock.opening)}). It is used in Profit & loss and the Balance sheet; "Stock in Hand" here shows the opening stock or the last year-end closing stock.`,
+    );
+  }
 
   return {
     totals,

@@ -3,6 +3,7 @@ import { Link } from 'react-router';
 import {
   ArrowRight,
   BookOpen,
+  Boxes,
   CalendarClock,
   ChartColumn,
   Hourglass,
@@ -59,14 +60,23 @@ const GROUPS: ReportGroup[] = [
     ],
   },
   {
+    title: 'Stock',
+    description: 'What is in the shop and what it is worth.',
+    cards: [
+      { to: '/stock', title: 'Stock summary', description: 'Quantity and value of every item at the average purchase cost.', icon: Boxes, perm: ['stock.manage', 'items.manage', 'purchases.manage', 'reports.financial'], feature: (f) => f.stock },
+      { to: '/stock?filter=low', title: 'Low stock', description: 'Items running low or out of stock, to order in time.', icon: Hourglass, perm: ['stock.manage', 'items.manage', 'purchases.manage', 'reports.financial'], feature: (f) => f.stock },
+      { to: '/stock/adjustments', title: 'Stock counts & adjustments', description: 'Corrections to stock with their reasons.', icon: ScrollText, perm: ['stock.manage', 'items.manage', 'purchases.manage'], feature: (f) => f.stock },
+    ],
+  },
+  {
     title: 'GST',
     description: 'Summaries for filing your GST returns.',
     cards: [
-      { to: '/reports/gst?tab=summary', title: 'GST summary', description: 'Tax collected, input tax credit and tax payable (GSTR-3B).', icon: Landmark, perm: 'reports.financial', feature: (f) => f.gst === 'regular' },
-      { to: '/reports/gst?tab=sales', title: 'GST sales register', description: 'Every tax invoice and credit note, B2B and B2C (GSTR-1).', icon: ScrollText, perm: 'reports.financial', feature: (f) => f.gst === 'regular' },
-      { to: '/reports/gst?tab=hsn', title: 'HSN summary', description: 'Sales by HSN code and GST rate.', icon: NotebookText, perm: 'reports.financial', feature: (f) => f.gst === 'regular' },
-      { to: '/reports/gst?tab=purchases', title: 'GST purchase register', description: 'Purchases with GST and the credit claimed.', icon: BookOpen, perm: 'reports.financial', feature: (f) => f.gst === 'regular' },
-      { to: '/reports/gst', title: 'Composition scheme', description: 'Turnover and the composition tax to pay each quarter (CMP-08).', icon: Landmark, perm: 'reports.financial', feature: (f) => f.gst === 'composition' },
+      { to: '/reports/gst?tab=summary', title: 'GST summary', description: 'Tax collected, input tax credit and tax payable (GSTR-3B).', icon: Landmark, perm: 'reports.financial', feature: (f) => f.gstRegular },
+      { to: '/reports/gst?tab=sales', title: 'GST sales register', description: 'Every tax invoice and credit note, B2B and B2C (GSTR-1).', icon: ScrollText, perm: 'reports.financial', feature: (f) => f.gstRegular },
+      { to: '/reports/gst?tab=hsn', title: 'HSN summary', description: 'Sales by HSN code and GST rate.', icon: NotebookText, perm: 'reports.financial', feature: (f) => f.gstRegular },
+      { to: '/reports/gst?tab=purchases', title: 'GST purchase register', description: 'Purchases with GST and the credit claimed.', icon: BookOpen, perm: 'reports.financial', feature: (f) => f.gstRegular },
+      { to: '/reports/gst?tab=composition', title: 'Composition scheme', description: 'Turnover and the composition tax to pay each quarter (CMP-08).', icon: Landmark, perm: 'reports.financial', feature: (f) => f.gstComposition },
     ],
   },
   {

@@ -11,11 +11,14 @@
  *    are Sundry debtors, credit customers are Advances from customers, and so on.
  * Because every figure comes from whole entries, the two sides always agree; the
  * check is still made and a difference is shown loudly instead of hidden.
+ * With stock tracking, "Stock in hand" shows the stock value on the date instead of
+ * the ledger balance, and the profit lines carry the difference (see stock/accounting.ts).
  */
 import type { Ctx } from '../../context';
 import { addDays, formatDate, fyOf } from '../../../shared/dates';
 import type { ReportData, ReportRow } from '../../../shared/report';
 import { accountNets, accountsMeta, partyNets, type AccountMeta, type LedgerFilter } from './common';
+import { balanceSheetStock } from '../stock/accounting';
 
 export interface BalanceSheetTotals {
   assets: number;
@@ -44,6 +47,8 @@ export interface BalanceSheetResult {
     supplierAdvances: number;
     loansAdvances: number;
     otherCurrentAssets: number;
+    /** Stock in hand (stock tracking: value at average cost; otherwise the ledger balance, usually 0). */
+    stock: number;
   };
 }
 
@@ -62,8 +67,9 @@ export function balanceSheet(ctx: Ctx, input: { asOf: string }): BalanceSheetRes
   const curPl = accountNets(ctx, { from: fy.start, to: asOf, excludeClosing: true, types: ['income', 'expense'] });
   const prevPl = accountNets(ctx, { to: addDays(fy.start, -1), types: ['income', 'expense'] });
   const sumCredit = (m: Map<number, number>) => 0 - [...m.values()].reduce((s, v) => s + v, 0) || 0;
-  const profitCurrent = sumCredit(curPl);
-  const profitPrevious = sumCredit(prevPl);
+  const stock = balanceSheetStock(ctx, asOf);
+  const profitCurrent = sumCredit(curPl) + (stock?.currentYear ?? 0);
+  const profitPrevious = sumCredit(prevPl) + (stock?.previousYears ?? 0);
 
   const net = (a: AccountMeta) => bsNets.get(a.id) ?? 0;
   const inGroup = (code: string) => accounts.filter((a) => a.groupCode === code);
@@ -120,7 +126,18 @@ export function balanceSheet(ctx: Ctx, input: { asOf: string }): BalanceSheetRes
     1,
   );
   const laLines = accountLines(inGroup('loans_advances'), 1);
-  const ocaLines = accountLines(inGroup('current_assets'), 1);
+  const stockAccount = accounts.find((a) => a.systemKey === 'STOCK');
+  const stockLines: Line[] = stock
+    ? stock.value
+      ? [{ label: 'Stock in hand (at average cost)', amount: stock.value, accountId: stockAccount?.id }]
+      : []
+    : stockAccount && net(stockAccount)
+      ? [{ label: stockAccount.name, amount: net(stockAccount), accountId: stockAccount.id }]
+      : [];
+  const ocaLines = accountLines(
+    inGroup('current_assets').filter((a) => a.systemKey !== 'STOCK'),
+    1,
+  );
 
   const total = (lines: Line[]) => lines.reduce((s, l) => s + l.amount, 0);
   const rows: ReportRow[] = [];
@@ -163,6 +180,7 @@ export function balanceSheet(ctx: Ctx, input: { asOf: string }): BalanceSheetRes
   assets += group('Other receivables', otherReceivables);
   assets += party('Advances to suppliers', ap.debit, ap.debitCount, 'supplier', apId);
   assets += group('Loans & advances', laLines);
+  if (stockLines.length) assets += group('Stock in hand', stockLines, { singleLine: true, link: stockAccount?.id });
   assets += group('Other current assets', ocaLines);
   rows.push({ cells: { particulars: 'Total assets', amount: null, total: assets }, style: 'total' });
 
@@ -177,7 +195,9 @@ export function balanceSheet(ctx: Ctx, input: { asOf: string }): BalanceSheetRes
   }
   notes.push(
     `Profit & loss (current year) is the result from ${formatDate(fy.start)} to ${formatDate(asOf)}. Year-end closing entries of ${fy.name} are left out.`,
-    'Stock is not tracked, so closing stock is not shown as an asset.',
+    stock
+      ? 'Stock in hand is valued at the average purchase cost on this date; its change during the year is part of the profit.'
+      : 'Stock is not tracked, so closing stock is not shown as an asset.',
   );
   if (profitPrevious) notes.push('Some earlier years have not been closed yet; their result is shown as "Profit & loss (previous years)". Close them from Accounts > Year-end closing.');
 
@@ -199,6 +219,7 @@ export function balanceSheet(ctx: Ctx, input: { asOf: string }): BalanceSheetRes
       supplierAdvances: ap.debit,
       loansAdvances: sumLines(laLines),
       otherCurrentAssets: sumLines(ocaLines),
+      stock: sumLines(stockLines),
     },
     report: {
       title: 'Balance Sheet',

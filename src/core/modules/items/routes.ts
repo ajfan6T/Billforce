@@ -21,6 +21,9 @@ const zItemInput = z.object({
   /** GST fields: left out = unchanged. */
   hsn: z.string().trim().max(8).nullable().optional(),
   gstRate: z.number().min(0).max(40).nullable().optional(),
+  /** Stock fields: left out = unchanged. */
+  trackStock: z.boolean().optional(),
+  reorderLevel: z.number().min(0).max(1_000_000_000).nullable().optional(),
 });
 
 const VIEW = ['billing.create', 'items.manage', 'billing.view'] as const;

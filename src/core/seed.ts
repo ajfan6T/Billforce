@@ -1,5 +1,5 @@
 import type { Db } from './db/database';
-import { ACCOUNT_GROUPS, DEFAULT_ACCOUNTS, GST_ACCOUNTS, SYSTEM_ACCOUNTS, type AccountSeed } from './accounting/chart';
+import { ACCOUNT_GROUPS, DEFAULT_ACCOUNTS, GST_ACCOUNTS, STOCK_ACCOUNTS, SYSTEM_ACCOUNTS, type AccountSeed } from './accounting/chart';
 import { ALL_PERMISSIONS, DEFAULT_ROLE_PERMISSIONS, type Permission } from '../shared/permissions';
 
 /** Permissions added in the same version that started tracking known permissions (meta.known_permissions). */
@@ -23,6 +23,7 @@ export function seedReferenceData(db: Db, timestamp: string): void {
     }
     ensureAccounts(db, SYSTEM_ACCOUNTS, timestamp);
     if (gstRegistered(db)) ensureAccounts(db, GST_ACCOUNTS, timestamp);
+    if (stockTracked(db)) ensureAccounts(db, STOCK_ACCOUNTS, timestamp);
     // Grant defaults for permissions this database has never seen (new install, or a
     // permission added in a newer version). Permissions the owner already reviewed are
     // left exactly as the owner set them.
@@ -78,6 +79,19 @@ function gstRegistered(db: Db): boolean {
   } catch {
     return false;
   }
+}
+
+function stockTracked(db: Db): boolean {
+  try {
+    return JSON.parse(db.value<string>("SELECT value FROM settings WHERE key = 'stock'", undefined, '{}'))?.enabled === true;
+  } catch {
+    return false;
+  }
+}
+
+/** The Stock in Hand account. Called when stock tracking is turned on. */
+export function ensureStockAccounts(db: Db, timestamp: string): void {
+  db.tx(() => ensureAccounts(db, STOCK_ACCOUNTS, timestamp));
 }
 
 /** The GST accounts (output / input tax, composition tax). Called when the business registers for GST. */

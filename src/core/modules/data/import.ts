@@ -591,12 +591,19 @@ function prepareRows(ctx: Ctx, def: TypeDef, sheet: ParsedSheet, headerIdx: numb
       const rate = r.amount('rate', { max: 1_000_000_000_00 });
       const category = r.text('category', 60);
       const withGst = def.fields.some((f) => f.key === 'gstRate');
-      const hsn = withGst ? r.text('hsn', 8) : undefined;
+      // Excel drops the leading zero of number cells (HSN 0713 arrives as 713): put it back.
+      const rawHsn = withGst ? r.raw('hsn') : null;
+      if (typeof rawHsn === 'number' && [3, 5, 7].includes(String(rawHsn).length)) r.values.hsn = `0${rawHsn}`;
+      const hsnText = typeof rawHsn === 'number' && [3, 5, 7].includes(String(rawHsn).length) ? `0${rawHsn}` : withGst ? r.text('hsn', 8) : undefined;
+      const hsn = hsnText || undefined;
       if (hsn && hsnProblem(hsn)) r.error('hsn', hsnProblem(hsn)!.replace(/^HSN \/ SAC code /, ''));
       let gstRate: number | undefined;
-      const rateText = withGst ? cellText(r.raw('gstRate')).replace(/%/g, '').trim() : '';
+      const rawRate = withGst ? r.raw('gstRate') : null;
+      const rateText = withGst ? cellText(rawRate).replace(/%/g, '').trim() : '';
       if (rateText) {
-        const n = Number(rateText);
+        let n = Number(rateText);
+        // A cell formatted as a percentage holds a fraction (18% = 0.18).
+        if (typeof rawRate === 'number' && !isGstRate(n) && isGstRate(Math.round(n * 10000) / 100)) n = Math.round(n * 10000) / 100;
         if (isGstRate(n)) {
           gstRate = n;
           r.values.gstRate = formatRate(n);

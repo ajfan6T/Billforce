@@ -20,7 +20,9 @@ const zPurchaseInput = z.object({
         unit: zOptText(20),
         rate: zPaise,
         gstRate: z.number().min(0).max(40).nullish(),
-        hsn: zOptText(8),
+        // Left out = as saved (when editing); null / '' = none.
+        hsn: z.string().trim().max(8).nullable().optional(),
+        itemId: zOptId,
       }),
     )
     .min(1, 'Add at least one item')

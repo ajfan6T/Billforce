@@ -459,3 +459,68 @@ describe('items, parties and import', () => {
     expect((await t.call('customers.search', { q: 'Kumar' }))[0]).toMatchObject({ gstin: MH_CUSTOMER, stateCode: '27' });
   });
 });
+
+describe('review fixes', () => {
+  it('takes back tax in step with the money refunded when part of a line was refunded below the rate paid', async () => {
+    t = await createTestApp();
+    await register(t);
+    const soap = await item(t, 'Soap', 5900, 18);
+    const bill = await t.call('sales.create', { items: [{ itemId: soap.id, itemName: 'Soap', qty: 2, rate: 5900 }], payments: [{ mode: 'cash', amount: 11800 }] });
+    const line = bill.items[0].id;
+    const first = await t.call('returns.create', { kind: 'return', billId: bill.id, items: [{ billItemId: line, qty: 1, rate: 1000 }], refundMode: 'cash' });
+    expect(first.gst.tax).toBe(152);
+    const second = await t.call('returns.create', { kind: 'return', billId: bill.id, items: [{ billItemId: line, qty: 1, rate: 5900 }], refundMode: 'cash' });
+    expect(second.gst.tax).toBe(900);
+    // The customer kept ₹49 of the line, so its tax is still owed.
+    expect(-(systemBalance(t.app, 'GST_OUT_CGST') + systemBalance(t.app, 'GST_OUT_SGST'))).toBe(1800 - 152 - 900);
+    expect(ledgerProblems(t.app)).toEqual([]);
+  });
+
+  it('keeps IGST on a purchase edited after GST is turned off', async () => {
+    t = await createTestApp();
+    await register(t);
+    const s = await t.call('suppliers.create', { name: 'Bengaluru Mills', gstin: KA_GSTIN });
+    const p = await t.call('purchases.create', { supplierId: s.id, items: [{ description: 'Rice', qty: 1, rate: 10000, gstRate: 18 }], payments: [] });
+    await t.call('settings.update', { section: 'gst', values: { registration: 'unregistered' } });
+    const edited = await t.call('purchases.update', { id: p.id, supplierId: s.id, items: [{ description: 'Rice', qty: 1, rate: 10000 }], payments: [], remarks: 'checked' });
+    expect(edited.gst).toMatchObject({ mode: 'regular', igst: 1800, cgst: 0, itc: true });
+    expect(systemBalance(t.app, 'GST_IN_IGST')).toBe(1800);
+  });
+
+  it('an edit that leaves out the GST fields keeps them', async () => {
+    t = await createTestApp();
+    await register(t);
+    const s = await t.call('suppliers.create', { name: 'Pune Wholesale', gstin: MH_CUSTOMER });
+    const p = await t.call('purchases.create', { supplierId: s.id, itc: false, items: [{ description: 'Tape', qty: 1, rate: 10000, gstRate: 5, hsn: '3919' }], payments: [] });
+    const edited = await t.call('purchases.update', { id: p.id, supplierId: s.id, items: [{ description: 'Tape', qty: 2, rate: 10000 }], payments: [] });
+    expect(edited.gst.itc).toBe(false);
+    expect(edited.items[0]).toMatchObject({ gstRate: 5, hsn: '3919' });
+  });
+
+  it('regular GST left in the books can still be paid after moving to composition', async () => {
+    t = await createTestApp();
+    await register(t);
+    const soap = await item(t, 'Soap', 11800, 18);
+    await t.call('sales.create', { items: [{ itemId: soap.id, itemName: 'Soap', qty: 1, rate: 11800 }], payments: [{ mode: 'cash', amount: 11800 }] });
+    await t.call('settings.update', { section: 'gst', values: { registration: 'composition' } });
+    const status = await t.call('app.status');
+    expect(status.features).toMatchObject({ gst: 'composition', gstRegular: true, gstComposition: true });
+    t.setToday('2026-10-05');
+    const due = await t.call('gst.due', { upTo: '2026-09-30', kind: 'regular' });
+    expect(due.mode === 'regular' && due.cashTotal).toBe(1800);
+    await t.call('gst.pay', { upTo: '2026-09-30', mode: 'bank', kind: 'regular' });
+    expect(systemBalance(t.app, 'GST_OUT_CGST')).toBe(0);
+  });
+
+  it('refuses composition tax for a period that overlaps one already paid', async () => {
+    t = await createTestApp();
+    await t.call('settings.update', { section: 'gst', values: { registration: 'composition', gstin: OWN_GSTIN } });
+    const tea = await item(t, 'Tea', 1000000, null);
+    t.setToday('2026-04-15');
+    await t.call('sales.create', { items: [{ itemId: tea.id, itemName: 'Tea', qty: 1, rate: 1000000 }], payments: [{ mode: 'cash', amount: 1000000 }] });
+    t.setToday('2026-07-10');
+    await t.call('gst.pay', { from: '2026-04-01', upTo: '2026-04-30', mode: 'bank' });
+    expect((await t.fails('gst.pay', { from: '2026-04-01', upTo: '2026-06-30', mode: 'bank' })).message).toMatch(/already paid/);
+  });
+});
+

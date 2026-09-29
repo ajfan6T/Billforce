@@ -20,7 +20,7 @@ import { formatDate, isValidISODate } from '../../../shared/dates';
 import type { SettlementMode } from '../../../shared/constants';
 import { getEntryDetail, postManualVoucher, type SavedEntry } from '../accounting/journals';
 import { resolveVoucherDate } from '../accounting/common';
-import { gstConfig, useGstAccounts } from './common';
+import { gstConfig, gstKinds, useGstAccounts } from './common';
 import { compositionTotals, periodText, type CompositionTotals } from './reports';
 
 export type Head = 'cgst' | 'sgst' | 'igst';
@@ -126,25 +126,47 @@ export function regularDue(ctx: Ctx, upTo: string): RegularDue {
   return { mode: 'regular', upTo, liability, credit, setOff: s.setOff, cash: s.cash, cashTotal: s.cash.cgst + s.cash.sgst + s.cash.igst, creditLeft: s.creditLeft };
 }
 
+const PERIOD_RE = /Composition GST for (\d{2})-(\d{2})-(\d{4}) to (\d{2})-(\d{2})-(\d{4})/;
+
 export function compositionDue(ctx: Ctx, from: string, to: string): CompositionDue {
   checkDate(from, 'date');
   checkDate(to, 'period end');
   if (from > to) throw fail.validation('The period must start on or before its end.', { from: 'After the end date' });
-  const text = periodText({ from, to });
+  // Composition payments already recorded for any part of this period (their narration carries the period).
   const paidBefore = ctx.db
-    .all<{ id: number; voucher_no: string | null; date: string; amount: number }>(
-      `SELECT e.id, e.voucher_no, e.date, (SELECT COALESCE(SUM(l.debit), 0) FROM journal_lines l WHERE l.entry_id = e.id) AS amount
-         FROM journal_entries e WHERE e.voucher_type = 'gst_payment' AND e.is_void = 0 AND e.narration LIKE ? ORDER BY e.date, e.id`,
-      [`%${text}%`],
+    .all<{ id: number; voucher_no: string | null; date: string; narration: string | null; amount: number }>(
+      `SELECT e.id, e.voucher_no, e.date, e.narration, (SELECT COALESCE(SUM(l.debit), 0) FROM journal_lines l WHERE l.entry_id = e.id) AS amount
+         FROM journal_entries e WHERE e.voucher_type = 'gst_payment' AND e.is_void = 0 AND e.narration LIKE 'Composition GST for %' ORDER BY e.date, e.id`,
     )
+    .filter((r) => {
+      const m = PERIOD_RE.exec(r.narration ?? '');
+      if (!m) return false;
+      const pFrom = `${m[3]}-${m[2]}-${m[1]}`;
+      const pTo = `${m[6]}-${m[5]}-${m[4]}`;
+      return pFrom <= to && pTo >= from;
+    })
     .map((r) => ({ entryId: r.id, voucherNo: r.voucher_no, date: r.date, amount: r.amount }));
   return { mode: 'composition', from, to, ...compositionTotals(ctx, { from, to }), paidBefore };
 }
 
-export function gstDue(ctx: Ctx, input: { upTo: string; from?: string | null }): RegularDue | CompositionDue {
+export type GstKind = 'regular' | 'composition';
+
+/** Regular GST or composition tax: as asked, else the current registration, else what earlier registrations left. */
+function kindOf(ctx: Ctx, asked?: GstKind | null): GstKind {
+  const kinds = gstKinds(ctx);
   const cfg = gstConfig(ctx);
-  if (cfg.mode === 'none') throw fail.validation('The business is not registered for GST. Turn GST on in Settings > GST first.');
-  if (cfg.mode === 'composition') return compositionDue(ctx, input.from || input.upTo.slice(0, 8) + '01', input.upTo);
+  const kind: GstKind | null = asked ?? (cfg.mode !== 'none' ? cfg.mode : kinds.regular ? 'regular' : kinds.composition ? 'composition' : null);
+  if (!kind || !kinds[kind]) {
+    throw fail.validation(
+      kind === 'composition' ? 'There is no composition tax in your books.' : kind === 'regular' ? 'There is no regular GST in your books.' : 'The business is not registered for GST. Turn GST on in Settings > GST first.',
+    );
+  }
+  return kind;
+}
+
+export function gstDue(ctx: Ctx, input: { upTo: string; from?: string | null; kind?: GstKind | null }): RegularDue | CompositionDue {
+  const kind = kindOf(ctx, input.kind);
+  if (kind === 'composition') return compositionDue(ctx, input.from || input.upTo.slice(0, 8) + '01', input.upTo);
   return regularDue(ctx, input.upTo);
 }
 
@@ -158,11 +180,12 @@ export interface PayGstInput {
   accountId?: number | null;
   /** Challan / reference number. */
   reference?: string | null;
+  /** Regular GST or composition tax (default: the current registration). */
+  kind?: GstKind | null;
 }
 
 export function payGst(ctx: Ctx, input: PayGstInput): SavedEntry {
-  const cfg = gstConfig(ctx);
-  if (cfg.mode === 'none') throw fail.validation('The business is not registered for GST. Turn GST on in Settings > GST first.');
+  const kind = kindOf(ctx, input.kind);
   useGstAccounts(ctx);
   const date = resolveVoucherDate(ctx, input.date || today(ctx), 'A GST payment');
   if (date < input.upTo) {
@@ -174,11 +197,13 @@ export function payGst(ctx: Ctx, input: PayGstInput): SavedEntry {
   let narration: string;
   let summary: string;
 
-  if (cfg.mode === 'composition') {
+  if (kind === 'composition') {
     const due = compositionDue(ctx, input.from || input.upTo.slice(0, 8) + '01', input.upTo);
     if (due.tax <= 0) throw fail.validation(`There is no composition tax to pay for ${periodText(due)}.`);
     if (due.paidBefore.length) {
-      throw fail.validation(`GST for ${periodText(due)} was already paid (${due.paidBefore.map((p) => p.voucherNo ?? `#${p.entryId}`).join(', ')}). Cancel that payment first to pay it again.`);
+      throw fail.validation(
+        `Composition GST for part of ${periodText(due)} was already paid (${due.paidBefore.map((p) => p.voucherNo ?? `#${p.entryId}`).join(', ')}). Choose a period that was not paid, or cancel that payment first.`,
+      );
     }
     lines.push({ account: 'COMPOSITION_TAX', debit: due.tax, memo: `CGST ${formatINR(due.cgst)} + SGST ${formatINR(due.sgst)}` });
     lines.push({ account, credit: due.tax, memo: ref ? `Challan ${ref}` : null });

@@ -5,12 +5,12 @@ import { useDebounced, useHotkeys, useMutation, useQuery } from '../../hooks';
 import { useAuth, useFeatures } from '../../auth';
 import { useDialogs, useToast } from '../../feedback';
 import { Alert, Badge, Button, EmptyState, ErrorBox, IconButton, Page, PageHeader, Toolbar } from '../../components/ui';
-import { Checkbox, Field, FormGrid, MoneyInput, SearchInput, Select, TextInput } from '../../components/forms';
+import { Checkbox, Field, FormGrid, MoneyInput, NumberInput, SearchInput, Select, TextInput } from '../../components/forms';
 import { DataTable, type Column } from '../../components/table';
 import { ExportButtons } from '../../components/report';
 import { Modal } from '../../components/modal';
 import { UNITS } from '../../../shared/constants';
-import { formatINR } from '../../../shared/money';
+import { formatINR, formatQty } from '../../../shared/money';
 import { GST_RATES, formatRate, hsnProblem } from '../../../shared/gst';
 import type { ReportData } from '../../../shared/report';
 import './sales.css';
@@ -26,9 +26,12 @@ interface ItemForm {
   hsn: string;
   /** null = the usual rate from Settings > GST. */
   gstRate: number | null;
+  trackStock: boolean;
+  reorderLevel: number | null;
 }
 
-const EMPTY: ItemForm = { name: '', code: '', unit: 'pcs', rate: null, category: '', hsn: '', gstRate: null };
+const EMPTY: ItemForm = { name: '', code: '', unit: 'pcs', rate: null, category: '', hsn: '', gstRate: null, trackStock: true, reorderLevel: null };
+const SERVICE_UNITS = ['service', 'hour'];
 
 /** "18%", or "18% (usual)" for items without their own rate. */
 export function gstRateText(rate: number | null, usual: number): string {
@@ -48,7 +51,17 @@ function ItemModal({ open, item, categories, onClose, onSaved }: { open: boolean
     update.reset();
     setF(
       item
-        ? { name: item.name, code: item.code ?? '', unit: item.unit, rate: item.rate, category: item.category ?? '', hsn: item.hsn ?? '', gstRate: item.gstRate }
+        ? {
+            name: item.name,
+            code: item.code ?? '',
+            unit: item.unit,
+            rate: item.rate,
+            category: item.category ?? '',
+            hsn: item.hsn ?? '',
+            gstRate: item.gstRate,
+            trackStock: item.trackStock,
+            reorderLevel: item.reorderLevel,
+          }
         : EMPTY,
     );
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -69,8 +82,9 @@ function ItemModal({ open, item, categories, onClose, onSaved }: { open: boolean
       unit: f.unit.trim(),
       rate: f.rate ?? 0,
       category: f.category.trim() || null,
-      // GST fields are sent only when the business charges GST (otherwise they stay as they are).
+      // GST / stock fields are sent only when those features are on (otherwise they stay as they are).
       ...(withGst ? { hsn: f.hsn.trim() || null, gstRate: f.gstRate } : {}),
+      ...(features.stock ? { trackStock: f.trackStock, reorderLevel: f.trackStock ? f.reorderLevel : null } : {}),
     };
     try {
       const saved = item ? await update.run({ id: item.id, ...input }) : await create.run(input);
@@ -112,7 +126,12 @@ function ItemModal({ open, item, categories, onClose, onSaved }: { open: boolean
             <MoneyInput value={f.rate} onChange={(rate) => setF({ ...f, rate })} placeholder="0.00" aria-label="Rate" />
           </Field>
           <Field label="Unit" required>
-            <Select<string> value={f.unit} onChange={(unit) => setF({ ...f, unit })} options={unitOptions.map((u) => ({ value: u, label: u }))} aria-label="Unit" />
+            <Select<string>
+              value={f.unit}
+              onChange={(unit) => setF({ ...f, unit, ...(!item && SERVICE_UNITS.includes(unit) ? { trackStock: false } : {}) })}
+              options={unitOptions.map((u) => ({ value: u, label: u }))}
+              aria-label="Unit"
+            />
           </Field>
           <Field label="Code / barcode" hint="Optional. Typing or scanning it on the bill adds the item">
             <TextInput value={f.code} onChange={(e) => setF({ ...f, code: e.target.value })} maxLength={40} />
@@ -125,6 +144,20 @@ function ItemModal({ open, item, categories, onClose, onSaved }: { open: boolean
               ))}
             </datalist>
           </Field>
+          {features.stock && (
+            <>
+              <Field label="Stock" hint={f.trackStock ? 'Bills take it out of stock, purchases bring it in' : 'For services and things not kept on the shelf'}>
+                <Checkbox checked={f.trackStock} onChange={(v) => setF({ ...f, trackStock: v })} label="Track stock of this item" />
+              </Field>
+              {f.trackStock ? (
+                <Field label="Low stock at" hint={`Alert when stock falls to this (${f.unit})`} error={m.fields.reorderLevel}>
+                  <NumberInput value={f.reorderLevel} onChange={(v) => setF({ ...f, reorderLevel: v })} placeholder="e.g. 5" aria-label="Low stock at" />
+                </Field>
+              ) : (
+                <span />
+              )}
+            </>
+          )}
           {withGst && (
             <>
               <Field label="GST rate">
@@ -286,6 +319,24 @@ export function ItemsPage() {
     { key: 'unit', label: 'Unit' },
     { key: 'rate', label: 'Rate', type: 'money', align: 'right', render: (it) => <RateCell item={it} editable={manage && it.isActive} onSaved={() => void list.reload()} /> },
     { key: 'category', label: 'Category', render: (it) => it.category ?? <span className="faint">—</span> },
+    ...(features.stock
+      ? [
+          {
+            key: 'stock',
+            label: 'In stock',
+            align: 'right' as const,
+            value: (it: Item) => it.stock ?? -Infinity,
+            render: (it: Item) =>
+              it.stock === null ? (
+                <span className="faint">not tracked</span>
+              ) : (
+                <span className={it.stock <= 0 ? 'neg' : it.reorderLevel && it.stock <= it.reorderLevel ? 'warn-text' : ''}>
+                  <b>{formatQty(it.stock)}</b> {it.unit}
+                </span>
+              ),
+          } satisfies Column<Item>,
+        ]
+      : []),
     ...(withGst
       ? [
           { key: 'gstRate', label: 'GST', value: (it: Item) => it.gstRate ?? features.gstDefaultRate, render: (it: Item) => gstRateText(it.gstRate, features.gstDefaultRate) } satisfies Column<Item>,
@@ -324,6 +375,7 @@ export function ItemsPage() {
         { key: 'unit', label: 'Unit', width: 8 },
         { key: 'rate', label: 'Rate', type: 'money', width: 12 },
         { key: 'category', label: 'Category', width: 16 },
+        ...(features.stock ? [{ key: 'stock', label: 'In stock', type: 'qty' as const, width: 10 }] : []),
         ...(withGst ? [{ key: 'gst', label: 'GST', width: 10 }, { key: 'hsn', label: 'HSN', width: 10 }] : []),
         { key: 'uses', label: 'Times billed', type: 'number', width: 12 },
         { key: 'status', label: 'Status', width: 10 },
@@ -335,6 +387,7 @@ export function ItemsPage() {
           unit: it.unit,
           rate: it.rate,
           category: it.category ?? '',
+          stock: it.stock,
           gst: gstRateText(it.gstRate, features.gstDefaultRate),
           hsn: it.hsn ?? '',
           uses: it.useCount,
@@ -342,14 +395,14 @@ export function ItemsPage() {
         },
       })),
     };
-  }, [list.data, category, showInactive, dq, withGst, features.gstDefaultRate]);
+  }, [list.data, category, showInactive, dq, withGst, features.gstDefaultRate, features.stock]);
 
   const filtered = !!(dq || category);
   return (
     <Page>
       <PageHeader
         title="Items & rates"
-        subtitle="Your price list for quick billing. Stock is not tracked."
+        subtitle={features.stock ? 'Your price list for quick billing, with the stock of each item' : 'Your price list for quick billing'}
         actions={
           <>
             <ExportButtons report={report} disabled={!list.data?.length} />

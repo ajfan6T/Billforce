@@ -1,0 +1,44 @@
+.st-low td:first-child {
+  box-shadow: inset 3px 0 0 var(--warning);
+}
+.st-out td:first-child {
+  box-shadow: inset 3px 0 0 var(--danger);
+}
+.st-grid {
+  display: grid;
+  grid-template-columns: minmax(180px, 1fr) 110px 130px 120px minmax(120px, 0.8fr) 36px;
+  gap: 8px;
+  align-items: center;
+}
+.st-grid.st-head {
+  font-size: 12px;
+  font-weight: 650;
+  color: var(--text-2);
+  text-transform: uppercase;
+  letter-spacing: 0.02em;
+}
+.st-grid .r {
+  text-align: right;
+}
+.st-lines {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.st-book {
+  font-variant-numeric: tabular-nums;
+  text-align: right;
+  color: var(--text-2);
+}
+.st-change-pos {
+  color: var(--success);
+  font-weight: 650;
+}
+.st-change-neg {
+  color: var(--danger);
+  font-weight: 650;
+}
+.st-opening-table td .input {
+  max-width: 150px;
+  margin-left: auto;
+}

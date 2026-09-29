@@ -60,6 +60,8 @@ export const SYSTEM_KEYS = [
   'GST_IN_SGST',
   'GST_IN_IGST',
   'COMPOSITION_TAX',
+  // Created only when stock tracking is turned on (STOCK_ACCOUNTS).
+  'STOCK',
 ] as const;
 export type SystemKey = (typeof SYSTEM_KEYS)[number];
 
@@ -109,6 +111,11 @@ export const GST_ACCOUNTS: AccountSeed[] = [
   { code: '1312', name: 'Input SGST', group: 'current_assets', systemKey: 'GST_IN_SGST', description: 'State GST paid on purchases (input tax credit)' },
   { code: '1313', name: 'Input IGST', group: 'current_assets', systemKey: 'GST_IN_IGST', description: 'Integrated GST paid on purchases (input tax credit)' },
   { code: '6030', name: 'Composition Tax', group: 'indirect_expenses', systemKey: 'COMPOSITION_TAX', description: 'GST paid on turnover under the composition scheme' },
+];
+
+/** Created (and re-created if missing) while stock tracking is on: the stock held, valued at average cost. */
+export const STOCK_ACCOUNTS: AccountSeed[] = [
+  { code: '1320', name: 'Stock in Hand', group: 'current_assets', systemKey: 'STOCK', description: 'Goods in the shop, at average purchase cost (opening stock, then the closing stock of each closed year)' },
 ];
 
 /** Common accounts created once for a new business; the owner can rename or deactivate them. */

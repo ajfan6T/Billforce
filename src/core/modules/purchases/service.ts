@@ -36,6 +36,9 @@ import { assertSameFinancialYear, itemsSummary, postingLines, resolveDocDate, ty
 import { getSupplierRow } from '../suppliers/service';
 import { gstConfig, placeOfSupply, useGstAccounts } from '../gst/common';
 import { gstinState, hsnProblem, isGstRate, type GstMode } from '../../../shared/gst';
+import { shareDiscount } from '../../../shared/billing';
+import { removeDocumentMoves, writeDocumentMoves } from '../stock/service';
+import { stockEnabled } from '../stock/valuation';
 
 export interface PurchaseItemInput {
   description: string;
@@ -46,6 +49,8 @@ export interface PurchaseItemInput {
   /** GST rate on the supplier's bill (purchases with GST). */
   gstRate?: number | null;
   hsn?: string | null;
+  /** Catalogue item bought (stock tracking: the goods come into its stock, in its unit). */
+  itemId?: number | null;
 }
 
 export interface PurchasePaymentInput {
@@ -120,6 +125,7 @@ interface PurchaseRow {
   cgst: number;
   sgst: number;
   igst: number;
+  stock_tracked: number;
 }
 
 type JoinedRow = PurchaseRow & {
@@ -152,6 +158,7 @@ export interface PurchaseLine {
   cgst: number;
   sgst: number;
   igst: number;
+  itemId: number | null;
 }
 
 /** GST of a purchase (mode 'none' without GST). */
@@ -241,7 +248,8 @@ function toPurchase(ctx: Ctx, r: JoinedRow): Purchase {
       cgst: number;
       sgst: number;
       igst: number;
-    }>('SELECT line_no, description, unit, qty, rate, amount, hsn, gst_rate, taxable, cgst, sgst, igst FROM purchase_items WHERE purchase_id = ? ORDER BY line_no', [r.id])
+      item_id: number | null;
+    }>('SELECT line_no, description, unit, qty, rate, amount, hsn, gst_rate, taxable, cgst, sgst, igst, item_id FROM purchase_items WHERE purchase_id = ? ORDER BY line_no', [r.id])
     .map((i) => ({
       lineNo: i.line_no,
       description: i.description,
@@ -255,6 +263,7 @@ function toPurchase(ctx: Ctx, r: JoinedRow): Purchase {
       cgst: i.cgst,
       sgst: i.sgst,
       igst: i.igst,
+      itemId: i.item_id,
     }));
   const own = gstConfig(ctx);
   const supplierState = gstinState(r.supplier_gstin) ?? r.place_of_supply;
@@ -404,6 +413,9 @@ interface NormalizedPurchase {
     cgst: number;
     sgst: number;
     igst: number;
+    itemId: number | null;
+    /** Cost of the line for stock: after its share of the discount; without the GST claimed back. */
+    cost: number;
   }>;
   subtotal: number;
   discount: number;
@@ -451,6 +463,17 @@ function normalize(ctx: Ctx, input: PurchaseInput, before?: PurchaseRow): Normal
   input.items.forEach((it, i) => {
     if (!it.description.trim()) throw fail.validation(`Line ${i + 1}: enter what was bought`, { [`items.${i}.description`]: 'Enter a description' });
   });
+  // Lines that name a catalogue item are counted in the item's own unit.
+  const items = new Map(
+    ctx.db
+      .all<{ id: number; name: string; unit: string }>(
+        `SELECT id, name, unit FROM items WHERE id IN (${[...new Set(input.items.map((it) => it.itemId).filter((x): x is number => !!x))].join(',') || '0'})`,
+      )
+      .map((r) => [r.id, r]),
+  );
+  input.items.forEach((it, i) => {
+    if (it.itemId && !items.has(it.itemId)) throw fail.validation(`Line ${i + 1}: the item was not found. Choose it again.`, { [`items.${i}.itemId`]: 'Item not found' });
+  });
   const roundOffEnabled = input.roundOff ?? getSection(ctx, 'billing').roundOff;
   /* GST: a purchase keeps the treatment it was entered with; only regular registration records the tax separately. */
   const cfg = gstConfig(ctx);
@@ -460,8 +483,13 @@ function normalize(ctx: Ctx, input: PurchaseInput, before?: PurchaseRow): Normal
   const supplierGstin = withGst ? (supplier?.gstin ?? null) : null;
   const pos = withGst ? placeOfSupply(cfg, supplier) : null;
   const interState = withGst && !!pos && !!cfg.stateCode && pos !== cfg.stateCode;
-  // Input tax credit needs the supplier's GSTIN on their bill.
-  const itc = withGst && !!supplierGstin && (input.itc ?? true);
+  // Input tax credit needs the supplier's GSTIN on their bill. Left out when editing = as saved.
+  const itc = withGst && !!supplierGstin && (input.itc ?? (before && before.gst_mode === 'regular' ? !!before.itc : true));
+  // GST fields left out of an edit keep the saved values of the line with the same description.
+  const savedLines = before
+    ? ctx.db.all<{ description: string; gst_rate: number | null; hsn: string | null }>('SELECT description, gst_rate, hsn FROM purchase_items WHERE purchase_id = ? ORDER BY line_no', [before.id])
+    : [];
+  const savedLine = (description: string) => savedLines.find((l) => l.description.toLowerCase() === description.trim().toLowerCase());
   if (withGst && input.itc && !supplierGstin) {
     throw fail.validation(
       supplier ? `Add the GSTIN of ${supplier.name} to claim the GST on this bill.` : 'Choose the supplier (with their GSTIN) to claim the GST on this bill.',
@@ -475,7 +503,7 @@ function normalize(ctx: Ctx, input: PurchaseInput, before?: PurchaseRow): Normal
     }
     const problem = hsnProblem(it.hsn);
     if (problem) throw fail.validation(`Line ${i + 1}: ${problem}`, { [`items.${i}.hsn`]: problem });
-    return it.gstRate ?? cfg.defaultRate;
+    return it.gstRate ?? savedLine(it.description)?.gst_rate ?? cfg.defaultRate;
   });
   const t = purchaseTotals({
     items: input.items.map((it, i) => ({ qty: it.qty, rate: it.rate, gstRate: gstRates[i] })),
@@ -488,6 +516,7 @@ function normalize(ctx: Ctx, input: PurchaseInput, before?: PurchaseRow): Normal
     throw fail.validation(`The discount (${formatINR(t.discount)}) cannot be more than the items total (${formatINR(t.subtotal)}).`, { discount: 'Discount is too large' });
   }
   if (t.total <= 0) throw fail.validation('The purchase total must be more than zero', { items: 'Total must be more than zero' });
+  const discountShares = shareDiscount(t.amounts, Math.min(t.discount, t.subtotal));
 
   const payments = (input.payments ?? []).map((p) => ({
     mode: p.mode,
@@ -517,13 +546,16 @@ function normalize(ctx: Ctx, input: PurchaseInput, before?: PurchaseRow): Normal
     account: purchaseAccount(ctx, input.expenseAccountId),
     items: input.items.map((it, i) => {
       const g = t.gst?.lines[i];
+      const linked = it.itemId ? items.get(it.itemId)! : null;
       return {
+        itemId: linked?.id ?? null,
+        cost: g ? g.taxable + (itc ? 0 : g.cgst + g.sgst + g.igst) : t.amounts[i] - discountShares[i],
         description: it.description.trim(),
         qty: it.qty,
-        unit: it.unit?.trim() || null,
+        unit: linked ? linked.unit : it.unit?.trim() || null,
         rate: it.rate,
         amount: t.amounts[i],
-        hsn: withGst ? it.hsn?.trim() || null : null,
+        hsn: withGst ? (it.hsn === undefined ? (savedLine(it.description)?.hsn ?? null) : it.hsn?.trim() || null) : null,
         gstRate: g ? g.gstRate : null,
         taxable: g ? g.taxable : null,
         cgst: g?.cgst ?? 0,
@@ -629,11 +661,23 @@ function writeLines(ctx: Ctx, id: number, v: NormalizedPurchase): void {
       cgst: it.cgst,
       sgst: it.sgst,
       igst: it.igst,
+      item_id: it.itemId,
     }),
   );
   for (const p of v.payments) {
     ctx.db.insert('purchase_payments', { purchase_id: id, mode: p.mode, account_id: p.accountId, amount: p.amount, reference: p.reference });
   }
+}
+
+/** Stock: the items of a purchase made while stock tracking was on come into stock at their cost. */
+function writePurchaseStock(ctx: Ctx, id: number, v: NormalizedPurchase): void {
+  writeDocumentMoves(
+    ctx,
+    'purchase',
+    id,
+    v.date,
+    v.items.flatMap((it, i) => (it.itemId ? [{ itemId: it.itemId, qty: it.qty, kind: 'purchase' as const, value: Math.max(0, it.cost), line: i + 1 }] : [])),
+  );
 }
 
 function columns(v: NormalizedPurchase) {
@@ -671,15 +715,18 @@ export function createPurchase(ctx: Ctx, input: PurchaseInput): SavedPurchase {
   const v = normalize(ctx, input);
   const short = shortfallWarnings(ctx, v);
   const num = nextDocNumber(ctx, 'purchase', v.date);
+  const tracked = stockEnabled(ctx);
   const id = ctx.db.insert('purchases', {
     purchase_no: num.number,
     seq: num.seq,
     fy_start: num.fyStart,
     ...columns(v),
+    stock_tracked: tracked ? 1 : 0,
     created_by: currentUserId(ctx),
     created_at: now(ctx),
   });
   writeLines(ctx, id, v);
+  if (tracked) writePurchaseStock(ctx, id, v);
   if (v.itc && v.gst?.tax) useGstAccounts(ctx);
   const entryId = postEntry(ctx, entryFor(id, num.number, v));
   ctx.db.update('purchases', id, { journal_entry_id: entryId });
@@ -708,6 +755,7 @@ export function updatePurchase(ctx: Ctx, id: number, input: PurchaseInput, reaso
     updated_at: now(ctx),
   });
   writeLines(ctx, id, v);
+  if (before.stock_tracked) writePurchaseStock(ctx, id, v);
   if (v.itc && v.gst?.tax) useGstAccounts(ctx);
   replaceEntry(ctx, before.journal_entry_id!, entryFor(id, before.purchase_no, v));
   const saved = getPurchase(ctx, id);
@@ -738,6 +786,7 @@ export function cancelPurchase(ctx: Ctx, id: number, reason: string): Purchase {
   if (!why) throw fail.validation('Enter the reason for cancelling', { reason: 'Enter a reason' });
   assertCancelKeepsClosedAccounts(ctx, r.journal_entry_id, 'this purchase');
   if (r.journal_entry_id) voidEntry(ctx, r.journal_entry_id, `Purchase ${r.purchase_no} cancelled: ${why}`);
+  removeDocumentMoves(ctx, 'purchase', id);
   ctx.db.update('purchases', id, {
     status: 'cancelled',
     revision: r.revision + 1,
@@ -842,24 +891,46 @@ export function listPurchases(ctx: Ctx, query: PurchaseListQuery): { rows: Purch
   return { rows, totals };
 }
 
-/** Past purchase line descriptions for type-ahead, with the last unit and rate (same supplier first). */
-export function purchaseDescriptions(ctx: Ctx, q: string, supplierId?: number | null, limit = 12): Array<{ description: string; unit: string | null; rate: number; lastDate: string }> {
+/**
+ * Suggestions while typing a purchase line: past descriptions with their last unit and rate (same supplier
+ * first). With stock tracking, items from the item list come too (itemId set), so the goods go into stock.
+ */
+export function purchaseDescriptions(
+  ctx: Ctx,
+  q: string,
+  supplierId?: number | null,
+  limit = 12,
+): Array<{ description: string; unit: string | null; rate: number; lastDate: string | null; itemId: number | null }> {
   const text = q.trim();
-  const rows = ctx.db.all<{ description: string; unit: string | null; rate: number; date: string }>(
-    `SELECT pi.description, pi.unit, pi.rate, p.date FROM purchase_items pi JOIN purchases p ON p.id = pi.purchase_id
+  const rows = ctx.db.all<{ description: string; unit: string | null; rate: number; date: string; item_id: number | null }>(
+    `SELECT pi.description, pi.unit, pi.rate, p.date, pi.item_id FROM purchase_items pi JOIN purchases p ON p.id = pi.purchase_id
       WHERE p.status = 'active' AND pi.description LIKE :like
       ORDER BY CASE WHEN p.supplier_id = :sid THEN 0 ELSE 1 END, CASE WHEN pi.description LIKE :prefix THEN 0 ELSE 1 END, p.date DESC, pi.id DESC
       LIMIT 300`,
     { like: `%${text}%`, prefix: `${text}%`, sid: supplierId ?? 0 },
   );
   const seen = new Set<string>();
-  const out: Array<{ description: string; unit: string | null; rate: number; lastDate: string }> = [];
+  const out: Array<{ description: string; unit: string | null; rate: number; lastDate: string | null; itemId: number | null }> = [];
+  if (stockEnabled(ctx)) {
+    const items = ctx.db.all<{ id: number; name: string; unit: string; last_rate: number | null; last_date: string | null }>(
+      `SELECT i.id, i.name, i.unit,
+              (SELECT pi.rate FROM purchase_items pi JOIN purchases p ON p.id = pi.purchase_id WHERE pi.item_id = i.id AND p.status = 'active' ORDER BY p.date DESC, pi.id DESC LIMIT 1) AS last_rate,
+              (SELECT MAX(p.date) FROM purchase_items pi JOIN purchases p ON p.id = pi.purchase_id WHERE pi.item_id = i.id AND p.status = 'active') AS last_date
+         FROM items i WHERE i.is_active = 1 AND i.track_stock = 1 AND (i.name LIKE :like OR i.code = :exact)
+        ORDER BY CASE WHEN i.name LIKE :prefix THEN 0 ELSE 1 END, i.use_count DESC, i.name COLLATE NOCASE LIMIT :limit`,
+      { like: `%${text}%`, prefix: `${text}%`, exact: text, limit },
+    );
+    for (const i of items) {
+      seen.add(i.name.toLowerCase());
+      out.push({ description: i.name, unit: i.unit, rate: i.last_rate ?? 0, lastDate: i.last_date, itemId: i.id });
+    }
+  }
   for (const r of rows) {
     const key = r.description.toLowerCase();
     if (seen.has(key)) continue;
     seen.add(key);
-    out.push({ description: r.description, unit: r.unit, rate: r.rate, lastDate: r.date });
+    out.push({ description: r.description, unit: r.unit, rate: r.rate, lastDate: r.date, itemId: null });
     if (out.length >= limit) break;
   }
-  return out;
+  return out.slice(0, limit);
 }

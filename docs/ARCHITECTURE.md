@@ -2,8 +2,8 @@
 
 Billforce is an offline Windows desktop ERP for small Indian businesses: billing,
 customers, suppliers & purchases, double-entry accounts, reports, employees,
-users & security, settings, backups and import, with optional **GST** (regular or composition).
-**No stock/inventory.**
+users & security, settings, backups and import, with optional **GST** (regular or composition) and optional
+**stock / inventory** tracking.
 
 ## Stack
 
@@ -95,7 +95,7 @@ tests/               vitest; helpers.ts gives createTestApp(), ledgerProblems(),
   full or pulled-out pen drive never keeps a cut-short file; it throws `SaveFileError` with plain words.
   Module CSS goes in `pages/<module>/<module>.css` imported by its pages.
   Tone: plain English a shop owner understands ("Payment received", "Amount due", "Cancel bill").
-* **Optional features** (GST today): off by default and invisible when off. Core: `gstConfig(ctx)`
+* **Optional features** (GST, stock): off by default and invisible when off. Core: `gstConfig(ctx)`
   (`modules/gst/common.ts`) gives the mode of new documents; `app.status.features` tells the UI, which hides menu
   items (`feature` in `nav.ts`), report cards and form fields with `useFeatures()`. A document stores the mode it was
   made with (`gst_mode`), so turning a feature on or off never changes old documents, and edits keep the saved mode.
@@ -128,6 +128,8 @@ tests/               vitest; helpers.ts gives createTestApp(), ledgerProblems(),
 | Purchase with GST and input tax credit | purchase account = total − tax; **GST_IN_CGST + GST_IN_SGST** or **GST_IN_IGST** | cash/bank / AP (without the credit the tax stays in the purchase account) |
 | Pay GST (voucher `gst_payment`, source `manual`) | **GST_OUT_*** (set off + paid) | **GST_IN_*** (credit used, legal order: IGST first; CGST/SGST never for each other); cash/bank (paid) |
 | Pay composition tax (`gst_payment`) | **COMPOSITION_TAX** (expense) = turnover × rate | cash/bank |
+| Opening stock (stock tracking) | **STOCK** | **OPENING_EQUITY** |
+| Year-end closing with stock tracking | **STOCK** the rise in stock (or Cr the fall), included in the profit moved to CAPITAL | |
 
 **GST** (`src/shared/gst.ts`, `calcBill(…, gst)` in `src/shared/billing.ts`, `purchaseTotals(…, gst)`): per line, the
 bill discount is shared over the lines first; with "rates include GST" the tax is taken out of the value
@@ -137,7 +139,23 @@ supplier's state (from the GSTIN, else `state_code`, else the business's own sta
 GST accounts (Output / Input CGST, SGST, IGST under current liabilities / current assets, Composition Tax) are created
 by `ensureGstAccounts` only when the business registers, so unregistered charts have none. Composition businesses
 print a "Bill of supply" without tax (posted like an unregistered bill) and pay tax on turnover. Credit notes without
-goods carry no GST. GST reports (`modules/gst/reports.ts`) read the documents (`gst_mode`), not the ledger.
+goods carry no GST. GST reports (`modules/gst/reports.ts`) read the documents (`gst_mode`), not the ledger. After the
+registration changes, GST left in the books (earlier tax invoices, composition bills) can still be reported and paid
+(`gstKinds`, `features.gstRegular / gstComposition`).
+
+**Stock** (optional, Settings > Stock; `modules/stock/`): items with "Track stock" move stock. Every document made
+while tracking is on (`stock_tracked`) writes its `stock_moves` through `writeDocumentMoves` (bills −qty, returns +qty,
+purchase lines that name an item +qty at their cost after the discount and without claimed GST, counts /
+adjustments ±qty) and rewrites them when edited; cancelling removes them. Selling below zero is allowed with a
+warning (`shortStockWarnings`). Value = quantity × weighted average cost of costed receipts (opening stock, purchases,
+stock added at a cost) up to the date; below zero is valued at nothing (`stock/valuation.ts`).
+The books use the periodic method (`stock/accounting.ts`): purchases stay an expense; P&L cost of goods sold =
+opening stock + purchases + direct expenses − closing stock; the balance sheet shows "Stock in hand" at its value on
+the date and the profit lines carry the change since the ledger balance of **STOCK** ("Stock in Hand", created when
+tracking is turned on); year-end closing posts the change to STOCK (with the profit to CAPITAL), so STOCK holds the
+last closing stock. Opening stock (on the books start date) is an opening balance: Dr STOCK, Cr OPENING_EQUITY
+(`stock.saveOpening`, needs `stock.manage` + `accounts.manage`). Turning tracking off hides the stock screens and
+stops valuing stock; the movements are kept.
 
 Reports read only non-void entries (`is_void = 0`). P&L style reports exclude `voucher_type = 'closing'`.
 Balance sheet as on D: balance-sheet accounts use all entries ≤ D except closing entries of D's own FY;
@@ -183,6 +201,7 @@ Core helpers other modules may call: `touchItemUsage`, `searchCustomers`, `quick
 
 Migration 1 is the release schema. Migration 2 brings data files from pre-release builds up to it (adds late
 columns and rebuilds changed indexes; a no-op on fresh files). Migration 3 adds the GST columns
-(`db/schema/gst.ts`), each with a default meaning "no GST", so older data reads exactly as before. Every future
+(`db/schema/gst.ts`), each with a default meaning "no GST", so older data reads exactly as before. Migration 4 adds
+stock (`db/schema/stock.ts`: item stock settings, purchase line item link, `stock_moves`, stock adjustments). Every future
 change is a new migration — never edit a released one. `seedReferenceData` runs on every start and grants default permissions only for permissions
 a data file has not seen before (`meta.known_permissions`), so the owner's choices survive upgrades and restores.

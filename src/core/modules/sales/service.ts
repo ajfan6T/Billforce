@@ -24,6 +24,8 @@ import { renderReceiptHtml, upiLink, type ReceiptDoc, type ReceiptTotal } from '
 import { billPaymentLabel, billPaymentMode, calcBill, roundQty, type BillGstTotals, type BillPaymentMode } from '../../../shared/billing';
 import { formatRate, gstinState, hsnProblem, isGstRate, stateLabel, type GstMode } from '../../../shared/gst';
 import { gstConfig, gstTable, placeOfSupply, useGstAccounts } from '../gst/common';
+import { removeDocumentMoves, shortStockWarnings, writeDocumentMoves } from '../stock/service';
+import { stockEnabled } from '../stock/valuation';
 import { amountInWords, formatAmount, formatINR, formatQty } from '../../../shared/money';
 import { formatDate, formatTime, fyOf, isValidISODate } from '../../../shared/dates';
 import { PAYMENT_MODE_LABELS, type PaymentMode, type SettlementMode } from '../../../shared/constants';
@@ -110,6 +112,8 @@ export interface BillRow {
   cgst: number;
   sgst: number;
   igst: number;
+  /** Made while stock tracking was on: the bill takes its items out of stock. */
+  stock_tracked: number;
 }
 
 interface BillItemRow {
@@ -840,6 +844,17 @@ function writeLinesAndPayments(ctx: Ctx, billId: number, p: PreparedBill): void 
   }
 }
 
+/** Stock: the items of a bill made while stock tracking was on leave the stock on the bill date. */
+function writeBillStock(ctx: Ctx, billId: number, p: PreparedBill): void {
+  writeDocumentMoves(
+    ctx,
+    'bill',
+    billId,
+    p.date,
+    p.lines.filter((l) => l.itemId).map((l, i) => ({ itemId: l.itemId!, qty: -l.qty, kind: 'sale' as const, line: i + 1 })),
+  );
+}
+
 /* ------------------------------------------------------------------ */
 /* Snapshots & change descriptions (audit trail)                       */
 /* ------------------------------------------------------------------ */
@@ -1030,6 +1045,8 @@ export type BillResult = BillDetail & { warnings: string[] };
 
 export function createBill(ctx: Ctx, input: BillInput): BillResult {
   const p = prepareBill(ctx, input, null);
+  const tracked = stockEnabled(ctx);
+  if (tracked) p.warnings.push(...shortStockWarnings(ctx, p.lines));
   const num = nextDocNumber(ctx, 'bill', p.date);
   const id = ctx.db.insert('bills', {
     bill_no: num.number,
@@ -1038,10 +1055,12 @@ export function createBill(ctx: Ctx, input: BillInput): BillResult {
     ...billColumns(p),
     status: 'active',
     revision: 1,
+    stock_tracked: tracked ? 1 : 0,
     created_by: currentUserId(ctx),
     created_at: now(ctx),
   });
   writeLinesAndPayments(ctx, id, p);
+  if (tracked) writeBillStock(ctx, id, p);
   if (p.gst) useGstAccounts(ctx);
   const entryId = postEntry(ctx, buildEntry(p, id, num.number));
   ctx.db.update('bills', id, { journal_entry_id: entryId });
@@ -1085,11 +1104,13 @@ export function updateBill(ctx: Ctx, id: number, input: BillInput, reason: strin
   assertNoActiveReturns(ctx, bill, 'edit');
   const before = billSnapshot(getBill(ctx, id));
   const p = prepareBill(ctx, input, bill);
+  if (bill.stock_tracked) p.warnings.push(...shortStockWarnings(ctx, p.lines, { sourceType: 'bill', sourceId: id }));
 
   ctx.db.update('bills', id, { ...billColumns(p), revision: bill.revision + 1, updated_by: currentUserId(ctx), updated_at: now(ctx) });
   ctx.db.run('DELETE FROM bill_items WHERE bill_id = ?', [id]);
   ctx.db.run('DELETE FROM bill_payments WHERE bill_id = ?', [id]);
   writeLinesAndPayments(ctx, id, p);
+  if (bill.stock_tracked) writeBillStock(ctx, id, p);
   if (p.gst) useGstAccounts(ctx);
   const entry = buildEntry(p, id, bill.bill_no);
   if (bill.journal_entry_id) replaceEntry(ctx, bill.journal_entry_id, entry);
@@ -1127,6 +1148,8 @@ export function cancelBill(ctx: Ctx, id: number, reason: string): BillDetail {
   const at = now(ctx);
   ctx.db.update('bills', id, { status: 'cancelled', cancelled_by: currentUserId(ctx), cancelled_at: at, cancel_reason: why });
   if (bill.journal_entry_id) voidEntry(ctx, bill.journal_entry_id, `Bill ${bill.bill_no} cancelled: ${why}`);
+  // The goods of a cancelled bill are back in stock.
+  removeDocumentMoves(ctx, 'bill', id);
   const detail = getBill(ctx, id);
   recordRevision(ctx, 'bill', id, 'cancelled', billSnapshot(detail), why);
   logActivity(ctx, 'bill.cancel', `Cancelled bill ${bill.bill_no} (${formatINR(bill.total)}${bill.customer_name ? ` - ${bill.customer_name}` : ''}). Reason: ${why}`, {

@@ -13,13 +13,15 @@ import type { AppSettings } from '../../../shared/settings';
 import { useSectionForm } from './useSectionForm';
 import { LivePreview, ReceiptTab } from './ReceiptTab';
 import { GstTab } from './GstTab';
+import { StockTab } from './StockTab';
 import { SaveBar, SwitchRow, formatBytes } from './common';
 import './admin.css';
 
-type TabKey = 'business' | 'gst' | 'receipt' | 'billing' | 'security' | 'about';
+type TabKey = 'business' | 'gst' | 'stock' | 'receipt' | 'billing' | 'security' | 'about';
 const TABS: Array<{ key: TabKey; label: string }> = [
   { key: 'business', label: 'Business' },
   { key: 'gst', label: 'GST' },
+  { key: 'stock', label: 'Stock' },
   { key: 'receipt', label: 'Receipt & printer' },
   { key: 'billing', label: 'Billing' },
   { key: 'security', label: 'Security' },
@@ -156,7 +158,7 @@ function BillingTab({ settings, onSaved, onDirty }: TabProps<'billing'>) {
               </tr>
             </thead>
             <tbody>
-              {SEQUENCE_KEYS.map((k) => {
+              {SEQUENCE_KEYS.filter((k) => k !== 'stock_adjustment' || settings.stock.enabled).map((k) => {
                 const err = problems[k] ?? f.err(`prefixes.${k}`);
                 return (
                   <tr key={k}>
@@ -313,7 +315,7 @@ export function SettingsPage() {
 
   return (
     <Page wide>
-      <PageHeader title="Business settings" subtitle="Your business details, GST, receipts, bill numbers and security" />
+      <PageHeader title="Business settings" subtitle="Your business details, GST, stock, receipts, bill numbers and security" />
       <Tabs tabs={TABS} value={tab} onChange={(k) => void change(k)} />
       {q.error ? (
         <ErrorBox error={q.error} onRetry={q.reload} />
@@ -323,6 +325,8 @@ export function SettingsPage() {
         <BusinessTab settings={q.data} onSaved={saved('business')} onDirty={onDirty} />
       ) : tab === 'gst' ? (
         <GstTab settings={q.data} onSaved={saved('gst')} onDirty={onDirty} />
+      ) : tab === 'stock' ? (
+        <StockTab settings={q.data} onSaved={saved('stock')} onDirty={onDirty} />
       ) : tab === 'receipt' ? (
         <ReceiptTab settings={q.data} onSaved={saved('receipt')} onDirty={onDirty} />
       ) : tab === 'billing' ? (

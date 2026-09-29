@@ -10,7 +10,7 @@ import { seedDefaultAccounts } from '../../seed';
 import { ensureFinancialYear } from '../../accounting/periods';
 import { postEntry } from '../../accounting/ledger';
 import { toTimestamp } from '../../../shared/dates';
-import { gstConfig } from '../gst/common';
+import { gstConfig, gstKinds } from '../gst/common';
 import type { GstMode } from '../../../shared/gst';
 
 export interface UserRow {
@@ -268,11 +268,25 @@ export interface EnabledFeatures {
   gstDefaultRate: number;
   /** Item rates include GST. */
   gstInclusive: boolean;
+  /** Regular GST to report / pay: registered now, or tax invoices from an earlier registration. */
+  gstRegular: boolean;
+  /** Composition tax to report / pay (now or from an earlier registration). */
+  gstComposition: boolean;
+  /** Stock tracking is on. */
+  stock: boolean;
 }
 
-const NO_FEATURES: EnabledFeatures = { gst: 'none', gstDefaultRate: 18, gstInclusive: true };
+const NO_FEATURES: EnabledFeatures = { gst: 'none', gstDefaultRate: 18, gstInclusive: true, gstRegular: false, gstComposition: false, stock: false };
 
 export function enabledFeatures(ctx: Ctx): EnabledFeatures {
   const g = gstConfig(ctx);
-  return { gst: g.mode, gstDefaultRate: g.defaultRate, gstInclusive: g.inclusive };
+  const kinds = gstKinds(ctx);
+  return {
+    gst: g.mode,
+    gstDefaultRate: g.defaultRate,
+    gstInclusive: g.inclusive,
+    gstRegular: kinds.regular,
+    gstComposition: kinds.composition,
+    stock: getSection(ctx, 'stock').enabled === true,
+  };
 }

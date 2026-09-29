@@ -103,6 +103,7 @@ function inactiveOpeningReason(name: string): string {
 function openingProblem(acct: Pick<AccountRow, 'party_type' | 'system_key' | 'type'>): string | null {
   if (acct.party_type) return 'Opening balances of customers, suppliers and employees are entered on their own pages.';
   if (acct.system_key === 'OPENING_EQUITY') return 'This account holds the balancing figure of all opening balances.';
+  if (acct.system_key === 'STOCK') return 'Opening stock is entered item by item in Stock > Opening stock.';
   if (acct.type === 'income' || acct.type === 'expense') return 'Income and expense accounts start every year at zero, so they have no opening balance.';
   return null;
 }
@@ -111,8 +112,9 @@ function openingProblem(acct: Pick<AccountRow, 'party_type' | 'system_key' | 'ty
  * Set the balance an account had on the books start date, posted against
  * "Opening Balance Adjustment". debitBalance > 0 = debit balance.
  */
-export function setAccountOpening(ctx: Ctx, acct: AccountRow, debitBalance: number): number | null {
-  const problem = openingProblem(acct);
+export function setAccountOpening(ctx: Ctx, acct: AccountRow, debitBalance: number, opts: { stock?: boolean } = {}): number | null {
+  // Stock in Hand gets its opening balance from the opening stock (stock module) only.
+  const problem = opts.stock && acct.system_key === 'STOCK' ? null : openingProblem(acct);
   if (problem && debitBalance !== 0) throw fail.validation(problem, { openingBalance: problem });
   const date = getSection(ctx, 'accounts').booksStartDate;
   const existing = accountOpeningEntry(ctx, acct.id);

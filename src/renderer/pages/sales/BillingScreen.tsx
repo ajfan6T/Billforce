@@ -525,7 +525,20 @@ function PosForm({
     requestAnimationFrame(() => show(10));
   };
 
-  const addLine = (l: Omit<PosLine, 'key'>): string => {
+  /**
+   * Editing a GST bill: an item (or one-time line) that is on the saved bill keeps the GST rate it was billed
+   * at, as the core does, even when removed and added again.
+   */
+  const savedGstRate = (itemId: number | null, name: string): number | undefined => {
+    if (!editBill || editBill.gst.mode !== 'regular') return undefined;
+    const key = name.trim().toLowerCase();
+    const hit = editBill.items.find((i) => i.gstRate !== null && (itemId ? i.itemId === itemId : !i.itemId && i.itemName.toLowerCase() === key));
+    return hit?.gstRate ?? undefined;
+  };
+
+  const addLine = (line: Omit<PosLine, 'key'>): string => {
+    const saved = savedGstRate(line.itemId, line.itemName);
+    const l = saved === undefined ? line : { ...line, gstRate: saved };
     const prev = linesRef.current;
     const idx = prev.findIndex((p) => sameLine(p, l));
     if (idx >= 0) {
@@ -541,8 +554,19 @@ function PosForm({
     return key;
   };
 
-  const addItem = (item: { id: number; name: string; unit: string; rate: number; gstRate?: number | null }, qty: number, rate?: number) => {
-    const key = addLine({ itemId: item.id, itemName: item.name, unit: item.unit, qty, rate: rate ?? item.rate, discText: '', defaultRate: item.rate, gstRate: item.gstRate ?? null });
+  const addItem = (item: { id: number; name: string; unit: string; rate: number; gstRate?: number | null; stock?: number | null }, qty: number, rate?: number) => {
+    const key = addLine({
+      itemId: item.id,
+      itemName: item.name,
+      unit: item.unit,
+      qty,
+      rate: rate ?? item.rate,
+      discText: '',
+      defaultRate: item.rate,
+      gstRate: item.gstRate ?? null,
+      // Stock in hand when added (a bill being edited has already taken its own quantity out).
+      stock: editing ? null : (item.stock ?? null),
+    });
     if ((rate ?? item.rate) === 0) focusCell(key, 'rate');
     else focusSearch();
   };
@@ -995,7 +1019,12 @@ function PosForm({
                     {parsed.hasQty && <span className="sl-io-qty">{formatQty(parsed.qty)} ×</span>}
                     {i.name}
                   </div>
-                  <div className="sl-io-sub">{[i.code, i.category].filter(Boolean).join(' · ') || `per ${i.unit}`}</div>
+                  <div className="sl-io-sub">
+                    {[i.code, i.category].filter(Boolean).join(' · ') || `per ${i.unit}`}
+                    {i.stock !== null && (
+                      <span className={i.stock <= 0 ? 'sl-io-stock out' : 'sl-io-stock'}>{i.stock <= 0 ? ' · out of stock' : ` · ${formatQty(i.stock)} in stock`}</span>
+                    )}
+                  </div>
                 </div>
                 <span className="sl-io-rate">
                   {formatINR(i.rate)}

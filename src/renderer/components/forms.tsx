@@ -265,11 +265,13 @@ export interface NumberInputProps extends Omit<InputHTMLAttributes<HTMLInputElem
   onChange: (v: number | null) => void;
   /** Maximum decimals allowed (quantity = 3). */
   decimals?: number;
+  /** Allow a minus sign (stock taken out). */
+  allowNegative?: boolean;
 }
 
 /** Plain number input (quantities, days, percentages). */
 export const NumberInput = forwardRef<HTMLInputElement, NumberInputProps>(function NumberInput(
-  { value, onChange, decimals = 3, className = '', onFocus, onBlur, ...rest },
+  { value, onChange, decimals = 3, allowNegative = false, className = '', onFocus, onBlur, ...rest },
   ref,
 ) {
   const [focused, setFocused] = useState(false);
@@ -299,10 +301,10 @@ export const NumberInput = forwardRef<HTMLInputElement, NumberInputProps>(functi
       onChange={(e) => {
         sel.typedNow();
         const t = e.target.value.replace(/,/g, '');
-        const re = new RegExp(`^\\d*${decimals > 0 ? `(\\.\\d{0,${decimals}})?` : ''}$`);
+        const re = new RegExp(`^${allowNegative ? '-?' : ''}\\d*${decimals > 0 ? `(\\.\\d{0,${decimals}})?` : ''}$`);
         if (!re.test(t)) return;
         setText(t);
-        if (t === '' || t === '.') onChange(null);
+        if (t === '' || t === '.' || t === '-' || t === '-.') onChange(null);
         else onChange(Number(t));
       }}
       {...rest}

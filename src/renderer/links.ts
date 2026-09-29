@@ -23,7 +23,7 @@ export interface LinkPeriod {
 }
 
 /** Record pages that show a period of entries: ledgers and customer / supplier / employee accounts. */
-const PERIOD_KINDS = new Set(['account', 'customer', 'supplier', 'employee']);
+const PERIOD_KINDS = new Set(['account', 'customer', 'supplier', 'employee', 'stock_item']);
 
 const PERIOD_PARAMS = ['from', 'to', 'preset'] as const;
 
@@ -75,6 +75,10 @@ function basePath(link: AppLink): string {
       return `/accounts/ledger?account=${link.id}`;
     case 'loan':
       return `/accounts/loans/${link.id}`;
+    case 'stock_adjustment':
+      return `/stock/adjustments/${link.id}`;
+    case 'stock_item':
+      return `/stock/items/${link.id}`;
     default:
       return '/';
   }

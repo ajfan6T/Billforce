@@ -31,6 +31,9 @@ interface Line {
   lastRate?: number | null;
   /** GST rate on the supplier's bill (purchases with GST); null = the usual rate. */
   gstRate?: number | null;
+  /** Stock tracking: the catalogue item bought (its unit is used). */
+  itemId?: number | null;
+  itemName?: string | null;
 }
 
 /** A rate this many times the last purchase rate is almost always a typing mistake (e.g. digits added to the old rate). */
@@ -83,7 +86,10 @@ function fromPurchase(p: PurchaseDetail, supplier: SupplierOption | null, defaul
     supplierBillNo: p.supplierBillNo ?? '',
     supplierBillDate: p.supplierBillDate ?? '',
     accountId: p.expenseAccountId,
-    lines: [...p.items.map((i) => ({ key: nextKey++, description: i.description, qty: i.qty, unit: i.unit ?? '', rate: i.rate, gstRate: i.gstRate })), blankLine()],
+    lines: [
+      ...p.items.map((i) => ({ key: nextKey++, description: i.description, qty: i.qty, unit: i.unit ?? '', rate: i.rate, gstRate: i.gstRate, itemId: i.itemId, itemName: i.itemId ? i.description : null })),
+      blankLine(),
+    ],
     discount: p.discount || null,
     otherCharges: p.otherCharges || null,
     // Not stored: rounding was on if it changed the total, or (by default) when the total is a whole rupee.
@@ -231,7 +237,7 @@ function PurchaseEditor({ options, initial, existing }: { options: FormOptions; 
    * So: the rate box the user is in is left alone; an empty unit box the user is in is filled and its
    * text selected in the same task (flushSync), before any further key press can arrive.
    */
-  const fillFromHistory = (key: number, o: { unit: string | null; rate: number }) => {
+  const fillFromHistory = (key: number, o: { unit: string | null; rate: number; itemId?: number | null; description?: string }) => {
     const unitEl = cells.current.get(`${key}:unit`);
     const rateEl = cells.current.get(`${key}:rate`);
     const active = document.activeElement;
@@ -241,7 +247,12 @@ function PurchaseEditor({ options, initial, existing }: { options: FormOptions; 
       setS((x) => ({
         ...x,
         lines: x.lines.map((l) =>
-          l.key === key ? { ...l, unit: l.unit || o.unit || '', rate: l.rate !== null || inRate ? l.rate : o.rate, lastRate: o.rate } : l,
+          l.key === key
+            ? o.itemId
+              ? // The name is an item in the list (stock tracking): link it and count in its unit.
+                { ...l, itemId: o.itemId, itemName: o.description ?? l.description, unit: o.unit ?? l.unit, rate: l.rate !== null || inRate ? l.rate : o.rate || null, lastRate: o.rate || null }
+              : { ...l, unit: l.unit || o.unit || '', rate: l.rate !== null || inRate ? l.rate : o.rate, lastRate: o.rate }
+            : l,
         ),
       })),
     );
@@ -364,6 +375,7 @@ function PurchaseEditor({ options, initial, existing }: { options: FormOptions; 
         unit: l.unit.trim() || null,
         rate: l.rate ?? 0,
         ...(gstOn ? { gstRate: l.gstRate ?? options.gst.defaultRate } : {}),
+        itemId: l.itemId ?? null,
       })),
       discount: s.discount ?? 0,
       otherCharges: s.otherCharges ?? 0,
@@ -504,8 +516,24 @@ function PurchaseEditor({ options, initial, existing }: { options: FormOptions; 
                       supplierId={hasSupplier ? s.supplier!.id : null}
                       placeholder={isBlank ? (i === 0 ? 'What did you buy?' : 'Add another item…') : ''}
                       ariaLabel={`Line ${i + 1} description`}
-                      onChange={(v) => setLine(l.key, { description: v, lastRate: null })}
-                      onPick={(o) => setLine(l.key, { description: o.description, unit: o.unit ?? l.unit, rate: o.rate, lastRate: o.rate })}
+                      onChange={(v) =>
+                        setLine(l.key, {
+                          description: v,
+                          lastRate: null,
+                          // Typing another name unlinks the line from the item.
+                          ...(l.itemId && v.trim().toLowerCase() !== (l.itemName ?? '').toLowerCase() ? { itemId: null, itemName: null } : {}),
+                        })
+                      }
+                      onPick={(o) =>
+                        setLine(l.key, {
+                          description: o.description,
+                          unit: o.unit ?? l.unit,
+                          rate: o.rate || l.rate,
+                          lastRate: o.rate || null,
+                          itemId: o.itemId,
+                          itemName: o.itemId ? o.description : null,
+                        })
+                      }
                       onExactMatch={(o) => fillFromHistory(l.key, o)}
                       onEnter={() => advance(i, 0)}
                     />
@@ -522,6 +550,8 @@ function PurchaseEditor({ options, initial, existing }: { options: FormOptions; 
                       value={l.unit}
                       placeholder={isBlank ? '' : 'pcs'}
                       maxLength={20}
+                      readOnly={!!l.itemId}
+                      title={l.itemId ? 'Counted in the unit of the item (stock)' : undefined}
                       aria-label={`Line ${i + 1} unit`}
                       onChange={(e) => setLine(l.key, { unit: e.target.value })}
                       onKeyDown={(e) => onCellKey(e, i, 2)}

@@ -24,6 +24,7 @@ export const PERMISSIONS = [
   { key: 'returns.cancel', label: 'Cancel returns & credit notes', group: 'Sales & billing' },
   { key: 'returns.adjust', label: 'Credit notes without goods (price corrections)', group: 'Sales & billing' },
   { key: 'items.manage', label: 'Add / edit items and rates', group: 'Sales & billing' },
+  { key: 'stock.manage', label: 'Stock counts, adjustments & opening stock', group: 'Sales & billing' },
 
   // Customers
   { key: 'customers.view', label: 'View customers & balances', group: 'Customers' },
@@ -82,6 +83,7 @@ export const DEFAULT_ROLE_PERMISSIONS: Record<Exclude<Role, 'owner'>, Permission
     'returns.cancel',
     'returns.adjust',
     'items.manage',
+    'stock.manage',
     'customers.view',
     'customers.manage',
     'customers.credit',

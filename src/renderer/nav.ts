@@ -1,5 +1,6 @@
 import {
   BarChart3,
+  Boxes,
   BookOpen,
   Briefcase,
   LayoutDashboard,
@@ -31,6 +32,8 @@ export interface NavGroup {
   to?: string;
   perm?: Permission | Permission[];
   items?: NavLinkItem[];
+  /** Shown only when the business uses this optional feature. */
+  feature?: (f: Features) => boolean;
 }
 
 /** Sidebar navigation. Items the user has no permission for are hidden. */
@@ -45,6 +48,17 @@ export const NAV: NavGroup[] = [
       { label: 'Bills', to: '/sales/bills', perm: ['billing.create', 'billing.view'] },
       { label: 'Returns & credit notes', to: '/sales/returns', perm: ['returns.create', 'returns.adjust'] },
       { label: 'Items & rates', to: '/sales/items', perm: ['items.manage', 'billing.create'] },
+    ],
+  },
+  {
+    key: 'stock',
+    label: 'Stock',
+    icon: Boxes,
+    feature: (f) => f.stock,
+    items: [
+      { label: 'Stock levels', to: '/stock', perm: ['stock.manage', 'items.manage', 'billing.create', 'billing.view', 'purchases.manage', 'reports.financial'] },
+      { label: 'Counts & adjustments', to: '/stock/adjustments', perm: ['stock.manage', 'items.manage', 'purchases.manage'] },
+      { label: 'Opening stock', to: '/stock/opening', perm: 'stock.manage' },
     ],
   },
   {
@@ -82,7 +96,7 @@ export const NAV: NavGroup[] = [
       { label: 'Capital & drawings', to: '/accounts/capital', perm: 'accounts.manage' },
       { label: 'Loans', to: '/accounts/loans', perm: ['accounts.view', 'accounts.manage'] },
       { label: 'Cash & bank transfer', to: '/accounts/transfers', perm: 'accounts.manage' },
-      { label: 'Pay GST', to: '/accounts/gst-payment', perm: 'accounts.manage', feature: (f) => f.gst !== 'none' },
+      { label: 'Pay GST', to: '/accounts/gst-payment', perm: 'accounts.manage', feature: (f) => f.gstRegular || f.gstComposition },
       { label: 'Chart of accounts', to: '/accounts/chart', perm: ['accounts.view', 'accounts.chart'] },
       { label: 'Year-end closing', to: '/accounts/year-end', perm: 'accounts.close_year' },
     ],
@@ -100,7 +114,7 @@ export const NAV: NavGroup[] = [
       { label: 'Cash flow', to: '/reports/cash-flow', perm: 'reports.financial' },
       { label: 'Receivables ageing', to: '/reports/receivables-ageing', perm: ['reports.financial', 'customers.view'] },
       { label: 'Payables ageing', to: '/reports/payables-ageing', perm: ['reports.financial', 'suppliers.view'] },
-      { label: 'GST reports', to: '/reports/gst', perm: 'reports.financial', feature: (f) => f.gst !== 'none' },
+      { label: 'GST reports', to: '/reports/gst', perm: 'reports.financial', feature: (f) => f.gstRegular || f.gstComposition },
     ],
   },
   {

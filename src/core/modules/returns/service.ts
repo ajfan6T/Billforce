@@ -40,8 +40,10 @@ import { assertCancelKeepsClosedAccounts } from '../accounting/common';
 import { openingDebit } from '../customers/common';
 import { netLineAmounts, paidRate, returnLineAmount, returnNoteTotal, returnSettlesBill, roundQty, type BillPaymentMode } from '../../../shared/billing';
 import { billGst, customerBalanceLine, customerSummary, getBillRow, itemCountLine, sendToReceiptPrinter, type BillCustomer, type BillGst, type RevisionSummary } from '../sales/service';
-import { formatRate, stateLabel, taxOf, taxShare, type LineTax } from '../../../shared/gst';
+import { divRound, formatRate, stateLabel, taxOf, type LineTax } from '../../../shared/gst';
 import { gstTable, useGstAccounts } from '../gst/common';
+import { removeDocumentMoves, writeDocumentMoves } from '../stock/service';
+import { stockEnabled } from '../stock/valuation';
 
 /* ------------------------------------------------------------------ */
 /* Types                                                               */
@@ -584,17 +586,42 @@ function billLines(ctx: Ctx, billId: number): BillLine[] {
     .map((l) => ({ ...l, value: (l.taxable ?? 0) + l.cgst + l.sgst + l.igst }));
 }
 
-/** Tax of a return line: its part of the bill line's tax, and all that is left when the line is fully refunded. */
-function returnLineTax(ctx: Ctx, line: BillLine, amount: number, fullyRefunded: boolean): LineTax {
-  const back = ctx.db.get<{ cgst: number; sgst: number; igst: number }>(
-    `SELECT COALESCE(SUM(i.cgst), 0) AS cgst, COALESCE(SUM(i.sgst), 0) AS sgst, COALESCE(SUM(i.igst), 0) AS igst
+/**
+ * Tax of a return line. The tax taken back follows the money refunded on the line so far: after this return,
+ * the line's tax taken back is its tax x (money refunded on the line / line value), less what earlier returns
+ * took back. Taking back the rest of the line at the rate paid (every earlier return too), or all of its money,
+ * takes back exactly the tax that is left.
+ */
+function returnLineTax(ctx: Ctx, line: BillLine, amount: number, takesTheRest: boolean): LineTax {
+  const back = ctx.db.get<{ amount: number; cgst: number; sgst: number; igst: number }>(
+    `SELECT COALESCE(SUM(i.amount), 0) AS amount, COALESCE(SUM(i.cgst), 0) AS cgst, COALESCE(SUM(i.sgst), 0) AS sgst, COALESCE(SUM(i.igst), 0) AS igst
        FROM credit_note_items i JOIN credit_notes n ON n.id = i.credit_note_id
       WHERE i.bill_item_id = ? AND n.status = 'active'`,
     [line.id],
-  ) ?? { cgst: 0, sgst: 0, igst: 0 };
-  const whole = { taxable: line.taxable ?? 0, cgst: line.cgst, sgst: line.sgst, igst: line.igst };
-  const left = { taxable: 0, cgst: Math.max(0, line.cgst - back.cgst), sgst: Math.max(0, line.sgst - back.sgst), igst: Math.max(0, line.igst - back.igst) };
-  return taxShare(whole, line.value, amount, left, fullyRefunded);
+  ) ?? { amount: 0, cgst: 0, sgst: 0, igst: 0 };
+  const refunded = back.amount + amount;
+  const head = (h: 'cgst' | 'sgst' | 'igst') => {
+    const left = Math.max(0, line[h] - back[h]);
+    if (takesTheRest) return left;
+    const target = line.value > 0 ? divRound(line[h] * Math.min(refunded, line.value), line.value) : 0;
+    return Math.min(left, Math.max(0, target - back[h]));
+  };
+  let cgst = head('cgst');
+  let sgst = head('sgst');
+  let igst = head('igst');
+  // Never more tax than the money refunded on this return.
+  const whole = cgst + sgst + igst;
+  if (whole > amount) {
+    cgst = divRound(cgst * amount, whole);
+    sgst = divRound(sgst * amount, whole);
+    igst = divRound(igst * amount, whole);
+    while (cgst + sgst + igst > amount) {
+      if (cgst >= sgst && cgst >= igst) cgst--;
+      else if (sgst >= igst) sgst--;
+      else igst--;
+    }
+  }
+  return { taxable: amount - cgst - sgst - igst, cgst, sgst, igst };
 }
 
 /** Bills to return goods against: search by bill number, customer name or phone (any date). */
@@ -706,9 +733,16 @@ export function createCreditNote(ctx: Ctx, input: CreateCreditNoteInput): Credit
       let tax: LineTax | null = null;
       if (r.bill.gst) {
         const billLine = gstLines.find((l) => l.id === line.billItemId)!;
-        // Everything left of the line at the rate paid (or all of its money) takes back all of its tax that is left.
-        const all = amount >= line.refundable || (qty >= roundQty(line.returnable) && rate === line.netRate);
-        tax = returnLineTax(ctx, billLine, amount, all);
+        // All of the line's money, or the rest of the line at the rate paid when every earlier return on it
+        // was at that rate too, takes back all of its tax that is left.
+        const earlierAtPaidRate = ctx.db.value<number>(
+          `SELECT COUNT(*) FROM credit_note_items i JOIN credit_notes n ON n.id = i.credit_note_id
+            WHERE i.bill_item_id = ? AND n.status = 'active' AND i.rate < ?`,
+          [line.billItemId, line.netRate],
+          0,
+        ) === 0;
+        const rest = amount >= line.refundable || (qty >= roundQty(line.returnable) && rate === line.netRate && earlierAtPaidRate);
+        tax = returnLineTax(ctx, billLine, amount, rest);
       }
       return { billItemId: line.billItemId, itemId: line.itemId, itemName: line.itemName, unit: line.unit, qty, rate, amount, gstRate: line.gstRate, tax };
     });
@@ -814,6 +848,7 @@ export function createCreditNote(ctx: Ctx, input: CreateCreditNoteInput): Credit
     cgst: tax.cgst,
     sgst: tax.sgst,
     igst: tax.igst,
+    stock_tracked: stockEnabled(ctx) ? 1 : 0,
   });
   items.forEach((it, i) => {
     ctx.db.insert('credit_note_items', {
@@ -833,6 +868,17 @@ export function createCreditNote(ctx: Ctx, input: CreateCreditNoteInput): Credit
       igst: it.tax?.igst ?? 0,
     });
   });
+
+  // Stock: goods returned go back into stock on the return date.
+  if (stockEnabled(ctx) && items.length) {
+    writeDocumentMoves(
+      ctx,
+      'credit_note',
+      id,
+      date,
+      items.filter((it) => it.itemId).map((it, i) => ({ itemId: it.itemId!, qty: it.qty, kind: 'sale_return' as const, line: i + 1 })),
+    );
+  }
 
   // With GST the refund includes the tax: Sales Returns gets the value without it and the tax comes off Output GST.
   const lines: EntryLineInput[] = [{ account: 'SALES_RETURNS', debit: subtotal - taxTotal }];
@@ -882,6 +928,7 @@ export function cancelCreditNote(ctx: Ctx, id: number, reason: string): CreditNo
   const refundWarnings = r.customer_id ? watchMoneyRefunds(ctx, r.customer_id) : () => [];
   ctx.db.update('credit_notes', id, { status: 'cancelled', cancelled_by: currentUserId(ctx), cancelled_at: now(ctx), cancel_reason: why });
   if (r.journal_entry_id) voidEntry(ctx, r.journal_entry_id, `${r.cn_no} cancelled: ${why}`);
+  removeDocumentMoves(ctx, 'credit_note', id);
   const detail = getCreditNote(ctx, id);
   recordRevision(ctx, 'credit_note', id, 'cancelled', creditNoteSnapshot(detail), why);
   logActivity(ctx, r.kind === 'return' ? 'return.cancel' : 'credit_note.cancel', `Cancelled ${r.kind === 'return' ? 'sales return' : 'credit note'} ${r.cn_no} (${formatINR(r.total)}). Reason: ${why}`, {

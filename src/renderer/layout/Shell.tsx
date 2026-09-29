@@ -23,7 +23,7 @@ function Sidebar() {
   const groups = useMemo(
     () =>
       NAV.map((g) => ({ ...g, items: g.items?.filter((i) => allowed(can, i.perm) && (!i.feature || i.feature(features))) }))
-        .filter((g) => allowed(can, g.perm))
+        .filter((g) => allowed(can, g.perm) && (!g.feature || g.feature(features)))
         .filter((g) => g.to || (g.items && g.items.length)),
     [can, features],
   );

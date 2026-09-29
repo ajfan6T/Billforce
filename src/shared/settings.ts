@@ -82,9 +82,15 @@ export interface GstSettings {
   compositionRate: number;
 }
 
+export interface StockSettings {
+  /** Track stock: bills take goods out, purchases and returns bring them in (off = as before, no stock screens). */
+  enabled: boolean;
+}
+
 export interface AppSettings {
   business: BusinessSettings;
   gst: GstSettings;
+  stock: StockSettings;
   receipt: ReceiptSettings;
   billing: BillingSettings;
   accounts: AccountSettings;
@@ -98,6 +104,7 @@ export function defaultSettings(today: string): AppSettings {
   return {
     business: { name: '', address: '', phone: '', email: '', upiId: '', upiName: '' },
     gst: { registration: 'unregistered', gstin: '', ratesIncludeGst: true, defaultRate: 18, compositionRate: 1 },
+    stock: { enabled: false },
     receipt: {
       header: '',
       footer: 'Thank you! Visit again.',

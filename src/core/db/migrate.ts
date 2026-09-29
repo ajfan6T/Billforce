@@ -1,6 +1,7 @@
 import type { Db } from './database';
 import { SCHEMA_V1 } from './schema';
 import { GST_COLUMNS, GST_INDEXES } from './schema/gst';
+import { STOCK_COLUMNS, STOCK_SCHEMA } from './schema/stock';
 
 export interface Migration {
   version: number;
@@ -16,6 +17,7 @@ export const MIGRATIONS: Migration[] = [
   { version: 1, name: 'initial schema', up: (db) => db.exec(SCHEMA_V1) },
   { version: 2, name: 'bring pre-release v1 data files up to date', up: (db) => repairPreReleaseV1(db) },
   { version: 3, name: 'GST', up: (db) => addColumns(db, GST_COLUMNS, GST_INDEXES) },
+  { version: 4, name: 'stock', up: (db) => addColumns(db, STOCK_COLUMNS, STOCK_SCHEMA) },
 ];
 
 /** Add columns that are not there yet (so a half-applied or repeated migration is harmless), then indexes. */

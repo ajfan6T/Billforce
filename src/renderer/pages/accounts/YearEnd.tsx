@@ -241,6 +241,12 @@ function CloseYearModal({ year, onClose, onDone }: { year: Year; onClose: () => 
                 <div className="n">Expenses</div>
                 <div className="v">{formatINR(p.year.expenses)}</div>
               </div>
+              {p.stock && (
+                <div className="ac-figure" title="Stock at average cost on the last day of the year; the change in stock is part of the result">
+                  <div className="n">Closing stock</div>
+                  <div className="v">{formatINR(p.stock.value)}</div>
+                </div>
+              )}
               <div className="ac-figure">
                 <div className="n">{profit < 0 ? 'Net loss' : 'Net profit'}</div>
                 <div className={`v ${profit < 0 ? 'neg' : 'pos'}`}>{formatINR(Math.abs(profit))}</div>

@@ -7,11 +7,13 @@ import { accountsPages } from './pages/accounts/routes';
 import { reportsPages } from './pages/reports/routes';
 import { employeesPages } from './pages/employees/routes';
 import { adminPages } from './pages/admin/routes';
+import { stockPages } from './pages/stock/routes';
 
 /** All pages. Each module owns its own list in pages/<module>/routes.tsx. */
 export const APP_ROUTES: AppRoute[] = [
   ...dashboardPages,
   ...salesPages,
+  ...stockPages,
   ...customersPages,
   ...purchasesPages,
   ...accountsPages,

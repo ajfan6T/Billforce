@@ -126,7 +126,7 @@ export function useAuth(): AuthApi {
   return a;
 }
 
-const NO_FEATURES: Features = { gst: 'none', gstDefaultRate: 18, gstInclusive: true };
+const NO_FEATURES: Features = { gst: 'none', gstDefaultRate: 18, gstInclusive: true, gstRegular: false, gstComposition: false, stock: false };
 
 /** Optional features the business has turned on (GST ...); screens for the others stay hidden. */
 export function useFeatures(): Features {

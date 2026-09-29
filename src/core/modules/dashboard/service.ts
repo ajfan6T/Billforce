@@ -9,13 +9,14 @@ import { can, requireSession, today } from '../../context';
 import { getSection } from '../../settings';
 import { addDays, addMonths, diffDays, endOfMonth, formatDate, fyOf, startOfMonth } from '../../../shared/dates';
 import type { PaymentMode, Role } from '../../../shared/constants';
-import { formatINR } from '../../../shared/money';
+import { formatINR, formatQty } from '../../../shared/money';
 import { accountNets, accountsMeta, partyNets, systemId } from '../reports/common';
 import { profitLossFigures } from '../reports/profitLoss';
 import { dailyNetSales, itemSales, salesSummary } from '../reports/sales';
+import { lowStockItems } from '../stock/service';
 
 export interface DashboardAlert {
-  kind: 'backup' | 'credit_limit' | 'negative_balance';
+  kind: 'backup' | 'credit_limit' | 'negative_balance' | 'low_stock';
   tone: 'amber' | 'red';
   title: string;
   message: string;
@@ -168,6 +169,27 @@ function alertsFor(ctx: Ctx, t: string, cashAccounts: ReturnType<typeof cashAcco
         message: `The last backup was taken on ${formatDate(last!.slice(0, 10))}. Take a backup so you do not lose recent bills.`,
         path: '/settings/backup',
         action: 'Back up now',
+      });
+    }
+  }
+  // Stock tracking: items running low or out of stock (for those who buy or look after items).
+  if (can(ctx, 'stock.manage') || can(ctx, 'items.manage') || can(ctx, 'purchases.manage')) {
+    const low = lowStockItems(ctx);
+    if (low.length) {
+      const out = low.filter((i) => i.status !== 'low');
+      const names = low
+        .slice(0, 3)
+        .map((i) => `${i.name} (${formatQty(i.qty)} ${i.unit})`)
+        .join(', ');
+      alerts.push({
+        kind: 'low_stock',
+        tone: out.length ? 'red' : 'amber',
+        title: out.length
+          ? `${out.length} item${out.length === 1 ? ' is' : 's are'} out of stock${low.length > out.length ? `, ${low.length - out.length} running low` : ''}`
+          : `${low.length} item${low.length === 1 ? ' is' : 's are'} running low`,
+        message: `${names}${low.length > 3 ? ` and ${low.length - 3} more` : ''}. Order more, or do a stock count if the shelf does not match.`,
+        path: '/stock?filter=low',
+        action: 'See stock',
       });
     }
   }
