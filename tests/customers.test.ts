@@ -654,7 +654,7 @@ describe('review fixes: credit limits, opening balances and balances need the ri
     expect((await t.fails('customers.get', { id: anil.id })).code).toBe('FORBIDDEN');
     expect((await t.fails('customers.list', {})).code).toBe('FORBIDDEN');
     const hidden = await t.call('customers.search', { q: 'Anil' });
-    expect(hidden).toEqual([{ id: anil.id, name: 'Anil', phone: '90000 00001', balance: 0, creditLimit: null, balanceHidden: true }]);
+    expect(hidden).toEqual([{ id: anil.id, name: 'Anil', phone: '90000 00001', balance: 0, creditLimit: null, balanceHidden: true, gstin: null, stateCode: null }]);
     expect((await t.call('customers.search', { q: '' }))[0]).toMatchObject({ balance: 0, creditLimit: null, balanceHidden: true });
 
     // Taking payments needs the amount due, so "Record payments received" shows it (as customers.get does).

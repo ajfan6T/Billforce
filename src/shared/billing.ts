@@ -4,6 +4,7 @@
  * All amounts are integer paise.
  */
 import { lineAmount, percentOf, roundOffAdjustment } from './money';
+import { lineTax, withoutTax } from './gst';
 
 export interface CalcLineInput {
   qty: number;
@@ -12,6 +13,8 @@ export interface CalcLineInput {
   discount?: number | null;
   /** Line discount as a percentage of qty x rate (0-100). */
   discountPct?: number | null;
+  /** GST rate (percent) of the line; used only when the bill has GST. */
+  gstRate?: number | null;
 }
 
 export interface CalcLine {
@@ -24,12 +27,52 @@ export interface CalcLine {
   amount: number;
 }
 
+/** GST of one bill line (after its share of the bill discount). */
+export interface CalcLineTax {
+  gstRate: number;
+  /** Share of the bill discount. */
+  billDiscountShare: number;
+  taxable: number;
+  cgst: number;
+  sgst: number;
+  igst: number;
+  /** taxable + tax: what the customer pays for the line (before round off). */
+  value: number;
+  /** qty x rate without tax, and the discounts without tax (grossEx - discountEx = taxable). */
+  grossEx: number;
+  discountEx: number;
+}
+
+export interface BillGstInput {
+  /** Rates include GST (tax is taken out of the price) instead of being added on top. */
+  inclusive: boolean;
+  /** Supply to another state: IGST instead of CGST + SGST. */
+  interState: boolean;
+}
+
 export interface BillCalcInput {
   lines: CalcLineInput[];
   billDiscount?: number | null;
   billDiscountPct?: number | null;
   /** Round the total to the nearest rupee (settings.billing.roundOff). */
   roundOff: boolean;
+  /** Charge GST (regular registration). Omit for no GST. */
+  gst?: BillGstInput | null;
+}
+
+export interface BillGstTotals {
+  inclusive: boolean;
+  interState: boolean;
+  lines: CalcLineTax[];
+  taxable: number;
+  cgst: number;
+  sgst: number;
+  igst: number;
+  tax: number;
+  /** Credited to Sales: qty x rate without tax. */
+  grossEx: number;
+  /** Debited to Discount Allowed: item + bill discounts without tax. */
+  discountEx: number;
 }
 
 export interface CalcProblem {
@@ -49,10 +92,12 @@ export interface BillCalc {
   afterItemDiscount: number;
   billDiscount: number;
   billDiscountPct: number | null;
-  /** Total before rounding. */
+  /** Total before rounding (including GST added on top of the rates). */
   beforeRound: number;
   roundOff: number;
   total: number;
+  /** Tax of every line and the bill's tax totals; null when the bill has no GST. */
+  gst: BillGstTotals | null;
   problems: CalcProblem[];
 }
 
@@ -99,7 +144,8 @@ export function calcBill(input: BillCalcInput): BillCalc {
       problems.push({ line: null, field: 'billDiscount', message: 'Bill discount is more than the bill amount' });
     }
   }
-  const beforeRound = afterItemDiscount - billDiscount;
+  const gst = input.gst ? billTax(input.lines, lines, billDiscount, input.gst) : null;
+  const beforeRound = gst ? gst.taxable + gst.tax : afterItemDiscount - billDiscount;
   const roundOff = input.roundOff && beforeRound > 0 ? roundOffAdjustment(beforeRound) : 0;
   return {
     lines,
@@ -111,8 +157,73 @@ export function calcBill(input: BillCalcInput): BillCalc {
     beforeRound,
     roundOff,
     total: beforeRound + roundOff,
+    gst,
     problems,
   };
+}
+
+/**
+ * GST of a bill, line by line: the bill discount is shared over the lines first (so each line's tax is
+ * on what the customer really pays for it), then tax is taken out of the value (rates include GST) or
+ * added on top. With rates that include GST the bill total is the same as without GST.
+ */
+function billTax(inputs: CalcLineInput[], lines: CalcLine[], billDiscount: number, g: BillGstInput): BillGstTotals {
+  const shares = shareDiscount(
+    lines.map((l) => l.amount),
+    billDiscount,
+  );
+  const out: CalcLineTax[] = lines.map((l, i) => {
+    const gstRate = Math.max(0, inputs[i].gstRate ?? 0);
+    const net = l.amount - shares[i];
+    const t = lineTax(net, gstRate, g.inclusive, g.interState);
+    const discount = l.discount + shares[i];
+    const discountEx = g.inclusive ? withoutTax(discount, gstRate) : discount;
+    return {
+      gstRate,
+      billDiscountShare: shares[i],
+      ...t,
+      value: t.taxable + t.cgst + t.sgst + t.igst,
+      grossEx: t.taxable + discountEx,
+      discountEx,
+    };
+  });
+  const sum = (k: 'taxable' | 'cgst' | 'sgst' | 'igst' | 'grossEx' | 'discountEx') => out.reduce((s, l) => s + l[k], 0);
+  const cgst = sum('cgst');
+  const sgst = sum('sgst');
+  const igst = sum('igst');
+  return {
+    inclusive: g.inclusive,
+    interState: g.interState,
+    lines: out,
+    taxable: sum('taxable'),
+    cgst,
+    sgst,
+    igst,
+    tax: cgst + sgst + igst,
+    grossEx: sum('grossEx'),
+    discountEx: sum('discountEx'),
+  };
+}
+
+/** GST rate-wise totals of a bill (for the tax table on invoices and the HSN / rate summaries). */
+export function taxByRate(lines: Array<{ gstRate: number | null; taxable: number | null; cgst: number; sgst: number; igst: number }>): Array<{
+  rate: number;
+  taxable: number;
+  cgst: number;
+  sgst: number;
+  igst: number;
+}> {
+  const map = new Map<number, { rate: number; taxable: number; cgst: number; sgst: number; igst: number }>();
+  for (const l of lines) {
+    const rate = l.gstRate ?? 0;
+    const r = map.get(rate) ?? { rate, taxable: 0, cgst: 0, sgst: 0, igst: 0 };
+    r.taxable += l.taxable ?? 0;
+    r.cgst += l.cgst;
+    r.sgst += l.sgst;
+    r.igst += l.igst;
+    map.set(rate, r);
+  }
+  return [...map.values()].sort((a, b) => a.rate - b.rate);
 }
 
 export type BillPaymentMode = 'cash' | 'upi' | 'bank' | 'credit' | 'split';

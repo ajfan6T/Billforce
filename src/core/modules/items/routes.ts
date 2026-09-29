@@ -18,6 +18,9 @@ const zItemInput = z.object({
     .max(60)
     .nullish()
     .transform((v) => v || null),
+  /** GST fields: left out = unchanged. */
+  hsn: z.string().trim().max(8).nullable().optional(),
+  gstRate: z.number().min(0).max(40).nullable().optional(),
 });
 
 const VIEW = ['billing.create', 'items.manage', 'billing.view'] as const;

@@ -698,7 +698,7 @@ describe('upgrading older data files', () => {
 
   it('adds columns and indexes that early builds did not have (migration 2)', async () => {
     const { Db } = await import('../src/core/db/database');
-    const { migrate } = await import('../src/core/db/migrate');
+    const { migrate, LATEST_SCHEMA_VERSION } = await import('../src/core/db/migrate');
     const db = new Db(':memory:');
     migrate(db);
     // Simulate an early build's file: drop a late column and an index, and go back to version 1.
@@ -711,11 +711,11 @@ describe('upgrading older data files', () => {
     expect(db.all<{ name: string }>('PRAGMA table_info(salaries)').some((c) => c.name === 'print_count')).toBe(true);
     expect(db.value<number>("SELECT COUNT(*) FROM sqlite_master WHERE name = 'idx_salaries_month'")).toBe(1);
     expect(db.value<string>("SELECT sql FROM sqlite_master WHERE name = 'idx_jl_party'")).toMatch(/debit/);
-    expect(db.value<number>('PRAGMA user_version')).toBe(2);
+    expect(db.value<number>('PRAGMA user_version')).toBe(LATEST_SCHEMA_VERSION);
     // Running it on a fresh file changes nothing.
     const fresh = new Db(':memory:');
     migrate(fresh);
-    expect(fresh.value<number>('PRAGMA user_version')).toBe(2);
+    expect(fresh.value<number>('PRAGMA user_version')).toBe(LATEST_SCHEMA_VERSION);
     db.close();
     fresh.close();
   });

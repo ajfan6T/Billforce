@@ -24,6 +24,8 @@ import { createCustomer, getCustomer, updateCustomer } from '../customers/servic
 import { createSupplier, getSupplier, updateSupplier } from '../suppliers/service';
 import { createEmployee, getEmployeeRow, openingAdvanceOf, updateEmployee, type EmployeeRow } from '../employees/service';
 import { openingDebit, phoneKey } from '../customers/common';
+import { gstConfig } from '../gst/common';
+import { GST_RATES, formatRate, hsnProblem, isGstRate } from '../../../shared/gst';
 import { cellText, normHeader, normHeaderFull, parseAmount, parseDateCell, phoneText, readSheet, type Cell, type ParsedSheet, type SheetRow } from './sheet';
 
 export const IMPORT_TYPES = ['items', 'customers', 'suppliers', 'employees'] as const;
@@ -37,6 +39,8 @@ export interface FieldDef {
   hint?: string;
   /** Column names that mean this field (compared after lower-casing and removing punctuation). */
   synonyms: string[];
+  /** Only for businesses registered for GST (regular); such fields come last. */
+  gst?: boolean;
 }
 
 interface TypeDef {
@@ -67,10 +71,12 @@ const DEFS: Record<ImportType, TypeDef> = {
       { key: 'unit', label: 'Unit', hint: 'pcs, kg, ltr, box… (default pcs)', synonyms: ['unit', 'units', 'uom', 'unit of measure', 'unit of measurement', 'measure'] },
       { key: 'rate', label: 'Rate', hint: 'Default selling rate in ₹', synonyms: ['rate', 'price', 'selling price', 'sale price', 'sales price', 'selling rate', 'sale rate', 'mrp', 'default rate', 'unit price', 'rate per unit', 'price per unit', 'amount', 'sp'] },
       { key: 'category', label: 'Category', synonyms: ['category', 'group', 'item group', 'type', 'department', 'section', 'item category'] },
+      { key: 'hsn', label: 'HSN code', hint: 'HSN / SAC code, 4, 6 or 8 digits', gst: true, synonyms: ['hsn', 'hsn code', 'hsn sac', 'hsn sac code', 'sac', 'sac code'] },
+      { key: 'gstRate', label: 'GST %', hint: 'GST rate, e.g. 5 or 18 (blank = your usual rate)', gst: true, synonyms: ['gst', 'gst %', 'gst rate', 'gst percent', 'gst percentage', 'tax', 'tax %', 'tax rate'] },
     ],
     examples: [
-      ['Sugar 1 kg', 'SUG1', 'pcs', '48.00', 'Grocery'],
-      ['Basmati Rice 25 kg', 'BR25', 'bag', '1,850.00', 'Grocery'],
+      ['Sugar 1 kg', 'SUG1', 'pcs', '48.00', 'Grocery', '1701', '5'],
+      ['Basmati Rice 25 kg', 'BR25', 'bag', '1,850.00', 'Grocery', '1006', '5'],
     ],
     notes: () => [
       'One row per item. Keep the first row (the column names) as it is and delete the two example rows.',
@@ -156,9 +162,17 @@ const DEFS: Record<ImportType, TypeDef> = {
   },
 };
 
+/** The import definition as this business uses it: GST columns only when registered for GST. */
+function defFor(ctx: Ctx, type: ImportType): TypeDef {
+  const d = DEFS[type];
+  if (!d || gstConfig(ctx).mode === 'regular' || !d.fields.some((f) => f.gst)) return d;
+  const fields = d.fields.filter((f) => !f.gst);
+  return { ...d, fields, examples: d.examples.map((row) => row.slice(0, fields.length)) };
+}
+
 export function importTypes(ctx: Ctx) {
   return IMPORT_TYPES.map((t) => {
-    const d = DEFS[t];
+    const d = defFor(ctx, t);
     return {
       type: t,
       label: d.label,
@@ -178,7 +192,7 @@ function ctxCan(ctx: Ctx, p: Permission): boolean {
 /* ------------------------------ Templates ------------------------------ */
 
 export async function buildTemplate(ctx: Ctx, type: ImportType, format: 'xlsx' | 'csv'): Promise<{ fileName: string; data: Uint8Array | string }> {
-  const d = DEFS[type];
+  const d = defFor(ctx, type);
   const header = d.fields.map((f) => f.label);
   const fileName = `Billforce ${d.label.replace(/[^A-Za-z ]/g, '').trim()} template.${format}`.replace(/\s+/g, '-');
   if (format === 'csv') return { fileName, data: rowsToCsv(header, d.examples) };
@@ -557,6 +571,18 @@ function prepareRows(ctx: Ctx, def: TypeDef, sheet: ParsedSheet, headerIdx: numb
       if (unit) r.values.unit = unit;
       const rate = r.amount('rate', { max: 1_000_000_000_00 });
       const category = r.text('category', 60);
+      const withGst = def.fields.some((f) => f.key === 'gstRate');
+      const hsn = withGst ? r.text('hsn', 8) : undefined;
+      if (hsn && hsnProblem(hsn)) r.error('hsn', hsnProblem(hsn)!.replace(/^HSN \/ SAC code /, ''));
+      let gstRate: number | undefined;
+      const rateText = withGst ? cellText(r.raw('gstRate')).replace(/%/g, '').trim() : '';
+      if (rateText) {
+        const n = Number(rateText);
+        if (isGstRate(n)) {
+          gstRate = n;
+          r.values.gstRate = formatRate(n);
+        } else r.error('gstRate', `"${rateText}" is not a GST rate (use ${GST_RATES.join(', ')})`);
+      }
       if (name) {
         const key = `n:${lower(name)}`;
         const earlier = seen.get(key);
@@ -573,13 +599,15 @@ function prepareRows(ctx: Ctx, def: TypeDef, sheet: ParsedSheet, headerIdx: numb
             ['unit', ex.unit, unit],
             ['rate', ex.rate, rate],
             ['category', ex.category, category],
+            ['HSN', ex.hsn, hsn],
+            ['GST', ex.gstRate === null ? undefined : formatRate(ex.gstRate), gstRate === undefined ? undefined : formatRate(gstRate)],
           ]);
           if (reactivate) changes.push('re-activate');
         } else if (rate === undefined && !r.fieldErrors.rate) {
           r.warnings.push('No rate - you can type the rate when billing');
         }
       }
-      data = { name, code, unit, rate, category };
+      data = { name, code, unit, rate, category, hsn, gstRate };
     } else if (def.type === 'customers') {
       const phone = r.phone('phone');
       const address = r.text('address', 500, { multiline: true });
@@ -748,8 +776,8 @@ function countsOf(rows: PreviewRow[]): PreviewCounts {
 
 async function analyse(ctx: Ctx, type: ImportType, file: string, mappingIn: Mapping | null | undefined, mode: DuplicateMode) {
   requireSession(ctx);
-  const def = DEFS[type];
-  if (!def) throw fail.validation('Choose what to import');
+  if (!DEFS[type]) throw fail.validation('Choose what to import');
+  const def = defFor(ctx, type);
   assertCan(ctx, def.permission, `You do not have permission to add ${def.label.toLowerCase()}, so you cannot import them.`);
   const sheet = await readSheet(file);
   if (!sheet.rows.length) throw fail.validation('The file is empty. Add a row of column names and at least one row of data.');
@@ -845,10 +873,18 @@ function applyRow(ctx: Ctx, type: ImportType, row: Prepared): void {
   const d = row.data!;
   if (type === 'items') {
     if (row.action === 'create') {
-      createItem(ctx, { name: d.name, code: d.code ?? null, unit: d.unit ?? 'pcs', rate: d.rate ?? 0, category: d.category ?? null });
+      createItem(ctx, { name: d.name, code: d.code ?? null, unit: d.unit ?? 'pcs', rate: d.rate ?? 0, category: d.category ?? null, hsn: d.hsn, gstRate: d.gstRate });
     } else {
       const ex = getItem(ctx, row.matchId!);
-      updateItem(ctx, ex.id, { name: d.name ?? ex.name, code: d.code ?? ex.code, unit: d.unit ?? ex.unit, rate: d.rate ?? ex.rate, category: d.category ?? ex.category });
+      updateItem(ctx, ex.id, {
+        name: d.name ?? ex.name,
+        code: d.code ?? ex.code,
+        unit: d.unit ?? ex.unit,
+        rate: d.rate ?? ex.rate,
+        category: d.category ?? ex.category,
+        hsn: d.hsn,
+        gstRate: d.gstRate,
+      });
       if (row.reactivate) setItemActive(ctx, ex.id, true);
     }
   } else if (type === 'customers') {

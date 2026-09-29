@@ -15,11 +15,14 @@ import { logActivity } from '../../audit';
 import { getMeta, getSection, getSettings, updateSection } from '../../settings';
 import { formatDocNumber } from '../../numbering';
 import { renderReceiptHtml, upiLink, type ReceiptDoc, type ReceiptTotal } from '../../print/receipt';
-import type { AppSettings, BusinessSettings, ReceiptSettings } from '../../../shared/settings';
+import type { AppSettings, BusinessSettings, GstSettings, ReceiptSettings } from '../../../shared/settings';
+import { calcBill } from '../../../shared/billing';
+import { gstTable, useGstAccounts } from '../gst/common';
 import { PAYMENT_MODES, PAYMENT_MODE_LABELS, SEQUENCE_KEYS, SEQUENCE_LABELS, type SequenceKey } from '../../../shared/constants';
-import { amountInWords, formatAmount, formatINR, lineAmount, percentOf, roundOffAdjustment } from '../../../shared/money';
+import { amountInWords, formatAmount, formatINR } from '../../../shared/money';
 import { formatDate, formatTime, fyOf } from '../../../shared/dates';
 import { backupFolder } from '../data/backup';
+import { COMPOSITION_RATES, GST_REGISTRATION_LABELS, GST_REGISTRATIONS, formatRate, gstinProblem, isGstRate, normalizeGstin } from '../../../shared/gst';
 
 /* ------------------------------ Schemas ------------------------------ */
 
@@ -100,11 +103,29 @@ export const BACKUP_SCHEMA = z.object({
     .max(365, 'At most 365 automatic backups'),
 });
 
-export const EDITABLE_SECTIONS = ['business', 'receipt', 'billing', 'security', 'backup'] as const;
+export const GST_SCHEMA = z.object({
+  registration: z.enum(GST_REGISTRATIONS, { message: 'Choose how the business is registered for GST' }),
+  gstin: z
+    .string()
+    .max(20, 'A GSTIN has 15 characters')
+    .transform((v) => normalizeGstin(v))
+    .superRefine((v, c) => {
+      const problem = v ? gstinProblem(v) : null;
+      if (problem) c.addIssue({ code: 'custom', message: problem });
+    }),
+  ratesIncludeGst: z.boolean(),
+  defaultRate: z.number({ message: 'Choose the usual GST rate' }).refine(isGstRate, 'Choose a GST rate from the list'),
+  compositionRate: z
+    .number({ message: 'Choose the composition tax rate' })
+    .refine((v) => (COMPOSITION_RATES as readonly number[]).includes(v), 'Choose 1%, 5% or 6%'),
+});
+
+export const EDITABLE_SECTIONS = ['business', 'gst', 'receipt', 'billing', 'security', 'backup'] as const;
 export type EditableSection = (typeof EDITABLE_SECTIONS)[number];
 
 const SCHEMAS = {
   business: BUSINESS_SCHEMA,
+  gst: GST_SCHEMA,
   receipt: RECEIPT_SCHEMA,
   billing: BILLING_SCHEMA,
   security: SECURITY_SCHEMA,
@@ -113,6 +134,7 @@ const SCHEMAS = {
 
 const SECTION_LABELS: Record<EditableSection, string> = {
   business: 'business',
+  gst: 'GST',
   receipt: 'receipt & printer',
   billing: 'billing',
   security: 'security',
@@ -126,6 +148,11 @@ const FIELD_LABELS: Record<string, string> = {
   'business.email': 'email',
   'business.upiId': 'UPI ID',
   'business.upiName': 'UPI payee name',
+  'gst.registration': 'GST registration',
+  'gst.gstin': 'GSTIN',
+  'gst.ratesIncludeGst': 'rates include GST',
+  'gst.defaultRate': 'usual GST rate',
+  'gst.compositionRate': 'composition tax rate',
   'receipt.header': 'receipt header',
   'receipt.footer': 'receipt footer',
   'receipt.paperWidth': 'paper width',
@@ -186,6 +213,8 @@ function describeValue(key: string, v: unknown): string {
   if (key === 'receipt.printerName') return v ? `"${v}"` : 'ask every time';
   if (key === 'receipt.upiQr') return v === 'unpaid' ? 'when unpaid' : String(v);
   if (key === 'receipt.fontSize') return String(v);
+  if (key === 'gst.registration') return GST_REGISTRATION_LABELS[v as keyof typeof GST_REGISTRATION_LABELS] ?? String(v);
+  if (key === 'gst.defaultRate' || key === 'gst.compositionRate') return typeof v === 'number' ? formatRate(v) : String(v);
   if (typeof v === 'string') return v.length > 40 || v.includes('\n') ? '' : v ? `"${v}"` : 'blank';
   return String(v);
 }
@@ -250,6 +279,15 @@ export function updateSettings(ctx: Ctx, section: string, values: Record<string,
       throw fail.validation(`Each document series needs its own prefix. "${merged[key]}" is used for both ${SEQUENCE_LABELS[seen.get(merged[key])!].toLowerCase()} and ${SEQUENCE_LABELS[key].toLowerCase()}.`, fields);
     }
   }
+  if (sec === 'gst') {
+    const registration = (patch.registration ?? before.registration) as string;
+    const gstin = (patch.gstin ?? before.gstin) as string;
+    if (registration !== 'unregistered') {
+      if (!gstin) throw fail.validation('Enter the GSTIN of the business to bill with GST.', { gstin: 'Enter the GSTIN' });
+      const problem = gstinProblem(gstin);
+      if (problem) throw fail.validation(problem, { gstin: problem });
+    }
+  }
   if (sec === 'backup' && typeof patch.folder === 'string' && patch.folder && patch.folder !== before.folder) {
     const problem = folderProblem(patch.folder);
     if (problem) throw fail.validation(problem, { folder: problem });
@@ -260,6 +298,7 @@ export function updateSettings(ctx: Ctx, section: string, values: Record<string,
   const changedKeys = Object.keys(patch).filter((k) => JSON.stringify(nextValue(k)) !== JSON.stringify(before[k]));
   if (!changedKeys.length) return { section: sec, values: before as any, changed: [] };
   const after = updateSection(ctx, sec, patch as any) as unknown as Record<string, unknown>;
+  if (sec === 'gst' && after.registration !== 'unregistered') useGstAccounts(ctx);
   const pick = (o: Record<string, unknown>) => Object.fromEntries(changedKeys.map((k) => [k, o[k]]));
   logActivity(ctx, 'settings.update', `Changed ${SECTION_LABELS[sec]} settings: ${changeText(sec, before, after, changedKeys)}`, {
     entityType: 'settings',
@@ -287,30 +326,30 @@ function overlay<T extends object>(saved: T, schema: z.ZodObject<any>, unsaved: 
 export interface PreviewInput {
   business?: Record<string, unknown> | null;
   receipt?: Record<string, unknown> | null;
+  gst?: Record<string, unknown> | null;
   /** Show the sample as a reprint (DUPLICATE, when that setting is on). */
   duplicate?: boolean;
 }
 
 /** A realistic bill printed with the given settings (used for the live preview and test print). */
-export function sampleBillDoc(ctx: Ctx, business: BusinessSettings, receipt: ReceiptSettings, duplicate: boolean): ReceiptDoc {
+export function sampleBillDoc(ctx: Ctx, business: BusinessSettings, receipt: ReceiptSettings, duplicate: boolean, gst: GstSettings = getSection(ctx, 'gst')): ReceiptDoc {
   const billing = getSection(ctx, 'billing');
   const date = today(ctx);
   const lines = [
-    { name: 'Toor Dal 1 kg', qty: 2, unit: 'pcs', rate: 14500, pct: 0 },
-    { name: 'Basmati Rice 5 kg', qty: 1, unit: 'bag', rate: 52000, pct: 0 },
-    { name: 'Sunflower Oil 1 L', qty: 3, unit: 'bottle', rate: 16250, pct: 5 },
-    { name: 'Parle-G Biscuits', qty: 6, unit: 'pcs', rate: 1000, pct: 0 },
+    { name: 'Toor Dal 1 kg', qty: 2, unit: 'pcs', rate: 14500, pct: 0, hsn: '0713', gstRate: 5 },
+    { name: 'Basmati Rice 5 kg', qty: 1, unit: 'bag', rate: 52000, pct: 0, hsn: '1006', gstRate: 5 },
+    { name: 'Sunflower Oil 1 L', qty: 3, unit: 'bottle', rate: 16250, pct: 5, hsn: '1512', gstRate: 5 },
+    { name: 'Parle-G Biscuits', qty: 6, unit: 'pcs', rate: 1000, pct: 0, hsn: '1905', gstRate: 18 },
   ];
-  const items = lines.map((l) => {
-    const gross = lineAmount(l.qty, l.rate);
-    const discount = l.pct ? percentOf(gross, l.pct) : 0;
-    return { ...l, gross, discount };
+  const mode = gst.registration;
+  const gstin = normalizeGstin(gst.gstin);
+  const taxInvoice = mode === 'regular';
+  const calc = calcBill({
+    lines: lines.map((l) => ({ qty: l.qty, rate: l.rate, discountPct: l.pct || null, gstRate: l.gstRate })),
+    roundOff: billing.roundOff,
+    gst: taxInvoice ? { inclusive: gst.ratesIncludeGst, interState: false } : null,
   });
-  const subtotal = items.reduce((s, i) => s + i.gross, 0);
-  const itemDiscount = items.reduce((s, i) => s + i.discount, 0);
-  const beforeRound = subtotal - itemDiscount;
-  const roundOff = billing.roundOff ? roundOffAdjustment(beforeRound) : 0;
-  const total = beforeRound + roundOff;
+  const { subtotal, itemDiscount, roundOff, total } = calc;
   const paid = 100000;
   const credit = Math.max(0, total - paid);
 
@@ -322,12 +361,19 @@ export function sampleBillDoc(ctx: Ctx, business: BusinessSettings, receipt: Rec
   const totals: ReceiptTotal[] = [];
   totals.push({ label: 'Subtotal', value: formatINR(subtotal) });
   if (itemDiscount) totals.push({ label: 'Item discount', value: `-${formatINR(itemDiscount)}` });
+  if (calc.gst && !calc.gst.inclusive) {
+    totals.push({ label: 'Taxable value', value: formatINR(calc.gst.taxable) });
+    totals.push({ label: 'CGST', value: formatINR(calc.gst.cgst) });
+    totals.push({ label: 'SGST', value: formatINR(calc.gst.sgst) });
+  }
   if (roundOff) totals.push({ label: 'Round off', value: formatINR(roundOff, { plus: true }) });
   totals.push({ label: 'TOTAL', value: formatINR(total), big: true });
   totals.push({ label: `Paid by ${PAYMENT_MODE_LABELS.cash}`, value: formatINR(paid) });
   if (credit) totals.push({ label: 'Balance on credit', value: formatINR(credit), bold: true });
 
-  const extra: string[] = [`Items: ${items.length}`];
+  const extra: string[] = [`Items: ${lines.length}`];
+  if (calc.gst?.inclusive) extra.push(`Prices include GST of ${formatINR(calc.gst.tax)}`);
+  if (mode === 'composition') extra.push('Composition taxable person, not eligible to collect tax on supplies');
   if (itemDiscount) extra.push(`You saved ${formatINR(itemDiscount)} on this bill`);
   if (receipt.showAmountInWords) extra.push(amountInWords(total));
   if (credit) extra.push(`Total due from you: ${formatINR(credit + 50000)} (as on ${formatDate(date)})`);
@@ -338,19 +384,22 @@ export function sampleBillDoc(ctx: Ctx, business: BusinessSettings, receipt: Rec
     const amount = credit > 0 ? credit : total;
     qr = { data: upiLink(upiId, business.upiName?.trim() || business.name || 'Shop', amount, 'Bill sample'), caption: `Scan to pay ${formatINR(amount)} by UPI` };
   }
+  const taxLines = calc.gst ? calc.gst.lines.map((t) => ({ gstRate: t.gstRate, taxable: t.taxable, cgst: t.cgst, sgst: t.sgst, igst: t.igst })) : [];
   return {
-    title: 'BILL',
+    title: taxInvoice ? 'TAX INVOICE' : mode === 'composition' ? 'BILL OF SUPPLY' : 'BILL',
+    headerLines: mode !== 'unregistered' && gstin ? [`GSTIN: ${gstin}`] : undefined,
     duplicate: duplicate && receipt.markDuplicate,
     meta,
     party: receipt.showCustomer ? { label: 'Customer', name: 'Anita Desai', phone: '98200 11111' } : undefined,
-    items: items.map((i) => ({
-      name: i.name,
-      qty: `${i.qty} ${i.unit}`,
-      rate: formatAmount(i.rate),
-      amount: formatAmount(i.gross),
-      note: i.discount ? `Less discount ${i.pct}%: -${formatAmount(i.discount)}` : undefined,
-    })),
+    items: lines.map((l, i) => {
+      const c = calc.lines[i];
+      const notes: string[] = [];
+      if (taxInvoice) notes.push(`HSN ${l.hsn} · GST ${formatRate(l.gstRate)}`);
+      if (c.discount) notes.push(`Less discount ${l.pct}%: -${formatAmount(c.discount)}`);
+      return { name: l.name, qty: `${l.qty} ${l.unit}`, rate: formatAmount(l.rate), amount: formatAmount(c.gross), note: notes.join(' · ') || undefined };
+    }),
     totals,
+    table: taxInvoice ? gstTable(taxLines, false) : undefined,
     lines: extra,
     qr,
   };
@@ -360,7 +409,8 @@ export function receiptPreview(ctx: Ctx, input: PreviewInput): { html: string; p
   requireSession(ctx);
   const business = overlay(getSection(ctx, 'business'), BUSINESS_SCHEMA, input.business);
   const receipt = overlay(getSection(ctx, 'receipt'), RECEIPT_SCHEMA, input.receipt);
-  const html = renderReceiptHtml(sampleBillDoc(ctx, business, receipt, !!input.duplicate), business, receipt);
+  const gst = overlay(getSection(ctx, 'gst'), GST_SCHEMA, input.gst);
+  const html = renderReceiptHtml(sampleBillDoc(ctx, business, receipt, !!input.duplicate, gst), business, receipt);
   return { html, paperWidth: receipt.paperWidth, business, receipt };
 }
 

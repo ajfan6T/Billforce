@@ -3,6 +3,7 @@ import { now } from '../../context';
 import { AppError } from '../../errors';
 import { logActivity } from '../../audit';
 import { formatINR } from '../../../shared/money';
+import { formatRate, hsnProblem, isGstRate } from '../../../shared/gst';
 
 export interface ItemRow {
   id: number;
@@ -11,6 +12,8 @@ export interface ItemRow {
   unit: string;
   rate: number;
   category: string | null;
+  hsn: string | null;
+  gst_rate: number | null;
   is_active: number;
   use_count: number;
   last_used_at: string | null;
@@ -26,6 +29,10 @@ export interface Item {
   /** Default selling rate in paise. */
   rate: number;
   category: string | null;
+  /** HSN / SAC code (GST). */
+  hsn: string | null;
+  /** GST rate in percent; null = the business's default rate. */
+  gstRate: number | null;
   isActive: boolean;
   useCount: number;
   lastUsedAt: string | null;
@@ -39,6 +46,8 @@ export function toItem(r: ItemRow): Item {
     unit: r.unit,
     rate: r.rate,
     category: r.category,
+    hsn: r.hsn,
+    gstRate: r.gst_rate,
     isActive: !!r.is_active,
     useCount: r.use_count,
     lastUsedAt: r.last_used_at,
@@ -112,6 +121,25 @@ export interface ItemInput {
   unit: string;
   rate: number;
   category?: string | null;
+  /** Left out = unchanged (forms of unregistered businesses do not show GST fields). */
+  hsn?: string | null;
+  gstRate?: number | null;
+}
+
+/** The GST columns of an item input (only those given). */
+function gstColumns(input: ItemInput): Record<string, unknown> {
+  const out: Record<string, unknown> = {};
+  if (input.hsn !== undefined) {
+    const hsn = input.hsn?.trim() || null;
+    const problem = hsnProblem(hsn);
+    if (problem) throw new AppError('VALIDATION', problem, { hsn: problem });
+    out.hsn = hsn;
+  }
+  if (input.gstRate !== undefined) {
+    if (input.gstRate !== null && !isGstRate(input.gstRate)) throw new AppError('VALIDATION', 'Choose a GST rate from the list', { gstRate: 'Choose a GST rate' });
+    out.gst_rate = input.gstRate;
+  }
+  return out;
 }
 
 function assertUniqueName(ctx: Ctx, name: string, exceptId?: number) {
@@ -127,6 +155,7 @@ export function createItem(ctx: Ctx, input: ItemInput): Item {
     unit: input.unit || 'pcs',
     rate: input.rate,
     category: input.category || null,
+    ...gstColumns(input),
     created_at: now(ctx),
   });
   logActivity(ctx, 'item.create', `Added item "${input.name}" at ${formatINR(input.rate)}/${input.unit}`, { entityType: 'item', entityId: id });
@@ -142,17 +171,21 @@ export function updateItem(ctx: Ctx, id: number, input: ItemInput): Item {
     unit: input.unit || 'pcs',
     rate: input.rate,
     category: input.category || null,
+    ...gstColumns(input),
     updated_at: now(ctx),
   });
+  const after = getItem(ctx, id);
   const changes: string[] = [];
   if (before.rate !== input.rate) changes.push(`rate ${formatINR(before.rate)} → ${formatINR(input.rate)}`);
+  if (before.gstRate !== after.gstRate) changes.push(`GST ${before.gstRate === null ? 'default' : formatRate(before.gstRate)} → ${after.gstRate === null ? 'default' : formatRate(after.gstRate)}`);
+  if ((before.hsn ?? '') !== (after.hsn ?? '')) changes.push(`HSN ${before.hsn || 'none'} → ${after.hsn || 'none'}`);
   if (before.name !== input.name) changes.push(`renamed from "${before.name}"`);
   logActivity(ctx, 'item.update', `Updated item "${input.name}"${changes.length ? ': ' + changes.join(', ') : ''}`, {
     entityType: 'item',
     entityId: id,
-    details: { before, after: input },
+    details: { before, after },
   });
-  return getItem(ctx, id);
+  return after;
 }
 
 /** Change only the default rate (quick edit from the item list). */

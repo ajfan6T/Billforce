@@ -35,6 +35,7 @@ export const FLOW_LINES: FlowLine[] = [
   { key: 'salaries', label: 'Salaries & wages', activity: 'operating' },
   { key: 'emp_adv', label: 'Advances to employees', activity: 'operating' },
   { key: 'other_income', label: 'Other income', activity: 'operating' },
+  { key: 'gst', label: 'GST collected less GST paid', activity: 'operating' },
   { key: 'other_current', label: 'Deposits & other current items', activity: 'operating' },
   { key: 'other', label: 'Other', activity: 'operating' },
   { key: 'fixed_assets', label: 'Fixed assets bought / sold', activity: 'investing' },
@@ -74,6 +75,14 @@ export function flowLineOf(a: Pick<AccountMeta, 'groupCode' | 'systemKey'>): str
       return 'interest_received';
     case 'INTEREST_EXPENSE':
       return 'interest_paid';
+    case 'GST_OUT_CGST':
+    case 'GST_OUT_SGST':
+    case 'GST_OUT_IGST':
+    case 'GST_IN_CGST':
+    case 'GST_IN_SGST':
+    case 'GST_IN_IGST':
+    case 'COMPOSITION_TAX':
+      return 'gst';
   }
   switch (a.groupCode) {
     case 'sales':

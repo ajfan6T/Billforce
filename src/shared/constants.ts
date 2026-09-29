@@ -60,6 +60,7 @@ export const VOUCHER_TYPES = [
   'salary_payment',
   'opening',
   'closing',
+  'gst_payment',
 ] as const;
 export type VoucherType = (typeof VOUCHER_TYPES)[number];
 
@@ -80,6 +81,7 @@ export const VOUCHER_TYPE_LABELS: Record<VoucherType, string> = {
   salary_payment: 'Salary Payment',
   opening: 'Opening Balance',
   closing: 'Year-end Closing',
+  gst_payment: 'GST Payment',
 };
 
 export const PARTY_TYPES = ['customer', 'supplier', 'employee'] as const;

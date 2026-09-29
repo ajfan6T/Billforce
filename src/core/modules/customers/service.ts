@@ -11,6 +11,7 @@ import { formatINR } from '../../../shared/money';
 import type { ReportData, ReportRow } from '../../../shared/report';
 import { cleanPhone, itemsSummary, normalizeEmail, openingDebit, PHONE_KEY_SQL, phoneKey } from './common';
 import { partyStatement } from './statement';
+import { partyGstColumns } from '../gst/common';
 
 /*
  * CONTRACT functions used by other modules (billing screen, receipts, import):
@@ -27,6 +28,9 @@ export interface CustomerSummary {
   creditLimit: number | null;
   /** The user may not see customer balances ("View customers & balances"): balance and creditLimit are blanked. */
   balanceHidden?: boolean;
+  /** GSTIN (registered businesses buying from you) and state (place of supply). */
+  gstin?: string | null;
+  stateCode?: string | null;
 }
 
 /**
@@ -41,34 +45,47 @@ export function canSeeCustomerBalances(ctx: Ctx): boolean {
 /** Type-ahead search by name or phone; includes each customer's current balance (for users allowed to see it). */
 export function searchCustomers(ctx: Ctx, q: string, limit = 10): CustomerSummary[] {
   const text = q.trim();
-  const rows = ctx.db.all<{ id: number; name: string; phone: string | null; credit_limit: number | null }>(
+  const rows = ctx.db.all<{ id: number; name: string; phone: string | null; credit_limit: number | null; gstin: string | null; state_code: string | null }>(
     text
-      ? `SELECT id, name, phone, credit_limit FROM customers
-          WHERE is_active = 1 AND (name LIKE :like OR REPLACE(phone, ' ', '') LIKE :phone)
+      ? `SELECT id, name, phone, credit_limit, gstin, state_code FROM customers
+          WHERE is_active = 1 AND (name LIKE :like OR REPLACE(phone, ' ', '') LIKE :phone OR gstin LIKE :gstin)
           ORDER BY CASE WHEN name LIKE :prefix THEN 0 ELSE 1 END, name COLLATE NOCASE LIMIT :limit`
-      : `SELECT id, name, phone, credit_limit FROM customers WHERE is_active = 1 ORDER BY id DESC LIMIT :limit`,
-    text ? { like: `%${text}%`, phone: `%${text.replace(/\s/g, '')}%`, prefix: `${text}%`, limit } : { limit },
+      : `SELECT id, name, phone, credit_limit, gstin, state_code FROM customers WHERE is_active = 1 ORDER BY id DESC LIMIT :limit`,
+    text ? { like: `%${text}%`, phone: `%${text.replace(/\s/g, '')}%`, gstin: `${text.toUpperCase()}%`, prefix: `${text}%`, limit } : { limit },
   );
+  const gst = (r: (typeof rows)[number]) => ({ gstin: r.gstin, stateCode: r.state_code });
   if (!canSeeCustomerBalances(ctx)) {
-    return rows.map((r) => ({ id: r.id, name: r.name, phone: r.phone, balance: 0, creditLimit: null, balanceHidden: true }));
+    return rows.map((r) => ({ id: r.id, name: r.name, phone: r.phone, balance: 0, creditLimit: null, balanceHidden: true, ...gst(r) }));
   }
   const balances = partyBalances(ctx, 'customer', { account: 'AR' });
-  return rows.map((r) => ({ id: r.id, name: r.name, phone: r.phone, balance: balances.get(r.id) ?? 0, creditLimit: r.credit_limit }));
+  return rows.map((r) => ({ id: r.id, name: r.name, phone: r.phone, balance: balances.get(r.id) ?? 0, creditLimit: r.credit_limit, ...gst(r) }));
 }
 
 export interface QuickCustomerInput {
   name: string;
   phone?: string | null;
   address?: string | null;
+  gstin?: string | null;
+  stateCode?: string | null;
 }
 
 /** Add a customer from the billing screen with just a name (and phone). Never sets a credit limit or opening balance. */
 export function quickCreateCustomer(ctx: Ctx, input: QuickCustomerInput): CustomerSummary {
   const phone = cleanPhone(input.phone);
   assertPhoneFree(ctx, phone);
-  const id = ctx.db.insert('customers', { name: input.name, phone, address: input.address ?? null, created_at: now(ctx) });
-  logActivity(ctx, 'customer.create', `Added customer "${input.name}"`, { entityType: 'customer', entityId: id });
-  return { id, name: input.name, phone, balance: 0, creditLimit: null, ...(canSeeCustomerBalances(ctx) ? {} : { balanceHidden: true }) };
+  const gst = partyGstColumns({ gstin: input.gstin, stateCode: input.stateCode });
+  const id = ctx.db.insert('customers', { name: input.name, phone, address: input.address ?? null, ...gst, created_at: now(ctx) });
+  logActivity(ctx, 'customer.create', `Added customer "${input.name}"${gst.gstin ? ` (GSTIN ${gst.gstin})` : ''}`, { entityType: 'customer', entityId: id });
+  return {
+    id,
+    name: input.name,
+    phone,
+    balance: 0,
+    creditLimit: null,
+    gstin: (gst.gstin as string | null) ?? null,
+    stateCode: (gst.state_code as string | null) ?? null,
+    ...(canSeeCustomerBalances(ctx) ? {} : { balanceHidden: true }),
+  };
 }
 
 /* ------------------------------------------------------------------ */
@@ -98,6 +115,10 @@ export interface CustomerInput {
    * Setting or changing it needs "Set credit limits & opening balances" (customers.credit).
    */
   openingBalance?: CustomerOpeningInput | null;
+  /** GSTIN; undefined = unchanged. */
+  gstin?: string | null;
+  /** State (place of supply) for customers without a GSTIN; undefined = unchanged. */
+  stateCode?: string | null;
 }
 
 interface CustomerRow {
@@ -106,6 +127,8 @@ interface CustomerRow {
   phone: string | null;
   address: string | null;
   email: string | null;
+  gstin: string | null;
+  state_code: string | null;
   credit_limit: number | null;
   notes: string | null;
   opening_entry_id: number | null;
@@ -120,6 +143,8 @@ export interface CustomerListRow {
   phone: string | null;
   address: string | null;
   email: string | null;
+  gstin: string | null;
+  stateCode: string | null;
   creditLimit: number | null;
   isActive: boolean;
   /** + = customer owes you, - = advance. */
@@ -135,6 +160,8 @@ export interface CustomerDetail {
   phone: string | null;
   address: string | null;
   email: string | null;
+  gstin: string | null;
+  stateCode: string | null;
   creditLimit: number | null;
   notes: string | null;
   isActive: boolean;
@@ -249,7 +276,7 @@ export function listCustomers(ctx: Ctx, opts: { q?: string | null; onlyWithBalan
   if (!opts.includeInactive) where.push('c.is_active = 1');
   const text = opts.q?.trim();
   if (text) {
-    where.push("(c.name LIKE :like OR REPLACE(c.phone, ' ', '') LIKE :phone OR c.address LIKE :like OR c.email LIKE :like)");
+    where.push("(c.name LIKE :like OR REPLACE(c.phone, ' ', '') LIKE :phone OR c.address LIKE :like OR c.email LIKE :like OR c.gstin LIKE :like)");
     params.like = `%${text}%`;
     params.phone = `%${text.replace(/\s/g, '')}%`;
   }
@@ -273,6 +300,8 @@ export function listCustomers(ctx: Ctx, opts: { q?: string | null; onlyWithBalan
     phone: r.phone,
     address: r.address,
     email: r.email,
+    gstin: r.gstin,
+    stateCode: r.state_code,
     creditLimit: r.credit_limit,
     isActive: !!r.is_active,
     balance: balances.get(r.id) ?? 0,
@@ -306,6 +335,8 @@ export function getCustomer(ctx: Ctx, id: number): CustomerDetail {
     phone: r.phone,
     address: r.address,
     email: r.email,
+    gstin: r.gstin,
+    stateCode: r.state_code,
     creditLimit: r.credit_limit,
     notes: r.notes,
     isActive: !!r.is_active,
@@ -352,6 +383,7 @@ export function createCustomer(ctx: Ctx, input: CustomerInput): CustomerDetail {
     phone,
     address: input.address || null,
     email,
+    ...partyGstColumns(input),
     credit_limit: creditLimit,
     notes: input.notes || null,
     created_at: now(ctx),
@@ -381,11 +413,13 @@ export function updateCustomer(ctx: Ctx, id: number, input: CustomerInput): Cust
   const newDebit = input.openingBalance === undefined ? oldDebit : debitFromOpening(input.openingBalance);
   // Sending the saved values back unchanged is fine; changing them needs the permission.
   if (creditLimit !== row.credit_limit || newDebit !== oldDebit) assertCan(ctx, 'customers.credit', CREDIT_DENIED);
+  const gst = partyGstColumns(input, row);
   ctx.db.update('customers', id, {
     name,
     phone,
     address: input.address || null,
     email,
+    ...gst,
     credit_limit: creditLimit,
     notes: input.notes || null,
     updated_at: now(ctx),
@@ -393,6 +427,7 @@ export function updateCustomer(ctx: Ctx, id: number, input: CustomerInput): Cust
   const changes: string[] = [];
   if (before.name !== name) changes.push(`renamed from "${before.name}"`);
   if ((before.phone ?? '') !== (phone ?? '')) changes.push(`phone ${before.phone || '-'} → ${phone || '-'}`);
+  if ('gstin' in gst && (before.gstin ?? null) !== gst.gstin) changes.push(`GSTIN ${before.gstin || '-'} → ${gst.gstin || '-'}`);
   if (before.creditLimit !== creditLimit) {
     changes.push(`credit limit ${before.creditLimit === null ? 'none' : formatINR(before.creditLimit)} → ${creditLimit === null ? 'none' : formatINR(creditLimit)}`);
   }

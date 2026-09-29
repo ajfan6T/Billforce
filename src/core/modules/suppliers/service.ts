@@ -9,6 +9,7 @@ import { formatINR } from '../../../shared/money';
 import type { ReportData, ReportRow } from '../../../shared/report';
 import { normalizeEmail, openingDebit } from '../customers/common';
 import { partyStatement } from '../customers/statement';
+import { partyGstColumns } from '../gst/common';
 
 /*
  * CONTRACT functions used by other modules (purchases, expenses, import):
@@ -21,27 +22,37 @@ export interface SupplierSummary {
   phone: string | null;
   /** Amount you owe the supplier in paise (+ = payable, - = advance paid). */
   payable: number;
+  gstin?: string | null;
+  stateCode?: string | null;
 }
 
 export function searchSuppliers(ctx: Ctx, q: string, limit = 10): SupplierSummary[] {
   const text = q.trim();
-  const rows = ctx.db.all<{ id: number; name: string; phone: string | null }>(
+  const rows = ctx.db.all<{ id: number; name: string; phone: string | null; gstin: string | null; state_code: string | null }>(
     text
-      ? `SELECT id, name, phone FROM suppliers
-          WHERE is_active = 1 AND (name LIKE :like OR REPLACE(phone, ' ', '') LIKE :phone)
+      ? `SELECT id, name, phone, gstin, state_code FROM suppliers
+          WHERE is_active = 1 AND (name LIKE :like OR REPLACE(phone, ' ', '') LIKE :phone OR gstin LIKE :gstin)
           ORDER BY CASE WHEN name LIKE :prefix THEN 0 ELSE 1 END, name COLLATE NOCASE LIMIT :limit`
-      : `SELECT id, name, phone FROM suppliers WHERE is_active = 1 ORDER BY name COLLATE NOCASE LIMIT :limit`,
-    text ? { like: `%${text}%`, phone: `%${text.replace(/\s/g, '')}%`, prefix: `${text}%`, limit } : { limit },
+      : `SELECT id, name, phone, gstin, state_code FROM suppliers WHERE is_active = 1 ORDER BY name COLLATE NOCASE LIMIT :limit`,
+    text ? { like: `%${text}%`, phone: `%${text.replace(/\s/g, '')}%`, gstin: `${text.toUpperCase()}%`, prefix: `${text}%`, limit } : { limit },
   );
   const balances = partyBalances(ctx, 'supplier', { account: 'AP' });
-  return rows.map((r) => ({ id: r.id, name: r.name, phone: r.phone, payable: 0 - (balances.get(r.id) ?? 0) }));
+  return rows.map((r) => ({ id: r.id, name: r.name, phone: r.phone, payable: 0 - (balances.get(r.id) ?? 0), gstin: r.gstin, stateCode: r.state_code }));
 }
 
-export function quickCreateSupplier(ctx: Ctx, input: { name: string; phone?: string | null }): SupplierSummary {
+export function quickCreateSupplier(ctx: Ctx, input: { name: string; phone?: string | null; gstin?: string | null; stateCode?: string | null }): SupplierSummary {
   assertNameFree(ctx, input.name);
-  const id = ctx.db.insert('suppliers', { name: input.name, phone: input.phone ?? null, created_at: now(ctx) });
-  logActivity(ctx, 'supplier.create', `Added supplier "${input.name}"`, { entityType: 'supplier', entityId: id });
-  return { id, name: input.name, phone: input.phone ?? null, payable: 0 };
+  const gst = partyGstColumns({ gstin: input.gstin, stateCode: input.stateCode });
+  const id = ctx.db.insert('suppliers', { name: input.name, phone: input.phone ?? null, ...gst, created_at: now(ctx) });
+  logActivity(ctx, 'supplier.create', `Added supplier "${input.name}"${gst.gstin ? ` (GSTIN ${gst.gstin})` : ''}`, { entityType: 'supplier', entityId: id });
+  return {
+    id,
+    name: input.name,
+    phone: input.phone ?? null,
+    payable: 0,
+    gstin: (gst.gstin as string | null) ?? null,
+    stateCode: (gst.state_code as string | null) ?? null,
+  };
 }
 
 /* ------------------------------------------------------------------ */
@@ -63,6 +74,10 @@ export interface SupplierInput {
   notes?: string | null;
   /** undefined = leave unchanged (on update); null or amount 0 = none. */
   openingBalance?: SupplierOpeningInput | null;
+  /** GSTIN; undefined = unchanged. */
+  gstin?: string | null;
+  /** State for suppliers without a GSTIN; undefined = unchanged. */
+  stateCode?: string | null;
 }
 
 interface SupplierRow {
@@ -71,6 +86,8 @@ interface SupplierRow {
   phone: string | null;
   address: string | null;
   email: string | null;
+  gstin: string | null;
+  state_code: string | null;
   contact_person: string | null;
   notes: string | null;
   opening_entry_id: number | null;
@@ -84,6 +101,7 @@ export interface SupplierListRow {
   name: string;
   phone: string | null;
   contactPerson: string | null;
+  gstin: string | null;
   isActive: boolean;
   /** + = you owe the supplier, - = advance paid. */
   payable: number;
@@ -98,6 +116,8 @@ export interface SupplierDetail {
   address: string | null;
   email: string | null;
   contactPerson: string | null;
+  gstin: string | null;
+  stateCode: string | null;
   notes: string | null;
   isActive: boolean;
   createdAt: string;
@@ -167,7 +187,7 @@ export function listSuppliers(ctx: Ctx, opts: { q?: string | null; onlyWithBalan
   if (!opts.includeInactive) where.push('s.is_active = 1');
   const text = opts.q?.trim();
   if (text) {
-    where.push("(s.name LIKE :like OR REPLACE(s.phone, ' ', '') LIKE :phone OR s.contact_person LIKE :like OR s.address LIKE :like)");
+    where.push("(s.name LIKE :like OR REPLACE(s.phone, ' ', '') LIKE :phone OR s.contact_person LIKE :like OR s.address LIKE :like OR s.gstin LIKE :like)");
     params.like = `%${text}%`;
     params.phone = `%${text.replace(/\s/g, '')}%`;
   }
@@ -190,6 +210,7 @@ export function listSuppliers(ctx: Ctx, opts: { q?: string | null; onlyWithBalan
     name: r.name,
     phone: r.phone,
     contactPerson: r.contact_person,
+    gstin: r.gstin,
     isActive: !!r.is_active,
     payable: 0 - (balances.get(r.id) ?? 0),
     lastPurchaseDate: r.last_purchase,
@@ -215,6 +236,8 @@ export function getSupplier(ctx: Ctx, id: number): SupplierDetail {
     address: r.address,
     email: r.email,
     contactPerson: r.contact_person,
+    gstin: r.gstin,
+    stateCode: r.state_code,
     notes: r.notes,
     isActive: !!r.is_active,
     createdAt: r.created_at,
@@ -248,6 +271,7 @@ export function createSupplier(ctx: Ctx, input: SupplierInput): SupplierDetail {
     address: input.address || null,
     email,
     contact_person: input.contactPerson || null,
+    ...partyGstColumns(input),
     notes: input.notes || null,
     created_at: now(ctx),
   });
@@ -274,18 +298,21 @@ export function updateSupplier(ctx: Ctx, id: number, input: SupplierInput): Supp
   const newDebit = input.openingBalance === undefined ? oldDebit : debitFromOpening(input.openingBalance);
   // Sending the saved opening balance back unchanged is fine; changing it needs the permission.
   if (newDebit !== oldDebit) assertCan(ctx, 'accounts.manage', OPENING_DENIED);
+  const gst = partyGstColumns(input, row);
   ctx.db.update('suppliers', id, {
     name,
     phone: input.phone || null,
     address: input.address || null,
     email,
     contact_person: input.contactPerson || null,
+    ...gst,
     notes: input.notes || null,
     updated_at: now(ctx),
   });
   const changes: string[] = [];
   if (before.name !== name) changes.push(`renamed from "${before.name}"`);
   if ((before.phone ?? '') !== (input.phone ?? '')) changes.push(`phone ${before.phone || '-'} → ${input.phone || '-'}`);
+  if ('gstin' in gst && (before.gstin ?? null) !== gst.gstin) changes.push(`GSTIN ${before.gstin || '-'} → ${gst.gstin || '-'}`);
   if (oldDebit !== newDebit) {
     const entryId = setPartyOpeningBalance(ctx, 'supplier', id, name, newDebit, row.opening_entry_id);
     if (entryId !== row.opening_entry_id) ctx.db.update('suppliers', id, { opening_entry_id: entryId });

@@ -7,6 +7,8 @@
  *   Dr DISCOUNT_ALLOWED for item + bill discounts
  *   Dr ROUND_OFF if rounded down        Cr ROUND_OFF if rounded up
  *   Cr SALES gross (sum of qty x rate)
+ * Bills with GST (regular registration) credit SALES and debit DISCOUNT_ALLOWED without the tax,
+ * and credit the tax to Output CGST + SGST (same state) or Output IGST (another state).
  */
 import type { Ctx } from '../../context';
 import { canSeeCustomerBalances } from '../customers/service';
@@ -19,7 +21,9 @@ import { partyBalance, paymentAccountId, postEntry, replaceEntry, voidEntry, typ
 import { assertDateOpen } from '../../accounting/periods';
 import { touchItemUsage } from '../items/service';
 import { renderReceiptHtml, upiLink, type ReceiptDoc, type ReceiptTotal } from '../../print/receipt';
-import { billPaymentLabel, billPaymentMode, calcBill, roundQty, type BillPaymentMode } from '../../../shared/billing';
+import { billPaymentLabel, billPaymentMode, calcBill, roundQty, type BillGstTotals, type BillPaymentMode } from '../../../shared/billing';
+import { formatRate, gstinState, hsnProblem, isGstRate, stateLabel, type GstMode } from '../../../shared/gst';
+import { gstConfig, gstTable, placeOfSupply, useGstAccounts } from '../gst/common';
 import { amountInWords, formatAmount, formatINR, formatQty } from '../../../shared/money';
 import { formatDate, formatTime, fyOf, isValidISODate } from '../../../shared/dates';
 import { PAYMENT_MODE_LABELS, type PaymentMode, type SettlementMode } from '../../../shared/constants';
@@ -40,6 +44,10 @@ export interface BillLineInput {
   discount?: number | null;
   /** Line discount as a percentage (0-100); wins over `discount`. */
   discountPct?: number | null;
+  /** GST rate of a one-time line (catalogue items use the item's rate). */
+  gstRate?: number | null;
+  /** HSN / SAC of a one-time line. */
+  hsn?: string | null;
 }
 
 export interface BillPaymentInput {
@@ -93,6 +101,15 @@ export interface BillRow {
   cancelled_by: number | null;
   cancelled_at: string | null;
   cancel_reason: string | null;
+  gst_mode: GstMode;
+  gst_inclusive: number;
+  seller_gstin: string | null;
+  customer_gstin: string | null;
+  place_of_supply: string | null;
+  taxable_total: number | null;
+  cgst: number;
+  sgst: number;
+  igst: number;
 }
 
 interface BillItemRow {
@@ -107,6 +124,12 @@ interface BillItemRow {
   discount: number;
   discount_pct: number | null;
   amount: number;
+  hsn: string | null;
+  gst_rate: number | null;
+  taxable: number | null;
+  cgst: number;
+  sgst: number;
+  igst: number;
 }
 
 export interface BillItem {
@@ -123,6 +146,14 @@ export interface BillItem {
   discountPct: number | null;
   /** gross - discount */
   amount: number;
+  hsn: string | null;
+  /** GST rate; null on bills without GST. */
+  gstRate: number | null;
+  /** Taxable value after the bill discount; null on bills without GST. */
+  taxable: number | null;
+  cgst: number;
+  sgst: number;
+  igst: number;
 }
 
 export interface BillPayment {
@@ -164,6 +195,22 @@ export interface RevisionSummary {
   at: string;
 }
 
+/** GST details of a bill (mode 'none' for bills without GST). */
+export interface BillGst {
+  mode: GstMode;
+  /** Rates included the tax. */
+  inclusive: boolean;
+  sellerGstin: string | null;
+  customerGstin: string | null;
+  placeOfSupply: string | null;
+  interState: boolean;
+  taxable: number | null;
+  cgst: number;
+  sgst: number;
+  igst: number;
+  tax: number;
+}
+
 export interface BillDetail {
   id: number;
   billNo: string;
@@ -203,6 +250,7 @@ export interface BillDetail {
   /** Total of active returns / credit notes against this bill. */
   returnedTotal: number;
   revisions: RevisionSummary[];
+  gst: BillGst;
 }
 
 /* ------------------------------------------------------------------ */
@@ -226,10 +274,12 @@ interface CustomerRow {
   phone: string | null;
   credit_limit: number | null;
   is_active: number;
+  gstin: string | null;
+  state_code: string | null;
 }
 
 function customerRow(ctx: Ctx, id: number): CustomerRow | undefined {
-  return ctx.db.get<CustomerRow>('SELECT id, name, phone, credit_limit, is_active FROM customers WHERE id = ?', [id]);
+  return ctx.db.get<CustomerRow>('SELECT id, name, phone, credit_limit, is_active, gstin, state_code FROM customers WHERE id = ?', [id]);
 }
 
 export function customerSummary(ctx: Ctx, id: number): BillCustomer {
@@ -262,6 +312,29 @@ function toBillItem(r: BillItemRow): BillItem {
     discount: r.discount,
     discountPct: r.discount_pct,
     amount: r.amount,
+    hsn: r.hsn,
+    gstRate: r.gst_rate,
+    taxable: r.taxable,
+    cgst: r.cgst,
+    sgst: r.sgst,
+    igst: r.igst,
+  };
+}
+
+export function billGst(b: BillRow): BillGst {
+  const seller = gstinState(b.seller_gstin);
+  return {
+    mode: b.gst_mode ?? 'none',
+    inclusive: !!b.gst_inclusive,
+    sellerGstin: b.seller_gstin,
+    customerGstin: b.customer_gstin,
+    placeOfSupply: b.place_of_supply,
+    interState: !!seller && !!b.place_of_supply && seller !== b.place_of_supply,
+    taxable: b.taxable_total,
+    cgst: b.cgst ?? 0,
+    sgst: b.sgst ?? 0,
+    igst: b.igst ?? 0,
+    tax: (b.cgst ?? 0) + (b.sgst ?? 0) + (b.igst ?? 0),
   };
 }
 
@@ -336,6 +409,7 @@ export function getBill(ctx: Ctx, id: number): BillDetail {
     creditNotes,
     returnedTotal: creditNotes.filter((c) => c.status === 'active').reduce((s, c) => s + c.total, 0),
     revisions: listRevisions(ctx, 'bill', id).map((r) => ({ revision: r.revision, action: r.action, reason: r.reason, username: r.username, at: r.at })),
+    gst: billGst(b),
   };
 }
 
@@ -361,6 +435,12 @@ interface PreparedLine {
   discount: number;
   discountPct: number | null;
   amount: number;
+  hsn: string | null;
+  gstRate: number | null;
+  taxable: number | null;
+  cgst: number;
+  sgst: number;
+  igst: number;
 }
 
 interface PreparedPayment {
@@ -392,6 +472,13 @@ interface PreparedBill {
   rateChanges: Array<{ itemName: string; listRate: number; rate: number }>;
   /** One-time (free-text) lines added with a typed rate (for the activity log details). */
   oneTimeLines: Array<{ itemName: string; qty: number; rate: number }>;
+  gstMode: GstMode;
+  gstInclusive: boolean;
+  sellerGstin: string | null;
+  customerGstin: string | null;
+  placeOfSupply: string | null;
+  /** Tax totals (regular GST bills only). */
+  gst: BillGstTotals | null;
 }
 
 const clean = (s: string | null | undefined): string | null => {
@@ -441,15 +528,26 @@ function prepareBill(ctx: Ctx, input: BillInput, existing: BillRow | null): Prep
 
   /* Lines */
   if (!input.items?.length) throw fail.validation('Add at least one item to the bill.', { items: 'Add an item' });
-  const base: Array<Omit<PreparedLine, 'discount' | 'discountPct' | 'amount'> & { inDiscount: number | null; inPct: number | null }> = [];
+  const base: Array<
+    Omit<PreparedLine, 'discount' | 'discountPct' | 'amount' | 'taxable' | 'cgst' | 'sgst' | 'igst'> & { inDiscount: number | null; inPct: number | null }
+  > = [];
   const rateChanges: PreparedBill['rateChanges'] = [];
   const oneTimeLines: PreparedBill['oneTimeLines'] = [];
   const canChangeRate = can(ctx, 'billing.rate');
   // Rates already saved on the bill being edited may stay as they are without the permission
   // (catalogue lines by item, one-time lines by name and rate).
   const savedRates = existing
-    ? ctx.db.all<{ item_id: number | null; item_name: string; rate: number }>('SELECT item_id, item_name, rate FROM bill_items WHERE bill_id = ?', [existing.id])
+    ? ctx.db.all<{ item_id: number | null; item_name: string; rate: number; gst_rate: number | null; hsn: string | null }>(
+        'SELECT item_id, item_name, rate, gst_rate, hsn FROM bill_items WHERE bill_id = ?',
+        [existing.id],
+      )
     : [];
+  /* GST: a bill keeps the GST treatment it was made with (bills from before registering stay without GST). */
+  const cfg = gstConfig(ctx);
+  const gstMode: GstMode = existing ? (existing.gst_mode ?? 'none') : cfg.mode;
+  const gstInclusive = existing ? !!existing.gst_inclusive : cfg.inclusive;
+  const sellerGstin = existing ? existing.seller_gstin : cfg.gstin;
+  const charged = gstMode === 'regular';
   input.items.forEach((l, i) => {
     const name = (l.itemName ?? '').trim();
     if (!name) throw fail.validation(`Enter the item name on line ${i + 1}.`, { [`items.${i}.itemName`]: 'Enter the item name' });
@@ -458,8 +556,13 @@ function prepareBill(ctx: Ctx, input: BillInput, existing: BillRow | null): Prep
     if (!Number.isInteger(l.rate) || l.rate < 0) throw fail.validation(`Enter a valid rate for "${name}".`, { [`items.${i}.rate`]: 'Invalid rate' });
     let unit = clean(l.unit);
     let itemId: number | null = null;
+    let gstRate: number | null = null;
+    let hsn: string | null = null;
     if (l.itemId) {
-      const item = ctx.db.get<{ id: number; unit: string; rate: number }>('SELECT id, unit, rate FROM items WHERE id = ?', [l.itemId]);
+      const item = ctx.db.get<{ id: number; unit: string; rate: number; gst_rate: number | null; hsn: string | null }>(
+        'SELECT id, unit, rate, gst_rate, hsn FROM items WHERE id = ?',
+        [l.itemId],
+      );
       if (!item) throw fail.validation(`Item "${name}" was not found in the item list. Remove the line and add it again.`, { [`items.${i}.itemId`]: 'Item not found' });
       itemId = item.id;
       unit = unit ?? item.unit;
@@ -474,6 +577,12 @@ function prepareBill(ctx: Ctx, input: BillInput, existing: BillRow | null): Prep
         }
         if (!saved) rateChanges.push({ itemName: name, listRate: item.rate, rate: l.rate });
       }
+      if (charged) {
+        // An item already on the bill being edited keeps the rate it was billed at (rates can change later).
+        const savedLine = savedRates.find((r) => r.item_id === item.id && r.gst_rate !== null);
+        gstRate = savedLine ? savedLine.gst_rate : (item.gst_rate ?? cfg.defaultRate);
+        hsn = savedLine ? savedLine.hsn : item.hsn;
+      }
     } else {
       // A one-time (free-text) line sets its own price, so it needs "Change rates". Without it, only a
       // one-time line already saved on the bill being edited may stay (same name and rate); a catalogue
@@ -485,16 +594,31 @@ function prepareBill(ctx: Ctx, input: BillInput, existing: BillRow | null): Prep
         });
       }
       if (!saved) oneTimeLines.push({ itemName: name, qty: roundQty(l.qty), rate: l.rate });
+      if (charged) {
+        if (l.gstRate !== undefined && l.gstRate !== null && !isGstRate(l.gstRate)) {
+          throw fail.validation(`Choose a GST rate from the list for "${name}".`, { [`items.${i}.gstRate`]: 'Choose a GST rate' });
+        }
+        const savedLine = savedRates.find((r) => r.item_id === null && r.item_name.toLowerCase() === name.toLowerCase());
+        gstRate = l.gstRate ?? savedLine?.gst_rate ?? cfg.defaultRate;
+        hsn = clean(l.hsn) ?? savedLine?.hsn ?? null;
+        const problem = hsnProblem(hsn);
+        if (problem) throw fail.validation(`"${name}": ${problem}.`, { [`items.${i}.hsn`]: problem });
+      }
     }
-    base.push({ itemId, itemName: name, unit, qty: roundQty(l.qty), rate: l.rate, inDiscount: l.discount ?? null, inPct: l.discountPct ?? null });
+    base.push({ itemId, itemName: name, unit, qty: roundQty(l.qty), rate: l.rate, inDiscount: l.discount ?? null, inPct: l.discountPct ?? null, gstRate, hsn });
   });
+
+  const customerGstin = charged || gstMode === 'composition' ? (customer?.gstin ?? null) : null;
+  const pos = gstMode === 'none' ? null : placeOfSupply({ ...cfg, stateCode: gstinState(sellerGstin) }, customer);
+  const interState = charged && !!pos && pos !== gstinState(sellerGstin);
 
   const roundOffOn = getSection(ctx, 'billing').roundOff;
   const calc = calcBill({
-    lines: base.map((b) => ({ qty: b.qty, rate: b.rate, discount: b.inDiscount, discountPct: b.inPct })),
+    lines: base.map((b) => ({ qty: b.qty, rate: b.rate, discount: b.inDiscount, discountPct: b.inPct, gstRate: b.gstRate })),
     billDiscount: input.billDiscount,
     billDiscountPct: input.billDiscountPct,
     roundOff: roundOffOn,
+    gst: charged ? { inclusive: gstInclusive, interState } : null,
   });
   for (const p of calc.problems) {
     if (p.line !== null) {
@@ -508,16 +632,25 @@ function prepareBill(ctx: Ctx, input: BillInput, existing: BillRow | null): Prep
       billDiscount: p.message,
     });
   }
-  const lines: PreparedLine[] = base.map((b, i) => ({
-    itemId: b.itemId,
-    itemName: b.itemName,
-    unit: b.unit,
-    qty: b.qty,
-    rate: b.rate,
-    discount: calc.lines[i].discount,
-    discountPct: calc.lines[i].discountPct,
-    amount: calc.lines[i].amount,
-  }));
+  const lines: PreparedLine[] = base.map((b, i) => {
+    const t = calc.gst?.lines[i];
+    return {
+      itemId: b.itemId,
+      itemName: b.itemName,
+      unit: b.unit,
+      qty: b.qty,
+      rate: b.rate,
+      discount: calc.lines[i].discount,
+      discountPct: calc.lines[i].discountPct,
+      amount: calc.lines[i].amount,
+      hsn: b.hsn,
+      gstRate: t ? t.gstRate : null,
+      taxable: t ? t.taxable : null,
+      cgst: t?.cgst ?? 0,
+      sgst: t?.sgst ?? 0,
+      igst: t?.igst ?? 0,
+    };
+  });
 
   const totalDiscount = calc.itemDiscount + calc.billDiscount;
   const discountBefore = existing ? existing.item_discount + existing.bill_discount : 0;
@@ -611,6 +744,12 @@ function prepareBill(ctx: Ctx, input: BillInput, existing: BillRow | null): Prep
     warnings,
     rateChanges,
     oneTimeLines,
+    gstMode,
+    gstInclusive: charged ? gstInclusive : false,
+    sellerGstin: gstMode === 'none' ? null : sellerGstin,
+    customerGstin,
+    placeOfSupply: pos,
+    gst: calc.gst,
   };
 }
 
@@ -620,10 +759,16 @@ function buildEntry(p: PreparedBill, billId: number, billNo: string): EntryInput
     lines.push({ account: pay.accountId, debit: pay.amount, memo: `${PAYMENT_MODE_LABELS[pay.mode]}${pay.reference ? ` ref ${pay.reference}` : ''}` });
   }
   if (p.credit > 0) lines.push({ account: 'AR', debit: p.credit, partyType: 'customer', partyId: p.customer!.id, memo: 'On credit' });
-  const discount = p.itemDiscount + p.billDiscount;
+  // With GST, Sales and Discount Allowed are without the tax; the tax is owed to the government.
+  const discount = p.gst ? p.gst.discountEx : p.itemDiscount + p.billDiscount;
   if (discount > 0) lines.push({ account: 'DISCOUNT_ALLOWED', debit: discount });
   if (p.roundOff < 0) lines.push({ account: 'ROUND_OFF', debit: -p.roundOff });
-  lines.push({ account: 'SALES', credit: p.subtotal });
+  lines.push({ account: 'SALES', credit: p.gst ? p.gst.grossEx : p.subtotal });
+  if (p.gst) {
+    if (p.gst.cgst) lines.push({ account: 'GST_OUT_CGST', credit: p.gst.cgst });
+    if (p.gst.sgst) lines.push({ account: 'GST_OUT_SGST', credit: p.gst.sgst });
+    if (p.gst.igst) lines.push({ account: 'GST_OUT_IGST', credit: p.gst.igst });
+  }
   if (p.roundOff > 0) lines.push({ account: 'ROUND_OFF', credit: p.roundOff });
   return {
     date: p.date,
@@ -652,6 +797,15 @@ function billColumns(p: PreparedBill): Record<string, unknown> {
     credit: p.credit,
     payment_mode: p.paymentMode,
     remarks: p.remarks,
+    gst_mode: p.gstMode,
+    gst_inclusive: p.gstInclusive ? 1 : 0,
+    seller_gstin: p.sellerGstin,
+    customer_gstin: p.customerGstin,
+    place_of_supply: p.placeOfSupply,
+    taxable_total: p.gst ? p.gst.taxable : null,
+    cgst: p.gst?.cgst ?? 0,
+    sgst: p.gst?.sgst ?? 0,
+    igst: p.gst?.igst ?? 0,
   };
 }
 
@@ -668,6 +822,12 @@ function writeLinesAndPayments(ctx: Ctx, billId: number, p: PreparedBill): void 
       discount: l.discount,
       discount_pct: l.discountPct,
       amount: l.amount,
+      hsn: l.hsn,
+      gst_rate: l.gstRate,
+      taxable: l.taxable,
+      cgst: l.cgst,
+      sgst: l.sgst,
+      igst: l.igst,
     });
   });
   for (const pay of p.payments) {
@@ -686,7 +846,18 @@ export interface BillSnapshot {
   customerId: number | null;
   customerName: string | null;
   customerPhone: string | null;
-  items: Array<{ itemId: number | null; itemName: string; unit: string | null; qty: number; rate: number; discount: number; discountPct: number | null; amount: number }>;
+  items: Array<{
+    itemId: number | null;
+    itemName: string;
+    unit: string | null;
+    qty: number;
+    rate: number;
+    discount: number;
+    discountPct: number | null;
+    amount: number;
+    /** GST rate (bills with GST; missing in revisions saved before GST). */
+    gstRate?: number | null;
+  }>;
   subtotal: number;
   itemDiscount: number;
   billDiscount: number;
@@ -699,6 +870,8 @@ export interface BillSnapshot {
   payments: Array<{ mode: SettlementMode; accountId: number; accountName: string; amount: number; reference: string | null }>;
   remarks: string | null;
   cancelReason: string | null;
+  /** Tax totals of bills with GST. */
+  gst?: { taxable: number | null; cgst: number; sgst: number; igst: number; placeOfSupply: string | null } | null;
 }
 
 export function billSnapshot(b: BillDetail): BillSnapshot {
@@ -718,6 +891,7 @@ export function billSnapshot(b: BillDetail): BillSnapshot {
       discount: i.discount,
       discountPct: i.discountPct,
       amount: i.amount,
+      ...(b.gst.mode === 'regular' ? { gstRate: i.gstRate } : {}),
     })),
     subtotal: b.subtotal,
     itemDiscount: b.itemDiscount,
@@ -731,6 +905,7 @@ export function billSnapshot(b: BillDetail): BillSnapshot {
     payments: b.payments.map((p) => ({ mode: p.mode, accountId: p.accountId, accountName: p.accountName, amount: p.amount, reference: p.reference })),
     remarks: b.remarks,
     cancelReason: b.cancelReason,
+    gst: b.gst.mode === 'regular' ? { taxable: b.gst.taxable, cgst: b.gst.cgst, sgst: b.gst.sgst, igst: b.gst.igst, placeOfSupply: b.gst.placeOfSupply } : null,
   };
 }
 
@@ -744,7 +919,9 @@ export interface BillChange {
 const qtyText = (qty: number, unit: string | null) => `${formatQty(qty)}${unit ? ' ' + unit : ''}`;
 const discText = (d: number, pct: number | null) => (d ? (pct ? `${formatQty(pct)}% (${formatINR(d)})` : formatINR(d)) : 'none');
 const lineText = (i: BillSnapshot['items'][number]) =>
-  `${qtyText(i.qty, i.unit)} × ${formatINR(i.rate)}${i.discount ? ` less ${discText(i.discount, i.discountPct)}` : ''} = ${formatINR(i.amount)}`;
+  `${qtyText(i.qty, i.unit)} × ${formatINR(i.rate)}${i.discount ? ` less ${discText(i.discount, i.discountPct)}` : ''} = ${formatINR(i.amount)}${
+    i.gstRate !== undefined && i.gstRate !== null ? ` (GST ${formatRate(i.gstRate)})` : ''
+  }`;
 const paymentsText = (s: BillSnapshot) => {
   const parts = s.payments.map((p) => `${PAYMENT_MODE_LABELS[p.mode]} ${formatINR(p.amount)}`);
   if (s.credit > 0) parts.push(`Credit ${formatINR(s.credit)}`);
@@ -772,13 +949,26 @@ export function diffBills(a: BillSnapshot, b: BillSnapshot): BillChange[] {
       continue;
     }
     const ib = remaining.splice(idx, 1)[0];
-    if (ia.qty !== ib.qty || ia.rate !== ib.rate || ia.discount !== ib.discount || (ia.unit ?? '') !== (ib.unit ?? '') || ia.itemName !== ib.itemName) {
+    if (
+      ia.qty !== ib.qty ||
+      ia.rate !== ib.rate ||
+      ia.discount !== ib.discount ||
+      (ia.unit ?? '') !== (ib.unit ?? '') ||
+      ia.itemName !== ib.itemName ||
+      (ia.gstRate ?? null) !== (ib.gstRate ?? null)
+    ) {
       out.push({ label: ib.itemName, before: lineText(ia), after: lineText(ib) });
     }
   }
   for (const ib of remaining) out.push({ label: 'Item added', before: null, after: `${ib.itemName}: ${lineText(ib)}` });
 
   if (a.billDiscount !== b.billDiscount) out.push({ label: 'Bill discount', before: discText(a.billDiscount, a.billDiscountPct), after: discText(b.billDiscount, b.billDiscountPct) });
+  const taxA = a.gst ? a.gst.cgst + a.gst.sgst + a.gst.igst : 0;
+  const taxB = b.gst ? b.gst.cgst + b.gst.sgst + b.gst.igst : 0;
+  if (taxA !== taxB) out.push({ label: 'GST', before: formatINR(taxA), after: formatINR(taxB) });
+  if ((a.gst?.placeOfSupply ?? null) !== (b.gst?.placeOfSupply ?? null) && a.gst && b.gst) {
+    out.push({ label: 'Place of supply', before: stateLabel(a.gst.placeOfSupply) || '—', after: stateLabel(b.gst.placeOfSupply) || '—' });
+  }
   if (a.roundOff !== b.roundOff) out.push({ label: 'Round off', before: formatINR(a.roundOff), after: formatINR(b.roundOff) });
   if (a.total !== b.total) out.push({ label: 'Total', before: formatINR(a.total), after: formatINR(b.total) });
   if (paymentsText(a) !== paymentsText(b)) out.push({ label: 'Payment', before: paymentsText(a), after: paymentsText(b) });
@@ -787,7 +977,7 @@ export function diffBills(a: BillSnapshot, b: BillSnapshot): BillChange[] {
   return out;
 }
 
-const GENERIC_LABELS = ['Date', 'Customer', 'Phone', 'Bill discount', 'Round off', 'Total', 'Payment', 'Status'];
+const GENERIC_LABELS = ['Date', 'Customer', 'Phone', 'Bill discount', 'GST', 'Place of supply', 'Round off', 'Total', 'Payment', 'Status'];
 
 /** One line for the activity log, e.g. "total ₹450.00 → ₹500.00; added Sugar: 2 kg × ₹45.00 = ₹90.00". */
 export function changeSummary(changes: BillChange[]): string {
@@ -847,6 +1037,7 @@ export function createBill(ctx: Ctx, input: BillInput): BillResult {
     created_at: now(ctx),
   });
   writeLinesAndPayments(ctx, id, p);
+  if (p.gst) useGstAccounts(ctx);
   const entryId = postEntry(ctx, buildEntry(p, id, num.number));
   ctx.db.update('bills', id, { journal_entry_id: entryId });
   for (const itemId of new Set(p.lines.map((l) => l.itemId).filter((x): x is number => !!x))) touchItemUsage(ctx, itemId);
@@ -894,6 +1085,7 @@ export function updateBill(ctx: Ctx, id: number, input: BillInput, reason: strin
   ctx.db.run('DELETE FROM bill_items WHERE bill_id = ?', [id]);
   ctx.db.run('DELETE FROM bill_payments WHERE bill_id = ?', [id]);
   writeLinesAndPayments(ctx, id, p);
+  if (p.gst) useGstAccounts(ctx);
   const entry = buildEntry(p, id, bill.bill_no);
   if (bill.journal_entry_id) replaceEntry(ctx, bill.journal_entry_id, entry);
   else ctx.db.update('bills', id, { journal_entry_id: postEntry(ctx, entry) });
@@ -1232,7 +1424,14 @@ export function posConfig(ctx: Ctx) {
     paperWidth: receipt.paperWidth,
     printerName: receipt.printerName,
     booksStartDate: getSection(ctx, 'accounts').booksStartDate,
+    gst: posGstConfig(ctx),
   };
+}
+
+/** GST settings the billing screen needs to preview tax exactly as the bill will be saved. */
+export function posGstConfig(ctx: Ctx): { mode: GstMode; inclusive: boolean; stateCode: string | null; defaultRate: number } {
+  const cfg = gstConfig(ctx);
+  return { mode: cfg.mode, inclusive: cfg.inclusive, stateCode: cfg.stateCode, defaultRate: cfg.defaultRate };
 }
 
 /* ------------------------------------------------------------------ */
@@ -1264,20 +1463,30 @@ export function billReceiptDoc(ctx: Ctx, b: BillDetail, opts: { duplicate?: bool
     ['Date', `${formatDate(b.date)}${sameDay ? `  ${formatTime(b.createdAt)}` : ''}`],
   ];
   if (receipt.showCashier && b.createdByName) meta.push(['Cashier', b.createdByName]);
+  const g = b.gst;
+  const taxInvoice = g.mode === 'regular';
+  if (taxInvoice && g.placeOfSupply && (g.interState || g.customerGstin)) meta.push(['Place of supply', stateLabel(g.placeOfSupply)]);
 
-  const items = b.items.map((i) => ({
-    name: i.itemName,
-    qty: qtyText(i.qty, i.unit),
-    rate: formatAmount(i.rate),
-    amount: formatAmount(i.gross),
-    note: i.discount ? `Less discount${i.discountPct ? ` ${formatQty(i.discountPct)}%` : ''}: -${formatAmount(i.discount)}` : undefined,
-  }));
+  const items = b.items.map((i) => {
+    const notes: string[] = [];
+    if (taxInvoice) notes.push(`${i.hsn ? `HSN ${i.hsn} · ` : ''}GST ${formatRate(i.gstRate ?? 0)}`);
+    if (i.discount) notes.push(`Less discount${i.discountPct ? ` ${formatQty(i.discountPct)}%` : ''}: -${formatAmount(i.discount)}`);
+    return { name: i.itemName, qty: qtyText(i.qty, i.unit), rate: formatAmount(i.rate), amount: formatAmount(i.gross), note: notes.join(' · ') || undefined };
+  });
 
   const totals: ReceiptTotal[] = [];
-  const hasAdjust = b.itemDiscount > 0 || b.billDiscount > 0 || b.roundOff !== 0;
+  // Rates without GST: the tax is added after the discounts, before rounding.
+  const taxOnTop = taxInvoice && !g.inclusive;
+  const hasAdjust = b.itemDiscount > 0 || b.billDiscount > 0 || b.roundOff !== 0 || taxOnTop;
   if (hasAdjust) totals.push({ label: 'Subtotal', value: formatINR(b.subtotal) });
   if (b.itemDiscount > 0) totals.push({ label: 'Item discount', value: `-${formatINR(b.itemDiscount)}` });
   if (b.billDiscount > 0) totals.push({ label: `Discount${b.billDiscountPct ? ` (${formatQty(b.billDiscountPct)}%)` : ''}`, value: `-${formatINR(b.billDiscount)}` });
+  if (taxOnTop) {
+    totals.push({ label: 'Taxable value', value: formatINR(g.taxable ?? 0) });
+    if (g.cgst) totals.push({ label: 'CGST', value: formatINR(g.cgst) });
+    if (g.sgst) totals.push({ label: 'SGST', value: formatINR(g.sgst) });
+    if (g.igst) totals.push({ label: 'IGST', value: formatINR(g.igst) });
+  }
   if (b.roundOff !== 0) totals.push({ label: 'Round off', value: formatINR(b.roundOff, { plus: true }) });
   totals.push({ label: 'TOTAL', value: formatINR(b.total), big: true });
   for (const p of b.payments) totals.push({ label: `Paid by ${PAYMENT_MODE_LABELS[p.mode]}${p.reference ? ` (${p.reference})` : ''}`, value: formatINR(p.amount) });
@@ -1285,6 +1494,8 @@ export function billReceiptDoc(ctx: Ctx, b: BillDetail, opts: { duplicate?: bool
 
   const lines: string[] = [];
   lines.push(itemCountLine(b.items));
+  if (taxInvoice && g.inclusive && g.tax) lines.push(`Prices include GST of ${formatINR(g.tax)}`);
+  if (g.mode === 'composition') lines.push('Composition taxable person, not eligible to collect tax on supplies');
   if (b.itemDiscount + b.billDiscount > 0) lines.push(`You saved ${formatINR(b.itemDiscount + b.billDiscount)} on this bill`);
   if (receipt.showAmountInWords) lines.push(amountInWords(b.total));
   // The receipt is for the customer: its balance line comes from the books, even when the user
@@ -1304,14 +1515,18 @@ export function billReceiptDoc(ctx: Ctx, b: BillDetail, opts: { duplicate?: bool
     qr = { data: upiLink(upiId, business.upiName?.trim() || business.name || 'Shop', amount, `Bill ${b.billNo}`), caption: `Scan to pay ${formatINR(amount)} by UPI` };
   }
 
+  // A customer's GSTIN must be on a tax invoice, so the customer is printed then even when the setting hides it.
+  const showParty = b.customerName && (receipt.showCustomer || !!g.customerGstin);
   return {
-    title: 'BILL',
+    title: taxInvoice ? 'TAX INVOICE' : g.mode === 'composition' ? 'BILL OF SUPPLY' : 'BILL',
+    headerLines: g.mode !== 'none' && g.sellerGstin ? [`GSTIN: ${g.sellerGstin}`] : undefined,
     duplicate: !!opts.duplicate,
     cancelled: b.status === 'cancelled',
     meta,
-    party: receipt.showCustomer && b.customerName ? { label: 'Customer', name: b.customerName, phone: b.customerPhone } : undefined,
+    party: showParty ? { label: 'Customer', name: b.customerName!, phone: b.customerPhone, extra: g.customerGstin ? `GSTIN: ${g.customerGstin}` : null } : undefined,
     items,
     totals,
+    table: taxInvoice ? gstTable(b.items, g.interState) : undefined,
     lines,
     qr,
   };

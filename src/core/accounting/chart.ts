@@ -52,6 +52,14 @@ export const SYSTEM_KEYS = [
   'DISCOUNT_ALLOWED',
   'ROUND_OFF',
   'INTEREST_EXPENSE',
+  // GST accounts: created only when the business registers for GST (GST_ACCOUNTS).
+  'GST_OUT_CGST',
+  'GST_OUT_SGST',
+  'GST_OUT_IGST',
+  'GST_IN_CGST',
+  'GST_IN_SGST',
+  'GST_IN_IGST',
+  'COMPOSITION_TAX',
 ] as const;
 export type SystemKey = (typeof SYSTEM_KEYS)[number];
 
@@ -86,6 +94,21 @@ export const SYSTEM_ACCOUNTS: AccountSeed[] = [
   { code: '6002', name: 'Discount Allowed', group: 'indirect_expenses', systemKey: 'DISCOUNT_ALLOWED' },
   { code: '6003', name: 'Round Off', group: 'indirect_expenses', systemKey: 'ROUND_OFF' },
   { code: '6004', name: 'Interest Paid', group: 'indirect_expenses', systemKey: 'INTEREST_EXPENSE' },
+];
+
+/**
+ * GST accounts, created (and re-created if missing) only while the business is registered for GST,
+ * so unregistered businesses never see them. Tax collected on sales is a current liability; tax paid on
+ * purchases (input tax credit) is a current asset until it is set off against the tax collected.
+ */
+export const GST_ACCOUNTS: AccountSeed[] = [
+  { code: '2111', name: 'Output CGST', group: 'current_liabilities', systemKey: 'GST_OUT_CGST', description: 'Central GST collected on sales' },
+  { code: '2112', name: 'Output SGST', group: 'current_liabilities', systemKey: 'GST_OUT_SGST', description: 'State GST collected on sales' },
+  { code: '2113', name: 'Output IGST', group: 'current_liabilities', systemKey: 'GST_OUT_IGST', description: 'Integrated GST collected on sales to other states' },
+  { code: '1311', name: 'Input CGST', group: 'current_assets', systemKey: 'GST_IN_CGST', description: 'Central GST paid on purchases (input tax credit)' },
+  { code: '1312', name: 'Input SGST', group: 'current_assets', systemKey: 'GST_IN_SGST', description: 'State GST paid on purchases (input tax credit)' },
+  { code: '1313', name: 'Input IGST', group: 'current_assets', systemKey: 'GST_IN_IGST', description: 'Integrated GST paid on purchases (input tax credit)' },
+  { code: '6030', name: 'Composition Tax', group: 'indirect_expenses', systemKey: 'COMPOSITION_TAX', description: 'GST paid on turnover under the composition scheme' },
 ];
 
 /** Common accounts created once for a new business; the owner can rename or deactivate them. */

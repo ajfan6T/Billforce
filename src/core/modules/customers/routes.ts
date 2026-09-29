@@ -16,6 +16,9 @@ const zCustomerInput = z.object({
   openingBalance: z
     .object({ amount: zPaise, direction: z.enum(['receivable', 'advance']) })
     .nullish(),
+  // GST: left out = unchanged.
+  gstin: z.string().trim().max(20).nullable().optional(),
+  stateCode: z.string().trim().max(2).nullable().optional(),
 });
 
 const zReceiptInput = z.object({
@@ -46,6 +49,8 @@ export const customersRoutes = {
       name: z.string().trim().min(1, 'Enter the customer name').max(120),
       phone: zPhone,
       address: z.string().trim().max(500).nullish(),
+      gstin: z.string().trim().max(20).nullish(),
+      stateCode: z.string().trim().max(2).nullish(),
     }),
     handler: (ctx, input) => customers.quickCreateCustomer(ctx, input),
   }),

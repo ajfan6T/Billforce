@@ -1,5 +1,6 @@
 import type { Db } from './database';
 import { SCHEMA_V1 } from './schema';
+import { GST_COLUMNS, GST_INDEXES } from './schema/gst';
 
 export interface Migration {
   version: number;
@@ -14,7 +15,17 @@ export interface Migration {
 export const MIGRATIONS: Migration[] = [
   { version: 1, name: 'initial schema', up: (db) => db.exec(SCHEMA_V1) },
   { version: 2, name: 'bring pre-release v1 data files up to date', up: (db) => repairPreReleaseV1(db) },
+  { version: 3, name: 'GST', up: (db) => addColumns(db, GST_COLUMNS, GST_INDEXES) },
 ];
+
+/** Add columns that are not there yet (so a half-applied or repeated migration is harmless), then indexes. */
+function addColumns(db: Db, columns: Array<[table: string, column: string, definition: string]>, indexes = ''): void {
+  for (const [table, column, definition] of columns) {
+    const has = db.all<{ name: string }>(`PRAGMA table_info(${table})`).some((c) => c.name === column);
+    if (!has) db.exec(`ALTER TABLE ${table} ADD COLUMN ${column} ${definition}`);
+  }
+  if (indexes) db.exec(indexes);
+}
 
 /**
  * Columns added to the version 1 schema while Billforce was being built (before release).

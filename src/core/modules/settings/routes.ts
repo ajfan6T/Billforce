@@ -22,7 +22,7 @@ export const settingsRoutes = {
   /** HTML of a sample bill printed with the given (unsaved) business / receipt values. */
   'settings.receiptPreview': route({
     access: 'settings.manage',
-    input: z.object({ business: zLoose, receipt: zLoose, duplicate: z.boolean().optional() }),
+    input: z.object({ business: zLoose, receipt: zLoose, gst: zLoose, duplicate: z.boolean().optional() }),
     handler: (ctx, input) => {
       const { html, paperWidth } = settings.receiptPreview(ctx, input);
       return { html, paperWidth };

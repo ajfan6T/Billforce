@@ -1,4 +1,5 @@
 import { DEFAULT_PREFIXES, type PaymentMode, type SequenceKey } from './constants';
+import type { GstRegistration } from './gst';
 
 export interface BusinessSettings {
   name: string;
@@ -68,8 +69,22 @@ export interface SecuritySettings {
   autoLockMinutes: number;
 }
 
+export interface GstSettings {
+  /** Unregistered businesses bill exactly as before: no GST anywhere. */
+  registration: GstRegistration;
+  /** The business's GSTIN; its first two digits are the state of the business. */
+  gstin: string;
+  /** Item rates include GST (tax is taken out of the price) instead of being added on top. */
+  ratesIncludeGst: boolean;
+  /** GST rate (percent) for new items and one-time lines. */
+  defaultRate: number;
+  /** Composition scheme: tax rate on turnover (percent). */
+  compositionRate: number;
+}
+
 export interface AppSettings {
   business: BusinessSettings;
+  gst: GstSettings;
   receipt: ReceiptSettings;
   billing: BillingSettings;
   accounts: AccountSettings;
@@ -82,6 +97,7 @@ export type SettingsSection = keyof AppSettings;
 export function defaultSettings(today: string): AppSettings {
   return {
     business: { name: '', address: '', phone: '', email: '', upiId: '', upiName: '' },
+    gst: { registration: 'unregistered', gstin: '', ratesIncludeGst: true, defaultRate: 18, compositionRate: 1 },
     receipt: {
       header: '',
       footer: 'Thank you! Visit again.',

@@ -27,12 +27,16 @@ export interface ReceiptTotal {
 export interface ReceiptDoc {
   /** Heading such as "BILL", "SALES RETURN", "PAYMENT RECEIPT". */
   title: string;
+  /** Extra lines under the business details, e.g. "GSTIN: 27AAPFU0939F1ZV". */
+  headerLines?: string[];
   duplicate?: boolean;
   cancelled?: boolean;
   meta: Array<[string, string]>;
   party?: { label: string; name: string; phone?: string | null; extra?: string | null };
   items?: ReceiptItem[];
   totals: ReceiptTotal[];
+  /** Small table after the totals (e.g. GST by rate). */
+  table?: { head: string[]; rows: string[][] };
   /** Free text lines after the totals (amount in words, remarks, balance). */
   lines?: string[];
   qr?: { data: string; caption: string };
@@ -73,6 +77,7 @@ export function renderReceiptHtml(doc: ReceiptDoc, business: BusinessSettings, r
     business.name ? `<div class="biz">${e(business.name)}</div>` : '',
     business.address ? `<div class="c">${multiline(business.address)}</div>` : '',
     business.phone ? `<div class="c">Ph: ${e(business.phone)}</div>` : '',
+    ...(doc.headerLines ?? []).map((l) => `<div class="c b">${e(l)}</div>`),
     receipt.header ? `<div class="c hdr">${multiline(receipt.header)}</div>` : '',
   ].join('');
 
@@ -111,6 +116,11 @@ export function renderReceiptHtml(doc: ReceiptDoc, business: BusinessSettings, r
   const totals = doc.totals
     .map((t) => `<div class="row${t.bold ? ' b' : ''}${t.big ? ' big' : ''}"><span>${e(t.label)}</span><span>${e(t.value)}</span></div>`)
     .join('');
+  const table = doc.table?.rows.length
+    ? `<table class="tax"><thead><tr>${doc.table.head.map((h, i) => `<th${i === 0 ? ' class="l"' : ''}>${e(h)}</th>`).join('')}</tr></thead><tbody>${doc.table.rows
+        .map((r) => `<tr>${r.map((c, i) => `<td${i === 0 ? ' class="l"' : ''}>${e(c)}</td>`).join('')}</tr>`)
+        .join('')}</tbody></table>`
+    : '';
   const lines = doc.lines?.length ? `<div class="lines">${doc.lines.map((l) => `<div>${multiline(l)}</div>`).join('')}</div>` : '';
   const qr = doc.qr
     ? `<div class="qr">${qrSvg(doc.qr.data, narrow ? 30 : 34)}<div>${e(doc.qr.caption)}</div></div>`
@@ -125,6 +135,9 @@ html, body { margin: 0; padding: 0; background: #fff; }
 body { width: ${width}mm; margin: 0 auto; padding: 2mm 0 4mm; font-family: "Segoe UI", Arial, "Nirmala UI", sans-serif; font-size: ${fs}px; color: #000; line-height: 1.3; }
 .biz { font-size: ${fs + 5}px; font-weight: 700; text-align: center; }
 .c { text-align: center; }
+.b { font-weight: 700; }
+table.tax { margin-top: 4px; font-size: ${fs - 2}px; }
+table.tax th { font-weight: 600; }
 .hdr { margin-top: 2px; }
 .title { text-align: center; font-weight: 700; margin: 4px 0 2px; letter-spacing: 1px; }
 .flag { text-align: center; font-weight: 700; border: 1px solid #000; margin: 3px 0; padding: 1px; }
@@ -157,6 +170,7 @@ ${party}
 ${items}
 <div class="sep"></div>
 ${totals}
+${table}
 ${lines}
 ${qr}
 ${doc.signature ? `<div class="sign">${e(doc.signature)}</div>` : ''}

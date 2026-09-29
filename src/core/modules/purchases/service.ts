@@ -4,6 +4,9 @@
  *   Dr purchase account (default "Purchases"; any expense or fixed-asset account)  total
  *   Cr each payment's cash / bank account                                           paid part
  *   Cr Sundry Creditors (supplier)                                                  credit part
+ * With GST (regular registration) and input tax credit claimed, the purchase account gets the total
+ * less the tax, and the tax goes to Input CGST + SGST (same state) or Input IGST (another state).
+ * Without the credit (not claimed, or a supplier without GSTIN) the tax is part of the cost.
  */
 import type { Ctx } from '../../context';
 import { currentUserId, now } from '../../context';
@@ -31,6 +34,8 @@ import type { SettlementMode } from '../../../shared/constants';
 import { assertCancelKeepsClosedAccounts } from '../accounting/common';
 import { assertSameFinancialYear, itemsSummary, postingLines, resolveDocDate, type PostingLine } from '../customers/common';
 import { getSupplierRow } from '../suppliers/service';
+import { gstConfig, placeOfSupply, useGstAccounts } from '../gst/common';
+import { gstinState, hsnProblem, isGstRate, type GstMode } from '../../../shared/gst';
 
 export interface PurchaseItemInput {
   description: string;
@@ -38,6 +43,9 @@ export interface PurchaseItemInput {
   unit?: string | null;
   /** Rate in paise. */
   rate: number;
+  /** GST rate on the supplier's bill (purchases with GST). */
+  gstRate?: number | null;
+  hsn?: string | null;
 }
 
 export interface PurchasePaymentInput {
@@ -65,6 +73,10 @@ export interface PurchaseInput {
   /** Money paid now. Whatever is not paid is added to the amount payable to the supplier. */
   payments?: PurchasePaymentInput[];
   remarks?: string | null;
+  /** GST: the supplier's rates include the tax (default: tax added on top). */
+  gstInclusive?: boolean | null;
+  /** GST: claim input tax credit (default: when the supplier has a GSTIN). */
+  itc?: boolean | null;
 }
 
 type PaymentModeColumn = SettlementMode | 'credit' | 'split';
@@ -99,6 +111,15 @@ interface PurchaseRow {
   cancelled_by: number | null;
   cancelled_at: string | null;
   cancel_reason: string | null;
+  gst_mode: GstMode;
+  gst_inclusive: number;
+  itc: number;
+  supplier_gstin: string | null;
+  place_of_supply: string | null;
+  taxable_total: number | null;
+  cgst: number;
+  sgst: number;
+  igst: number;
 }
 
 type JoinedRow = PurchaseRow & {
@@ -125,6 +146,28 @@ export interface PurchaseLine {
   qty: number;
   rate: number;
   amount: number;
+  hsn: string | null;
+  gstRate: number | null;
+  taxable: number | null;
+  cgst: number;
+  sgst: number;
+  igst: number;
+}
+
+/** GST of a purchase (mode 'none' without GST). */
+export interface PurchaseGst {
+  mode: GstMode;
+  inclusive: boolean;
+  /** Input tax credit claimed: the tax is in the Input GST accounts instead of the cost. */
+  itc: boolean;
+  supplierGstin: string | null;
+  placeOfSupply: string | null;
+  interState: boolean;
+  taxable: number | null;
+  cgst: number;
+  sgst: number;
+  igst: number;
+  tax: number;
 }
 
 export interface PurchasePayment {
@@ -167,6 +210,7 @@ export interface Purchase {
   cancelledBy: string | null;
   cancelledAt: string | null;
   cancelReason: string | null;
+  gst: PurchaseGst;
 }
 
 export interface PurchaseDetail extends Purchase {
@@ -184,11 +228,36 @@ function getRow(ctx: Ctx, id: number): JoinedRow {
 
 function toPurchase(ctx: Ctx, r: JoinedRow): Purchase {
   const items = ctx.db
-    .all<{ line_no: number; description: string; unit: string | null; qty: number; rate: number; amount: number }>(
-      'SELECT line_no, description, unit, qty, rate, amount FROM purchase_items WHERE purchase_id = ? ORDER BY line_no',
-      [r.id],
-    )
-    .map((i) => ({ lineNo: i.line_no, description: i.description, unit: i.unit, qty: i.qty, rate: i.rate, amount: i.amount }));
+    .all<{
+      line_no: number;
+      description: string;
+      unit: string | null;
+      qty: number;
+      rate: number;
+      amount: number;
+      hsn: string | null;
+      gst_rate: number | null;
+      taxable: number | null;
+      cgst: number;
+      sgst: number;
+      igst: number;
+    }>('SELECT line_no, description, unit, qty, rate, amount, hsn, gst_rate, taxable, cgst, sgst, igst FROM purchase_items WHERE purchase_id = ? ORDER BY line_no', [r.id])
+    .map((i) => ({
+      lineNo: i.line_no,
+      description: i.description,
+      unit: i.unit,
+      qty: i.qty,
+      rate: i.rate,
+      amount: i.amount,
+      hsn: i.hsn,
+      gstRate: i.gst_rate,
+      taxable: i.taxable,
+      cgst: i.cgst,
+      sgst: i.sgst,
+      igst: i.igst,
+    }));
+  const own = gstConfig(ctx);
+  const supplierState = gstinState(r.supplier_gstin) ?? r.place_of_supply;
   const payments = ctx.db
     .all<{ mode: SettlementMode; account_id: number; account_name: string; amount: number; reference: string | null }>(
       `SELECT pp.mode, pp.account_id, a.name AS account_name, pp.amount, pp.reference
@@ -228,6 +297,19 @@ function toPurchase(ctx: Ctx, r: JoinedRow): Purchase {
     cancelledBy: r.cancelled_by_name,
     cancelledAt: r.cancelled_at,
     cancelReason: r.cancel_reason,
+    gst: {
+      mode: r.gst_mode ?? 'none',
+      inclusive: !!r.gst_inclusive,
+      itc: !!r.itc,
+      supplierGstin: r.supplier_gstin,
+      placeOfSupply: r.place_of_supply,
+      interState: r.gst_mode === 'regular' && (r.igst > 0 || (!!supplierState && !!own.stateCode && supplierState !== own.stateCode)),
+      taxable: r.taxable_total,
+      cgst: r.cgst ?? 0,
+      sgst: r.sgst ?? 0,
+      igst: r.igst ?? 0,
+      tax: (r.cgst ?? 0) + (r.sgst ?? 0) + (r.igst ?? 0),
+    },
   };
 }
 
@@ -275,19 +357,30 @@ export interface PurchaseAccountOption {
   isDefault: boolean;
 }
 
-/** What the purchase form needs: allowed accounts and whether totals are rounded by default. */
-export function purchaseFormOptions(ctx: Ctx): { roundOff: boolean; defaultAccountId: number; accounts: PurchaseAccountOption[] } {
+/** What the purchase form needs: allowed accounts, whether totals are rounded by default and the GST settings. */
+export function purchaseFormOptions(ctx: Ctx): {
+  roundOff: boolean;
+  defaultAccountId: number;
+  accounts: PurchaseAccountOption[];
+  gst: { mode: GstMode; stateCode: string | null; defaultRate: number };
+} {
   const def = systemAccountId(ctx, 'PURCHASES');
   const accounts = ctx.db
     .all<{ id: number; name: string; group_name: string }>(
       `SELECT a.id, a.name, g.name AS group_name FROM accounts a JOIN account_groups g ON g.code = a.group_code
         WHERE a.is_active = 1 AND (g.type = 'expense' OR a.group_code = 'fixed_assets')
-          AND COALESCE(a.system_key, '') NOT IN ('DISCOUNT_ALLOWED', 'ROUND_OFF', 'SALARY', 'INTEREST_EXPENSE')
+          AND COALESCE(a.system_key, '') NOT IN ('DISCOUNT_ALLOWED', 'ROUND_OFF', 'SALARY', 'INTEREST_EXPENSE', 'COMPOSITION_TAX')
         ORDER BY CASE WHEN a.id = ? THEN 0 ELSE 1 END, g.sort_order, a.code, a.name COLLATE NOCASE`,
       [def],
     )
     .map((a) => ({ id: a.id, name: a.name, groupName: a.group_name, isDefault: a.id === def }));
-  return { roundOff: getSection(ctx, 'billing').roundOff, defaultAccountId: def, accounts };
+  const cfg = gstConfig(ctx);
+  return {
+    roundOff: getSection(ctx, 'billing').roundOff,
+    defaultAccountId: def,
+    accounts,
+    gst: { mode: cfg.mode === 'regular' ? 'regular' : 'none', stateCode: cfg.stateCode, defaultRate: cfg.defaultRate },
+  };
 }
 
 /* ------------------------------ Validation ------------------------------ */
@@ -299,7 +392,19 @@ interface NormalizedPurchase {
   supplierBillNo: string | null;
   supplierBillDate: string | null;
   account: AccountRow;
-  items: Array<{ description: string; qty: number; unit: string | null; rate: number; amount: number }>;
+  items: Array<{
+    description: string;
+    qty: number;
+    unit: string | null;
+    rate: number;
+    amount: number;
+    hsn: string | null;
+    gstRate: number | null;
+    taxable: number | null;
+    cgst: number;
+    sgst: number;
+    igst: number;
+  }>;
   subtotal: number;
   discount: number;
   otherCharges: number;
@@ -310,19 +415,25 @@ interface NormalizedPurchase {
   credit: number;
   paymentMode: PaymentModeColumn;
   remarks: string | null;
+  gstMode: GstMode;
+  gstInclusive: boolean;
+  itc: boolean;
+  supplierGstin: string | null;
+  placeOfSupply: string | null;
+  gst: { taxable: number; cgst: number; sgst: number; igst: number; tax: number } | null;
 }
 
 function normalize(ctx: Ctx, input: PurchaseInput, before?: PurchaseRow): NormalizedPurchase {
   const date = resolveDocDate(ctx, input.date, { what: 'A purchase', unchangedDate: before?.date });
   if (before) assertSameFinancialYear(before.date, date, `Purchase ${before.purchase_no}`);
 
-  let supplier: { id: number; name: string } | null = null;
+  let supplier: { id: number; name: string; gstin: string | null; state_code: string | null } | null = null;
   if (input.supplierId) {
     const s = getSupplierRow(ctx, input.supplierId);
     if (!s.is_active && s.id !== before?.supplier_id) {
       throw fail.validation(`The supplier "${s.name}" is deactivated. Re-activate the supplier first.`, { supplierId: 'Supplier is deactivated' });
     }
-    supplier = { id: s.id, name: s.name };
+    supplier = { id: s.id, name: s.name, gstin: s.gstin, state_code: s.state_code };
   }
   const supplierName = supplier ? supplier.name : input.supplierName?.trim() || null;
 
@@ -341,7 +452,38 @@ function normalize(ctx: Ctx, input: PurchaseInput, before?: PurchaseRow): Normal
     if (!it.description.trim()) throw fail.validation(`Line ${i + 1}: enter what was bought`, { [`items.${i}.description`]: 'Enter a description' });
   });
   const roundOffEnabled = input.roundOff ?? getSection(ctx, 'billing').roundOff;
-  const t = purchaseTotals({ items: input.items, discount: input.discount, otherCharges: input.otherCharges, roundOff: roundOffEnabled });
+  /* GST: a purchase keeps the treatment it was entered with; only regular registration records the tax separately. */
+  const cfg = gstConfig(ctx);
+  const gstMode: GstMode = before ? (before.gst_mode ?? 'none') : cfg.mode === 'regular' ? 'regular' : 'none';
+  const withGst = gstMode === 'regular';
+  const gstInclusive = withGst ? (input.gstInclusive ?? (before ? !!before.gst_inclusive : false)) : false;
+  const supplierGstin = withGst ? (supplier?.gstin ?? null) : null;
+  const pos = withGst ? placeOfSupply(cfg, supplier) : null;
+  const interState = withGst && !!pos && !!cfg.stateCode && pos !== cfg.stateCode;
+  // Input tax credit needs the supplier's GSTIN on their bill.
+  const itc = withGst && !!supplierGstin && (input.itc ?? true);
+  if (withGst && input.itc && !supplierGstin) {
+    throw fail.validation(
+      supplier ? `Add the GSTIN of ${supplier.name} to claim the GST on this bill.` : 'Choose the supplier (with their GSTIN) to claim the GST on this bill.',
+      { itc: 'Supplier GSTIN needed' },
+    );
+  }
+  const gstRates = input.items.map((it, i) => {
+    if (!withGst) return null;
+    if (it.gstRate !== undefined && it.gstRate !== null && !isGstRate(it.gstRate)) {
+      throw fail.validation(`Line ${i + 1}: choose a GST rate from the list`, { [`items.${i}.gstRate`]: 'Choose a GST rate' });
+    }
+    const problem = hsnProblem(it.hsn);
+    if (problem) throw fail.validation(`Line ${i + 1}: ${problem}`, { [`items.${i}.hsn`]: problem });
+    return it.gstRate ?? cfg.defaultRate;
+  });
+  const t = purchaseTotals({
+    items: input.items.map((it, i) => ({ qty: it.qty, rate: it.rate, gstRate: gstRates[i] })),
+    discount: input.discount,
+    otherCharges: input.otherCharges,
+    roundOff: roundOffEnabled,
+    gst: withGst ? { inclusive: gstInclusive, interState } : null,
+  });
   if (t.discount > t.subtotal) {
     throw fail.validation(`The discount (${formatINR(t.discount)}) cannot be more than the items total (${formatINR(t.subtotal)}).`, { discount: 'Discount is too large' });
   }
@@ -368,18 +510,27 @@ function normalize(ctx: Ctx, input: PurchaseInput, before?: PurchaseRow): Normal
 
   return {
     date,
-    supplier,
+    supplier: supplier ? { id: supplier.id, name: supplier.name } : null,
     supplierName,
     supplierBillNo: input.supplierBillNo?.trim() || null,
     supplierBillDate,
     account: purchaseAccount(ctx, input.expenseAccountId),
-    items: input.items.map((it, i) => ({
-      description: it.description.trim(),
-      qty: it.qty,
-      unit: it.unit?.trim() || null,
-      rate: it.rate,
-      amount: t.amounts[i],
-    })),
+    items: input.items.map((it, i) => {
+      const g = t.gst?.lines[i];
+      return {
+        description: it.description.trim(),
+        qty: it.qty,
+        unit: it.unit?.trim() || null,
+        rate: it.rate,
+        amount: t.amounts[i],
+        hsn: withGst ? it.hsn?.trim() || null : null,
+        gstRate: g ? g.gstRate : null,
+        taxable: g ? g.taxable : null,
+        cgst: g?.cgst ?? 0,
+        sgst: g?.sgst ?? 0,
+        igst: g?.igst ?? 0,
+      };
+    }),
     subtotal: t.subtotal,
     discount: t.discount,
     otherCharges: t.otherCharges,
@@ -390,6 +541,12 @@ function normalize(ctx: Ctx, input: PurchaseInput, before?: PurchaseRow): Normal
     credit,
     paymentMode,
     remarks: input.remarks?.trim() || null,
+    gstMode,
+    gstInclusive,
+    itc,
+    supplierGstin,
+    placeOfSupply: pos,
+    gst: t.gst ? { taxable: t.gst.taxable, cgst: t.gst.cgst, sgst: t.gst.sgst, igst: t.gst.igst, tax: t.gst.tax } : null,
   };
 }
 
@@ -433,7 +590,14 @@ export function findDuplicateBill(ctx: Ctx, supplierId: number, supplierBillNo: 
 
 function entryFor(id: number, purchaseNo: string, v: NormalizedPurchase): EntryInput {
   const who = v.supplierName ?? 'cash purchase';
-  const lines: EntryLineInput[] = [{ account: v.account.id, debit: v.total }];
+  // Input tax credit: the tax is claimed back from the government, so it is not part of the cost.
+  const credit = v.itc && v.gst ? v.gst : null;
+  const lines: EntryLineInput[] = [{ account: v.account.id, debit: v.total - (credit?.tax ?? 0) }];
+  if (credit) {
+    if (credit.cgst) lines.push({ account: 'GST_IN_CGST', debit: credit.cgst });
+    if (credit.sgst) lines.push({ account: 'GST_IN_SGST', debit: credit.sgst });
+    if (credit.igst) lines.push({ account: 'GST_IN_IGST', debit: credit.igst });
+  }
   for (const p of v.payments) lines.push({ account: p.accountId, credit: p.amount, memo: p.reference });
   if (v.credit > 0 && v.supplier) lines.push({ account: 'AP', credit: v.credit, partyType: 'supplier', partyId: v.supplier.id });
   return {
@@ -451,7 +615,21 @@ function writeLines(ctx: Ctx, id: number, v: NormalizedPurchase): void {
   ctx.db.run('DELETE FROM purchase_items WHERE purchase_id = ?', [id]);
   ctx.db.run('DELETE FROM purchase_payments WHERE purchase_id = ?', [id]);
   v.items.forEach((it, i) =>
-    ctx.db.insert('purchase_items', { purchase_id: id, line_no: i + 1, description: it.description, unit: it.unit, qty: it.qty, rate: it.rate, amount: it.amount }),
+    ctx.db.insert('purchase_items', {
+      purchase_id: id,
+      line_no: i + 1,
+      description: it.description,
+      unit: it.unit,
+      qty: it.qty,
+      rate: it.rate,
+      amount: it.amount,
+      hsn: it.hsn,
+      gst_rate: it.gstRate,
+      taxable: it.taxable,
+      cgst: it.cgst,
+      sgst: it.sgst,
+      igst: it.igst,
+    }),
   );
   for (const p of v.payments) {
     ctx.db.insert('purchase_payments', { purchase_id: id, mode: p.mode, account_id: p.accountId, amount: p.amount, reference: p.reference });
@@ -475,6 +653,15 @@ function columns(v: NormalizedPurchase) {
     credit: v.credit,
     payment_mode: v.paymentMode,
     remarks: v.remarks,
+    gst_mode: v.gstMode,
+    gst_inclusive: v.gstInclusive ? 1 : 0,
+    itc: v.itc ? 1 : 0,
+    supplier_gstin: v.supplierGstin,
+    place_of_supply: v.placeOfSupply,
+    taxable_total: v.gst ? v.gst.taxable : null,
+    cgst: v.gst?.cgst ?? 0,
+    sgst: v.gst?.sgst ?? 0,
+    igst: v.gst?.igst ?? 0,
   };
 }
 
@@ -493,6 +680,7 @@ export function createPurchase(ctx: Ctx, input: PurchaseInput): SavedPurchase {
     created_at: now(ctx),
   });
   writeLines(ctx, id, v);
+  if (v.itc && v.gst?.tax) useGstAccounts(ctx);
   const entryId = postEntry(ctx, entryFor(id, num.number, v));
   ctx.db.update('purchases', id, { journal_entry_id: entryId });
   const saved = getPurchase(ctx, id);
@@ -520,6 +708,7 @@ export function updatePurchase(ctx: Ctx, id: number, input: PurchaseInput, reaso
     updated_at: now(ctx),
   });
   writeLines(ctx, id, v);
+  if (v.itc && v.gst?.tax) useGstAccounts(ctx);
   replaceEntry(ctx, before.journal_entry_id!, entryFor(id, before.purchase_no, v));
   const saved = getPurchase(ctx, id);
   recordRevision(ctx, 'purchase', id, 'edited', saved, reason);
@@ -529,6 +718,9 @@ export function updatePurchase(ctx: Ctx, id: number, input: PurchaseInput, reaso
   if (before.date !== v.date) changes.push(`date ${formatDate(before.date)} → ${formatDate(v.date)}`);
   if ((before.supplier_name ?? '') !== (v.supplierName ?? '')) changes.push(`supplier ${before.supplier_name || '-'} → ${v.supplierName || '-'}`);
   if (before.expense_account_id !== v.account.id) changes.push(`account ${before.account_name} → ${v.account.name}`);
+  const taxBefore = before.cgst + before.sgst + before.igst;
+  if (taxBefore !== (v.gst?.tax ?? 0)) changes.push(`GST ${formatINR(taxBefore)} → ${formatINR(v.gst?.tax ?? 0)}`);
+  if (!!before.itc !== v.itc) changes.push(v.itc ? 'GST credit claimed' : 'GST credit not claimed');
   logActivity(
     ctx,
     'purchase.update',

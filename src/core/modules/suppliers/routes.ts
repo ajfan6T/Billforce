@@ -13,6 +13,9 @@ const zSupplierInput = z.object({
   contactPerson: zOptText(120),
   notes: zOptText(1000),
   openingBalance: z.object({ amount: zPaise, direction: z.enum(['payable', 'advance']) }).nullish(),
+  // GST: left out = unchanged.
+  gstin: z.string().trim().max(20).nullable().optional(),
+  stateCode: z.string().trim().max(2).nullable().optional(),
 });
 
 export const suppliersRoutes = {
@@ -26,7 +29,12 @@ export const suppliersRoutes = {
   'suppliers.quickCreate': route({
     access: 'suppliers.manage',
     mutation: true,
-    input: z.object({ name: z.string().trim().min(1, 'Enter the supplier name').max(120), phone: zPhone }),
+    input: z.object({
+      name: z.string().trim().min(1, 'Enter the supplier name').max(120),
+      phone: zPhone,
+      gstin: z.string().trim().max(20).nullish(),
+      stateCode: z.string().trim().max(2).nullish(),
+    }),
     handler: (ctx, input) => suppliers.quickCreateSupplier(ctx, input),
   }),
 

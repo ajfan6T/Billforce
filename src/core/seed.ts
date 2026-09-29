@@ -1,5 +1,5 @@
 import type { Db } from './db/database';
-import { ACCOUNT_GROUPS, DEFAULT_ACCOUNTS, SYSTEM_ACCOUNTS } from './accounting/chart';
+import { ACCOUNT_GROUPS, DEFAULT_ACCOUNTS, GST_ACCOUNTS, SYSTEM_ACCOUNTS, type AccountSeed } from './accounting/chart';
 import { ALL_PERMISSIONS, DEFAULT_ROLE_PERMISSIONS, type Permission } from '../shared/permissions';
 
 /** Permissions added in the same version that started tracking known permissions (meta.known_permissions). */
@@ -21,22 +21,8 @@ export function seedReferenceData(db: Db, timestamp: string): void {
         [g.code, g.name, g.type, g.sort, g.allowUserAccounts ? 1 : 0, g.description],
       );
     }
-    for (const a of SYSTEM_ACCOUNTS) {
-      const exists = db.value<number>('SELECT COUNT(*) FROM accounts WHERE system_key = ?', [a.systemKey], 0);
-      if (exists) continue;
-      // Avoid clashing with an account the user created with the same name or code.
-      const nameTaken = db.value<number>('SELECT COUNT(*) FROM accounts WHERE name = ?', [a.name], 0);
-      const codeTaken = db.value<number>('SELECT COUNT(*) FROM accounts WHERE code = ?', [a.code], 0);
-      db.insert('accounts', {
-        code: codeTaken ? null : a.code,
-        name: nameTaken ? `${a.name} (system)` : a.name,
-        group_code: a.group,
-        system_key: a.systemKey,
-        party_type: a.partyType ?? null,
-        description: a.description ?? null,
-        created_at: timestamp,
-      });
-    }
+    ensureAccounts(db, SYSTEM_ACCOUNTS, timestamp);
+    if (gstRegistered(db)) ensureAccounts(db, GST_ACCOUNTS, timestamp);
     // Grant defaults for permissions this database has never seen (new install, or a
     // permission added in a newer version). Permissions the owner already reviewed are
     // left exactly as the owner set them.
@@ -63,6 +49,40 @@ export function seedReferenceData(db: Db, timestamp: string): void {
       [JSON.stringify(ALL_PERMISSIONS), timestamp],
     );
   });
+}
+
+/** Create the system accounts in `seeds` that are missing (matched by system key). */
+function ensureAccounts(db: Db, seeds: AccountSeed[], timestamp: string): void {
+  for (const a of seeds) {
+    const exists = db.value<number>('SELECT COUNT(*) FROM accounts WHERE system_key = ?', [a.systemKey], 0);
+    if (exists) continue;
+    // Avoid clashing with an account the user created with the same name or code.
+    const nameTaken = db.value<number>('SELECT COUNT(*) FROM accounts WHERE name = ?', [a.name], 0);
+    const codeTaken = db.value<number>('SELECT COUNT(*) FROM accounts WHERE code = ?', [a.code], 0);
+    db.insert('accounts', {
+      code: codeTaken ? null : a.code,
+      name: nameTaken ? `${a.name} (system)` : a.name,
+      group_code: a.group,
+      system_key: a.systemKey,
+      party_type: a.partyType ?? null,
+      description: a.description ?? null,
+      created_at: timestamp,
+    });
+  }
+}
+
+function gstRegistered(db: Db): boolean {
+  try {
+    const gst = JSON.parse(db.value<string>("SELECT value FROM settings WHERE key = 'gst'", undefined, '{}'));
+    return gst?.registration === 'regular' || gst?.registration === 'composition';
+  } catch {
+    return false;
+  }
+}
+
+/** The GST accounts (output / input tax, composition tax). Called when the business registers for GST. */
+export function ensureGstAccounts(db: Db, timestamp: string): void {
+  db.tx(() => ensureAccounts(db, GST_ACCOUNTS, timestamp));
 }
 
 /** Common expense heads etc. Created once when the business is set up. */

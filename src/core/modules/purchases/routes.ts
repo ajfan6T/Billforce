@@ -19,6 +19,8 @@ const zPurchaseInput = z.object({
         qty: zQty,
         unit: zOptText(20),
         rate: zPaise,
+        gstRate: z.number().min(0).max(40).nullish(),
+        hsn: zOptText(8),
       }),
     )
     .min(1, 'Add at least one item')
@@ -31,6 +33,8 @@ const zPurchaseInput = z.object({
     .max(10)
     .optional(),
   remarks: zOptText(500),
+  gstInclusive: z.boolean().nullish(),
+  itc: z.boolean().nullish(),
 });
 
 const zPaymentInput = z.object({

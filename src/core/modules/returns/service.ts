@@ -18,6 +18,11 @@
  *     anything more is adjusted in the customer's account. Money refunded to a customer therefore
  *     never adds up to more than the money received from them.
  * Credit notes without goods need "returns.adjust".
+ *
+ * Returns against a bill with GST refund the tax too: the line value paid includes the tax, and each
+ * return line takes back its part of the line's CGST / SGST / IGST (the rest of it when the line is
+ * fully refunded), posted Dr Output CGST / SGST / IGST, with Dr SALES_RETURNS for the value without tax.
+ * Credit notes without goods carry no GST.
  */
 import type { Ctx } from '../../context';
 import { assertCan, can, currentUserId, now, requireSession, today } from '../../context';
@@ -34,7 +39,9 @@ import { PAYMENT_MODE_LABELS, type PaymentMode, type SettlementMode } from '../.
 import { assertCancelKeepsClosedAccounts } from '../accounting/common';
 import { openingDebit } from '../customers/common';
 import { netLineAmounts, paidRate, returnLineAmount, returnNoteTotal, returnSettlesBill, roundQty, type BillPaymentMode } from '../../../shared/billing';
-import { customerBalanceLine, customerSummary, getBillRow, itemCountLine, sendToReceiptPrinter, type BillCustomer, type RevisionSummary } from '../sales/service';
+import { billGst, customerBalanceLine, customerSummary, getBillRow, itemCountLine, sendToReceiptPrinter, type BillCustomer, type BillGst, type RevisionSummary } from '../sales/service';
+import { formatRate, stateLabel, taxOf, taxShare, type LineTax } from '../../../shared/gst';
+import { gstTable, useGstAccounts } from '../gst/common';
 
 /* ------------------------------------------------------------------ */
 /* Types                                                               */
@@ -69,6 +76,10 @@ export interface CreditNoteRow {
   cancelled_by: number | null;
   cancelled_at: string | null;
   cancel_reason: string | null;
+  taxable_total: number | null;
+  cgst: number;
+  sgst: number;
+  igst: number;
 }
 
 export interface ReturnableLine {
@@ -93,6 +104,8 @@ export interface ReturnableLine {
   returnedAmount: number;
   /** Most that can still be refunded for this line (netAmount - returnedAmount). */
   refundable: number;
+  /** GST rate of the line (bills with GST; rates and amounts then include the tax). */
+  gstRate: number | null;
 }
 
 export interface BillReturnable {
@@ -110,6 +123,8 @@ export interface BillReturnable {
     paid: number;
     credit: number;
     paymentMode: BillPaymentMode;
+    /** The bill charged GST: refunds include the tax, which is taken back too. */
+    gst: boolean;
   };
   lines: ReturnableLine[];
   /** Total of active returns / credit notes already made against the bill. */
@@ -178,6 +193,11 @@ export interface CreditNoteItem {
   qty: number;
   rate: number;
   amount: number;
+  gstRate: number | null;
+  taxable: number | null;
+  cgst: number;
+  sgst: number;
+  igst: number;
 }
 
 export interface CreditNoteDetail {
@@ -207,8 +227,10 @@ export interface CreditNoteDetail {
   createdByName: string | null;
   cancelledAt: string | null;
   cancelledByName: string | null;
-  cancelReason: string | null;
+ cancelReason: string | null;
   revisions: RevisionSummary[];
+  /** GST of the bill returned against (mode 'none' without GST) and the tax taken back. */
+  gst: BillGst;
 }
 
 /* ------------------------------------------------------------------ */
@@ -228,7 +250,13 @@ export function getCreditNoteRow(ctx: Ctx, id: number): CreditNoteRow {
 
 export function getCreditNote(ctx: Ctx, id: number): CreditNoteDetail {
   const r = getCreditNoteRow(ctx, id);
-  const bill = r.bill_id ? ctx.db.get<{ bill_no: string; date: string; customer_phone: string | null }>('SELECT bill_no, date, customer_phone FROM bills WHERE id = ?', [r.bill_id]) : undefined;
+  const billRow = r.bill_id ? getBillRow(ctx, r.bill_id) : undefined;
+  const bill = billRow ? { bill_no: billRow.bill_no, date: billRow.date, customer_phone: billRow.customer_phone } : undefined;
+  const bg = billRow ? billGst(billRow) : null;
+  const gst: BillGst =
+    bg && bg.mode === 'regular'
+      ? { ...bg, taxable: r.taxable_total, cgst: r.cgst, sgst: r.sgst, igst: r.igst, tax: r.cgst + r.sgst + r.igst }
+      : { mode: bg?.mode ?? 'none', inclusive: false, sellerGstin: bg?.sellerGstin ?? null, customerGstin: bg?.customerGstin ?? null, placeOfSupply: null, interState: false, taxable: null, cgst: 0, sgst: 0, igst: 0, tax: 0 };
   let customer: BillCustomer | null = null;
   if (r.customer_id) {
     try {
@@ -238,11 +266,38 @@ export function getCreditNote(ctx: Ctx, id: number): CreditNoteDetail {
     }
   }
   const items = ctx.db
-    .all<{ id: number; line_no: number; bill_item_id: number | null; item_id: number | null; item_name: string; unit: string | null; qty: number; rate: number; amount: number }>(
-      'SELECT * FROM credit_note_items WHERE credit_note_id = ? ORDER BY line_no',
-      [id],
-    )
-    .map((i) => ({ id: i.id, lineNo: i.line_no, billItemId: i.bill_item_id, itemId: i.item_id, itemName: i.item_name, unit: i.unit, qty: i.qty, rate: i.rate, amount: i.amount }));
+    .all<{
+      id: number;
+      line_no: number;
+      bill_item_id: number | null;
+      item_id: number | null;
+      item_name: string;
+      unit: string | null;
+      qty: number;
+      rate: number;
+      amount: number;
+      gst_rate: number | null;
+      taxable: number | null;
+      cgst: number;
+      sgst: number;
+      igst: number;
+    }>('SELECT * FROM credit_note_items WHERE credit_note_id = ? ORDER BY line_no', [id])
+    .map((i) => ({
+      id: i.id,
+      lineNo: i.line_no,
+      billItemId: i.bill_item_id,
+      itemId: i.item_id,
+      itemName: i.item_name,
+      unit: i.unit,
+      qty: i.qty,
+      rate: i.rate,
+      amount: i.amount,
+      gstRate: i.gst_rate,
+      taxable: i.taxable,
+      cgst: i.cgst,
+      sgst: i.sgst,
+      igst: i.igst,
+    }));
   return {
     id: r.id,
     cnNo: r.cn_no,
@@ -272,6 +327,7 @@ export function getCreditNote(ctx: Ctx, id: number): CreditNoteDetail {
     cancelledByName: userName(ctx, r.cancelled_by),
     cancelReason: r.cancel_reason,
     revisions: listRevisions(ctx, 'credit_note', id).map((v) => ({ revision: v.revision, action: v.action, reason: v.reason, username: v.username, at: v.at })),
+    gst,
   };
 }
 
@@ -402,10 +458,8 @@ export function watchMoneyRefunds(ctx: Ctx, customerId: number): () => string[] 
 /** What can still be returned from a bill, with the rate the customer actually paid. */
 export function billReturnable(ctx: Ctx, billId: number): BillReturnable {
   const bill = getBillRow(ctx, billId);
-  const items = ctx.db.all<{ id: number; item_id: number | null; item_name: string; unit: string | null; qty: number; rate: number; amount: number }>(
-    'SELECT id, item_id, item_name, unit, qty, rate, amount FROM bill_items WHERE bill_id = ? ORDER BY line_no',
-    [billId],
-  );
+  const items = billLines(ctx, billId);
+  const withGst = bill.gst_mode === 'regular';
   const returned = new Map(
     ctx.db
       .all<{ bill_item_id: number; qty: number; amount: number; min_rate: number }>(
@@ -417,9 +471,10 @@ export function billReturnable(ctx: Ctx, billId: number): BillReturnable {
       )
       .map((r) => [r.bill_item_id, r]),
   );
-  // What was really paid for each line: bill discount and a rounding down shared out exactly.
+  // What was really paid for each line: bill discount and a rounding down shared out exactly
+  // (with GST, the line value is after the bill discount and includes the tax).
   const net = netLineAmounts(
-    items.map((i) => i.amount),
+    items.map((i) => (withGst ? i.value : i.amount)),
     bill.total,
   );
   const lines = items.map((it, idx): ReturnableLine => {
@@ -439,6 +494,7 @@ export function billReturnable(ctx: Ctx, billId: number): BillReturnable {
       netAmount: net[idx],
       returnedAmount,
       refundable: Math.max(0, net[idx] - returnedAmount),
+      gstRate: withGst ? it.gst_rate : null,
     };
   });
   const sums = ctx.db.get<{ total: number; value: number; money: number; adjusted: number }>(
@@ -486,6 +542,7 @@ export function billReturnable(ctx: Ctx, billId: number): BillReturnable {
       paid: bill.paid,
       credit: bill.credit,
       paymentMode: bill.payment_mode,
+      gst: withGst,
     },
     lines,
     returnedTotal: sums.total,
@@ -499,6 +556,45 @@ export function billReturnable(ctx: Ctx, billId: number): BillReturnable {
     roundOff: getSection(ctx, 'billing').roundOff,
     suggestedRefundMode,
   };
+}
+
+interface BillLine {
+  id: number;
+  item_id: number | null;
+  item_name: string;
+  unit: string | null;
+  qty: number;
+  rate: number;
+  amount: number;
+  gst_rate: number | null;
+  taxable: number | null;
+  cgst: number;
+  sgst: number;
+  igst: number;
+  /** taxable + tax (bills with GST). */
+  value: number;
+}
+
+function billLines(ctx: Ctx, billId: number): BillLine[] {
+  return ctx.db
+    .all<Omit<BillLine, 'value'>>(
+      'SELECT id, item_id, item_name, unit, qty, rate, amount, gst_rate, taxable, cgst, sgst, igst FROM bill_items WHERE bill_id = ? ORDER BY line_no',
+      [billId],
+    )
+    .map((l) => ({ ...l, value: (l.taxable ?? 0) + l.cgst + l.sgst + l.igst }));
+}
+
+/** Tax of a return line: its part of the bill line's tax, and all that is left when the line is fully refunded. */
+function returnLineTax(ctx: Ctx, line: BillLine, amount: number, fullyRefunded: boolean): LineTax {
+  const back = ctx.db.get<{ cgst: number; sgst: number; igst: number }>(
+    `SELECT COALESCE(SUM(i.cgst), 0) AS cgst, COALESCE(SUM(i.sgst), 0) AS sgst, COALESCE(SUM(i.igst), 0) AS igst
+       FROM credit_note_items i JOIN credit_notes n ON n.id = i.credit_note_id
+      WHERE i.bill_item_id = ? AND n.status = 'active'`,
+    [line.id],
+  ) ?? { cgst: 0, sgst: 0, igst: 0 };
+  const whole = { taxable: line.taxable ?? 0, cgst: line.cgst, sgst: line.sgst, igst: line.igst };
+  const left = { taxable: 0, cgst: Math.max(0, line.cgst - back.cgst), sgst: Math.max(0, line.sgst - back.sgst), igst: Math.max(0, line.igst - back.igst) };
+  return taxShare(whole, line.value, amount, left, fullyRefunded);
 }
 
 /** Bills to return goods against: search by bill number, customer name or phone (any date). */
@@ -552,6 +648,8 @@ interface PreparedItem {
   qty: number;
   rate: number;
   amount: number;
+  gstRate: number | null;
+  tax: LineTax | null;
 }
 
 export type CreditNoteResult = CreditNoteDetail & { warnings: string[] };
@@ -575,6 +673,7 @@ export function createCreditNote(ctx: Ctx, input: CreateCreditNoteInput): Credit
     date = checkDate(ctx, input.date, 'return');
     if (date < bill.date) throw fail.validation(`A return cannot be dated before its bill (${formatDate(bill.date)}).`, { date: 'Before the bill date' });
     const r = billReturnable(ctx, bill.id);
+    const gstLines = r.bill.gst ? billLines(ctx, bill.id) : [];
     if (!input.items.length) throw fail.validation('Choose at least one item to return.', { items: 'Choose an item' });
     const seen = new Set<number>();
     items = input.items.map((ri, idx) => {
@@ -604,7 +703,14 @@ export function createCreditNote(ctx: Ctx, input: CreateCreditNoteInput): Credit
         });
       }
       const amount = returnLineAmount(line, qty, rate);
-      return { billItemId: line.billItemId, itemId: line.itemId, itemName: line.itemName, unit: line.unit, qty, rate, amount };
+      let tax: LineTax | null = null;
+      if (r.bill.gst) {
+        const billLine = gstLines.find((l) => l.id === line.billItemId)!;
+        // Everything left of the line at the rate paid (or all of its money) takes back all of its tax that is left.
+        const all = amount >= line.refundable || (qty >= roundQty(line.returnable) && rate === line.netRate);
+        tax = returnLineTax(ctx, billLine, amount, all);
+      }
+      return { billItemId: line.billItemId, itemId: line.itemId, itemName: line.itemName, unit: line.unit, qty, rate, amount, gstRate: line.gstRate, tax };
     });
     subtotal = items.reduce((s, i) => s + i.amount, 0);
     if (subtotal <= 0) {
@@ -668,6 +774,13 @@ export function createCreditNote(ctx: Ctx, input: CreateCreditNoteInput): Credit
     total = input.amount;
   }
   const roundOff = total - subtotal;
+  const withTax = items.some((i) => i.tax);
+  const tax = {
+    cgst: items.reduce((s, i) => s + (i.tax?.cgst ?? 0), 0),
+    sgst: items.reduce((s, i) => s + (i.tax?.sgst ?? 0), 0),
+    igst: items.reduce((s, i) => s + (i.tax?.igst ?? 0), 0),
+  };
+  const taxTotal = taxOf(tax);
 
   let refundAccountId: number | null = null;
   const warnings: string[] = [];
@@ -697,6 +810,10 @@ export function createCreditNote(ctx: Ctx, input: CreateCreditNoteInput): Credit
     revision: 1,
     created_by: currentUserId(ctx),
     created_at: now(ctx),
+    taxable_total: withTax ? subtotal - taxTotal : null,
+    cgst: tax.cgst,
+    sgst: tax.sgst,
+    igst: tax.igst,
   });
   items.forEach((it, i) => {
     ctx.db.insert('credit_note_items', {
@@ -709,10 +826,22 @@ export function createCreditNote(ctx: Ctx, input: CreateCreditNoteInput): Credit
       qty: it.qty,
       rate: it.rate,
       amount: it.amount,
+      gst_rate: it.tax ? it.gstRate : null,
+      taxable: it.tax ? it.tax.taxable : null,
+      cgst: it.tax?.cgst ?? 0,
+      sgst: it.tax?.sgst ?? 0,
+      igst: it.tax?.igst ?? 0,
     });
   });
 
-  const lines: EntryLineInput[] = [{ account: 'SALES_RETURNS', debit: subtotal }];
+  // With GST the refund includes the tax: Sales Returns gets the value without it and the tax comes off Output GST.
+  const lines: EntryLineInput[] = [{ account: 'SALES_RETURNS', debit: subtotal - taxTotal }];
+  if (taxTotal) {
+    useGstAccounts(ctx);
+    if (tax.cgst) lines.push({ account: 'GST_OUT_CGST', debit: tax.cgst });
+    if (tax.sgst) lines.push({ account: 'GST_OUT_SGST', debit: tax.sgst });
+    if (tax.igst) lines.push({ account: 'GST_OUT_IGST', debit: tax.igst });
+  }
   if (roundOff > 0) lines.push({ account: 'ROUND_OFF', debit: roundOff });
   if (roundOff < 0) lines.push({ account: 'ROUND_OFF', credit: -roundOff });
   if (input.refundMode === 'credit') lines.push({ account: 'AR', credit: total, partyType: 'customer', partyId: customerId!, memo: 'Adjusted in account' });
@@ -772,10 +901,20 @@ export function creditNoteSnapshot(d: CreditNoteDetail) {
     billNo: d.billNo,
     customerId: d.customerId,
     customerName: d.customerName,
-    items: d.items.map((i) => ({ billItemId: i.billItemId, itemId: i.itemId, itemName: i.itemName, unit: i.unit, qty: i.qty, rate: i.rate, amount: i.amount })),
+    items: d.items.map((i) => ({
+      billItemId: i.billItemId,
+      itemId: i.itemId,
+      itemName: i.itemName,
+      unit: i.unit,
+      qty: i.qty,
+      rate: i.rate,
+      amount: i.amount,
+      ...(d.gst.mode === 'regular' ? { gstRate: i.gstRate, cgst: i.cgst, sgst: i.sgst, igst: i.igst } : {}),
+    })),
     subtotal: d.subtotal,
     roundOff: d.roundOff,
     total: d.total,
+    ...(d.gst.mode === 'regular' ? { gst: { taxable: d.gst.taxable, cgst: d.gst.cgst, sgst: d.gst.sgst, igst: d.gst.igst } } : {}),
     refundMode: d.refundMode,
     refundAccountId: d.refundAccountId,
     refundAccountName: d.refundAccountName,
@@ -887,6 +1026,9 @@ export function creditNoteReceiptDoc(ctx: Ctx, d: CreditNoteDetail, opts: { dupl
   ];
   if (d.billNo) meta.push(['Against Bill', `${d.billNo}${d.billDate ? ` (${formatDate(d.billDate)})` : ''}`]);
   if (receipt.showCashier && d.createdByName) meta.push(['Cashier', d.createdByName]);
+  const g = d.gst;
+  const taxNote = g.mode === 'regular';
+  if (taxNote && g.placeOfSupply && (g.interState || g.customerGstin)) meta.push(['Place of supply', stateLabel(g.placeOfSupply)]);
   const totals: ReceiptTotal[] = [];
   if (d.roundOff !== 0) {
     totals.push({ label: 'Subtotal', value: formatINR(d.subtotal) });
@@ -899,6 +1041,7 @@ export function creditNoteReceiptDoc(ctx: Ctx, d: CreditNoteDetail, opts: { dupl
   });
   const lines: string[] = [];
   if (d.items.length) lines.push(itemCountLine(d.items));
+  if (taxNote && g.tax) lines.push(`Includes GST of ${formatINR(g.tax)} taken back`);
   if (receipt.showAmountInWords) lines.push(amountInWords(d.total));
   // For the customer: the real balance from the books, even when the user printing may not see balances.
   if (d.refundMode === 'credit' && d.customerId && d.customer && d.status === 'active') {
@@ -906,14 +1049,24 @@ export function creditNoteReceiptDoc(ctx: Ctx, d: CreditNoteDetail, opts: { dupl
   }
   if (d.reason) lines.push(`Reason: ${d.reason}`);
   if (d.status === 'cancelled') lines.push(`Cancelled${d.cancelledAt ? ` on ${formatDate(d.cancelledAt)}` : ''}: ${d.cancelReason ?? ''}`);
+  const showParty = d.customerName && (receipt.showCustomer || !!g.customerGstin);
   return {
-    title: d.kind === 'return' ? 'SALES RETURN' : 'CREDIT NOTE',
+    // Under GST a return is documented by a credit note.
+    title: d.kind === 'return' && !taxNote ? 'SALES RETURN' : 'CREDIT NOTE',
+    headerLines: g.mode !== 'none' && g.sellerGstin ? [`GSTIN: ${g.sellerGstin}`] : undefined,
     duplicate: !!opts.duplicate,
     cancelled: d.status === 'cancelled',
     meta,
-    party: receipt.showCustomer && d.customerName ? { label: 'Customer', name: d.customerName, phone: d.customerPhone } : undefined,
-    items: d.items.map((i) => ({ name: i.itemName, qty: `${formatQty(i.qty)}${i.unit ? ' ' + i.unit : ''}`, rate: formatAmount(i.rate), amount: formatAmount(i.amount) })),
+    party: showParty ? { label: 'Customer', name: d.customerName!, phone: d.customerPhone, extra: g.customerGstin ? `GSTIN: ${g.customerGstin}` : null } : undefined,
+    items: d.items.map((i) => ({
+      name: i.itemName,
+      qty: `${formatQty(i.qty)}${i.unit ? ' ' + i.unit : ''}`,
+      rate: formatAmount(i.rate),
+      amount: formatAmount(i.amount),
+      note: taxNote && i.gstRate !== null ? `GST ${formatRate(i.gstRate)}` : undefined,
+    })),
     totals,
+    table: taxNote && g.tax ? gstTable(d.items, g.interState) : undefined,
     lines,
     signature: d.refundMode !== 'credit' ? "Receiver's signature" : undefined,
   };

@@ -12,6 +12,9 @@ const zLine = z.object({
   rate: zPaise,
   discount: zPaise.nullish(),
   discountPct: zPct.nullish(),
+  /** GST rate / HSN of a one-time line (bills with GST). */
+  gstRate: z.number().min(0).max(40).nullish(),
+  hsn: zOptText(8),
 });
 
 const zPayment = z.object({
