@@ -11,6 +11,9 @@ import { todayISO } from '../../../shared/dates';
 import type { PartyType } from '../../../shared/constants';
 import './accounts.css';
 
+/** Stock in Hand follows the stock movements, so journals cannot post to it. */
+const HIDDEN_ACCOUNTS = ['STOCK'];
+
 interface Party {
   type: PartyType;
   id: number;
@@ -230,7 +233,7 @@ export function JournalFormPage() {
               return (
                 <div className="ac-line" key={l.key}>
                   <span className="ac-line-no">{i + 1}</span>
-                  <AccountSelect value={l.accountId} onChange={(id) => pickAccount(l, id)} alsoShow={savedAccountIds} placeholder="Choose account…" />
+                  <AccountSelect value={l.accountId} onChange={(id) => pickAccount(l, id)} alsoShow={savedAccountIds} hideSystem={HIDDEN_ACCOUNTS} placeholder="Choose account…" />
                   <div>
                     {pt === 'customer' ? (
                       <CustomerPicker

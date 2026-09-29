@@ -39,7 +39,7 @@ export function ItemStockPage() {
             {d.item.trackStock ? (
               <>
                 In stock on {range.to.split('-').reverse().join('-')}: <b>{`${formatQty(d.stockNow.qty)} ${d.item.unit}`}</b>
-                {d.stockNow.costKnown ? ` · average cost ${formatINR(Math.round(d.stockNow.avgCost))} · value ${formatINR(d.stockNow.value)}` : ' · no cost yet'}{' '}
+                {d.costHidden ? '' : d.stockNow.costKnown ? ` · average cost ${formatINR(Math.round(d.stockNow.avgCost))} · value ${formatINR(d.stockNow.value)}` : ' · no cost yet'}{' '}
                 <StockStatusBadge status={d.stockNow.status} />
               </>
             ) : (

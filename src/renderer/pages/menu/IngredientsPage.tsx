@@ -3,7 +3,7 @@ import { Link } from 'react-router';
 import { Carrot, Pencil, Plus, Power } from 'lucide-react';
 import { call, type ApiOutput } from '../../api';
 import { useDebounced, useHotkeys, useMutation, useQuery } from '../../hooks';
-import { useAuth, useFeatures } from '../../auth';
+import { useAuth, useCanSeeCosts, useFeatures } from '../../auth';
 import { useDialogs, useToast } from '../../feedback';
 import { Alert, Badge, Button, EmptyState, ErrorBox, IconButton, Page, PageHeader, Toolbar } from '../../components/ui';
 import { Checkbox, Field, FormGrid, NumberInput, SearchInput, Select, TextInput } from '../../components/forms';
@@ -90,6 +90,7 @@ export function IngredientModal({ open, initialName = '', onClose, onSaved }: { 
 export function IngredientsPage() {
   const { can } = useAuth();
   const features = useFeatures();
+  const showCost = useCanSeeCosts();
   const manage = can('items.manage');
   const toast = useToast();
   const dialogs = useDialogs();
@@ -146,13 +147,17 @@ export function IngredientsPage() {
           { key: 'reorderLevel', label: 'Low at', align: 'right' as const, render: (i: Ingredient) => (i.reorderLevel ? `${formatQty(i.reorderLevel)} ${i.unit}` : <span className="faint">—</span>) } satisfies Column<Ingredient>,
         ]
       : []),
-    {
-      key: 'avgCost',
-      label: 'Average cost',
-      align: 'right',
-      value: (i) => i.avgCost ?? -1,
-      render: (i) => (i.avgCost === null ? <span className="faint">not bought yet</span> : <span className="money">{`${formatINR(i.avgCost)}/${i.unit}`}</span>),
-    },
+    ...(showCost
+      ? [
+          {
+            key: 'avgCost',
+            label: 'Average cost',
+            align: 'right' as const,
+            value: (i: Ingredient) => i.avgCost ?? -1,
+            render: (i: Ingredient) => (i.avgCost === null ? <span className="faint">not bought yet</span> : <span className="money">{`${formatINR(i.avgCost)}/${i.unit}`}</span>),
+          } satisfies Column<Ingredient>,
+        ]
+      : []),
     { key: 'usedIn', label: 'Used in', type: 'number', render: (i) => (i.usedIn ? `${i.usedIn} dish${i.usedIn === 1 ? '' : 'es'}` : <span className="faint">no recipe</span>) },
     {
       key: 'status',

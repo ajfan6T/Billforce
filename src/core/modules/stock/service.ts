@@ -30,7 +30,7 @@ import { openingLockedReason } from '../accounting/common';
 import { resolveDocDate, userName } from '../customers/common';
 import { formatINR, formatQty, lineAmount } from '../../../shared/money';
 import { formatDate } from '../../../shared/dates';
-import { itemStocks, roundStockQty, stockEnabled, stockOnHand, type ItemStock } from './valuation';
+import { itemStocks, revalueStock, roundStockQty, stockEnabled, stockOnHand, type ItemStock } from './valuation';
 
 export type MoveKind = 'opening' | 'purchase' | 'sale' | 'sale_return' | 'adjustment';
 export type MoveSource = 'opening' | 'bill' | 'credit_note' | 'purchase' | 'adjustment';
@@ -54,16 +54,32 @@ export function trackedItems(ctx: Ctx, ids: Array<number | null | undefined>): S
   return new Set(rows.map((r) => r.id));
 }
 
-/** Replace the stock movements of a document (only tracked items move stock). */
-export function writeDocumentMoves(ctx: Ctx, sourceType: MoveSource, sourceId: number | null, date: string, moves: MoveInput[]): void {
-  removeDocumentMoves(ctx, sourceType, sourceId);
+/**
+ * Replace the stock movements of a document. New documents move the items tracked now. An edited
+ * document keeps to the items it moved before, plus tracked items it did not have (`before` = the
+ * items on it before the edit), so ticking or unticking "Track stock" later never changes what an
+ * old bill or purchase did to stock.
+ */
+export function writeDocumentMoves(
+  ctx: Ctx,
+  sourceType: MoveSource,
+  sourceId: number | null,
+  date: string,
+  moves: MoveInput[],
+  opts: { before?: Iterable<number>; allItems?: boolean } = {},
+): void {
+  const old = oldMoves(ctx, sourceType, sourceId);
+  const moved = new Set(old.map((o) => o.item_id));
+  const before = new Set(opts.before ?? []);
+  deleteMoves(ctx, sourceType, sourceId);
   const tracked = trackedItems(
     ctx,
     moves.map((m) => m.itemId),
   );
   const at = now(ctx);
+  const touched = new Set(moved);
   for (const m of moves) {
-    if (!tracked.has(m.itemId) || !m.qty) continue;
+    if (!m.qty || !(opts.allItems || moved.has(m.itemId) || (tracked.has(m.itemId) && !before.has(m.itemId)))) continue;
     ctx.db.insert('stock_moves', {
       item_id: m.itemId,
       date,
@@ -76,12 +92,32 @@ export function writeDocumentMoves(ctx: Ctx, sourceType: MoveSource, sourceId: n
       note: m.note ?? null,
       created_at: at,
     });
+    touched.add(m.itemId);
   }
+  const from = [date, ...old.map((o) => o.date)].sort()[0];
+  revalueStock(ctx.db, touched, from);
+}
+
+function oldMoves(ctx: Ctx, sourceType: MoveSource, sourceId: number | null): Array<{ item_id: number; date: string }> {
+  return sourceId === null
+    ? ctx.db.all('SELECT item_id, MIN(date) AS date FROM stock_moves WHERE source_type = ? AND source_id IS NULL GROUP BY item_id', [sourceType])
+    : ctx.db.all('SELECT item_id, MIN(date) AS date FROM stock_moves WHERE source_type = ? AND source_id = ? GROUP BY item_id', [sourceType, sourceId]);
+}
+
+function deleteMoves(ctx: Ctx, sourceType: MoveSource, sourceId: number | null): void {
+  if (sourceId === null) ctx.db.run('DELETE FROM stock_moves WHERE source_type = ? AND source_id IS NULL', [sourceType]);
+  else ctx.db.run('DELETE FROM stock_moves WHERE source_type = ? AND source_id = ?', [sourceType, sourceId]);
 }
 
 export function removeDocumentMoves(ctx: Ctx, sourceType: MoveSource, sourceId: number | null): void {
-  if (sourceId === null) ctx.db.run('DELETE FROM stock_moves WHERE source_type = ? AND source_id IS NULL', [sourceType]);
-  else ctx.db.run('DELETE FROM stock_moves WHERE source_type = ? AND source_id = ?', [sourceType, sourceId]);
+  const old = oldMoves(ctx, sourceType, sourceId);
+  if (!old.length) return;
+  deleteMoves(ctx, sourceType, sourceId);
+  revalueStock(
+    ctx.db,
+    old.map((o) => o.item_id),
+    old.map((o) => o.date).sort()[0],
+  );
 }
 
 /**
@@ -212,7 +248,14 @@ export function saveOpeningStock(ctx: Ctx, input: Array<{ itemId: number; qty: n
     if (!(l.qty >= 0) || Math.abs(Math.round(l.qty * 1000) - l.qty * 1000) > 1e-6) throw fail.validation(`Enter the quantity of ${name} (up to 3 decimals).`, { [`lines.${i}.qty`]: 'Invalid quantity' });
     if (!Number.isInteger(l.unitCost) || l.unitCost < 0) throw fail.validation(`Enter the cost price of ${name}.`, { [`lines.${i}.unitCost`]: 'Invalid cost' });
     if (!l.qty) return;
-    if (!tracked.has(l.itemId)) throw fail.validation(`Stock is not tracked for ${name}. Turn on "Track stock" for it in Items first.`);
+    // An item no longer tracked keeps the opening stock it had (the page sends every line back).
+    const saved = before.lines.find((o) => o.itemId === l.itemId);
+    const unchanged = saved && saved.qty === roundStockQty(l.qty) && saved.unitCost === l.unitCost;
+    if (!tracked.has(l.itemId) && !unchanged) throw fail.validation(`Stock is not tracked for ${name}. Turn on "Track stock" for it in Items first.`);
+    if (unchanged && saved) {
+      moves.push({ itemId: l.itemId, qty: saved.qty, kind: 'opening', value: saved.value, line: i + 1 });
+      return;
+    }
     if (!l.unitCost) throw fail.validation(`Enter the cost price of ${name}: opening stock is valued at cost.`, { [`lines.${i}.unitCost`]: 'Enter the cost' });
     moves.push({ itemId: l.itemId, qty: l.qty, kind: 'opening', value: lineAmount(l.qty, l.unitCost), line: i + 1 });
   });
@@ -220,11 +263,14 @@ export function saveOpeningStock(ctx: Ctx, input: Array<{ itemId: number; qty: n
   for (const old of before.lines) {
     if (!seen.has(old.itemId) && old.qty) moves.push({ itemId: old.itemId, qty: old.qty, kind: 'opening', value: old.value });
   }
+  const hadOpening = ctx.db.all<{ item_id: number }>("SELECT DISTINCT item_id FROM stock_moves WHERE kind = 'opening'").map((r) => r.item_id);
   ctx.db.run("DELETE FROM stock_moves WHERE kind = 'opening'");
   const at = now(ctx);
   for (const m of moves) {
     ctx.db.insert('stock_moves', { item_id: m.itemId, date, qty: roundStockQty(m.qty), kind: 'opening', value: m.value, source_type: 'opening', source_id: null, source_line: m.line ?? null, created_at: at });
   }
+  // The opening stock comes first, so every later average of these items changes.
+  revalueStock(ctx.db, [...hadOpening, ...moves.map((m) => m.itemId)], null);
   const total = moves.reduce((s, m) => s + (m.value ?? 0), 0);
   setAccountOpening(ctx, getAccount(ctx, systemAccountId(ctx, 'STOCK')), total, { stock: true });
   const after = openingStock(ctx);
@@ -338,9 +384,12 @@ export function getAdjustment(ctx: Ctx, id: number): AdjustmentDetail {
 
 const describeLine = (l: { itemName: string; qty: number; unit: string }) => `${l.itemName} ${l.qty > 0 ? '+' : ''}${formatQty(l.qty)} ${l.unit}`;
 
-export function createAdjustment(ctx: Ctx, input: AdjustmentInput): AdjustmentDetail {
-  assertCan(ctx, 'stock.manage', 'You are not allowed to change stock. Ask the owner for permission.');
-  assertStockOn(ctx);
+/** `system`: made by Billforce itself (stock tracking turned off), for any item with stock. */
+export function createAdjustment(ctx: Ctx, input: AdjustmentInput, opts: { system?: boolean } = {}): AdjustmentDetail {
+  if (!opts.system) {
+    assertCan(ctx, 'stock.manage', 'You are not allowed to change stock. Ask the owner for permission.');
+    assertStockOn(ctx);
+  }
   const date = resolveDocDate(ctx, input.date, { what: 'A stock adjustment' });
   assertDateOpen(ctx, date, 'This stock adjustment');
   const reason = input.reason?.trim() || null;
@@ -350,12 +399,12 @@ export function createAdjustment(ctx: Ctx, input: AdjustmentInput): AdjustmentDe
     ctx,
     input.lines.map((l) => l.itemId),
   );
-  const book = new Map(itemStocks(ctx, date, { itemIds: [...tracked] }).map((s) => [s.itemId, s.qty]));
+  const book = new Map(itemStocks(ctx, date, { itemIds: input.lines.map((l) => l.itemId) }).map((s) => [s.itemId, s.qty]));
   const seen = new Set<number>();
   const lines = input.lines.map((l, i) => {
     const it = ctx.db.get<{ id: number; name: string; unit: string }>('SELECT id, name, unit FROM items WHERE id = ?', [l.itemId]);
     if (!it) throw fail.validation(`Line ${i + 1}: the item was not found.`);
-    if (!tracked.has(it.id)) throw fail.validation(`Stock is not tracked for ${it.name}. Turn on "Track stock" for it in Items first.`, { [`lines.${i}.itemId`]: 'Stock not tracked' });
+    if (!tracked.has(it.id) && !opts.system) throw fail.validation(`Stock is not tracked for ${it.name}. Turn on "Track stock" for it in Items first.`, { [`lines.${i}.itemId`]: 'Stock not tracked' });
     if (seen.has(it.id)) throw fail.validation(`${it.name} is listed twice.`, { [`lines.${i}.itemId`]: 'Listed twice' });
     seen.add(it.id);
     const q3 = (q: number) => Math.abs(Math.round(q * 1000) - q * 1000) < 1e-6;
@@ -421,6 +470,7 @@ export function createAdjustment(ctx: Ctx, input: AdjustmentInput): AdjustmentDe
       line: i + 1,
       note: l.note ?? reason,
     })),
+    { allItems: opts.system },
   );
   const detail = getAdjustment(ctx, id);
   recordRevision(ctx, 'stock_adjustment', id, 'created', detail);
@@ -484,6 +534,25 @@ export function listAdjustments(ctx: Ctx, q: { from: string; to: string }): Adju
   });
 }
 
+/**
+ * Turning stock tracking off: the stock left is taken out of the books today (as used up), so
+ * profit stops counting stock nobody tracks and the next year-end closing clears Stock in Hand.
+ * It is an ordinary adjustment: cancel it after turning tracking on again to bring the stock back.
+ */
+export function writeOffStockLeft(ctx: Ctx): AdjustmentDetail | null {
+  const left = itemStocks(ctx, today(ctx)).filter((s) => s.qty !== 0);
+  if (!left.length) return null;
+  return createAdjustment(
+    ctx,
+    {
+      kind: 'adjust',
+      reason: 'Stock tracking turned off: the stock left is taken out of the books',
+      lines: left.map((s) => ({ itemId: s.itemId, qty: -s.qty })),
+    },
+    { system: true },
+  );
+}
+
 /* ------------------------------------------------------------------ */
 /* Stock levels for screens                                            */
 /* ------------------------------------------------------------------ */
@@ -491,5 +560,5 @@ export function listAdjustments(ctx: Ctx, q: { from: string; to: string }): Adju
 /** Active tracked items that are low, out of stock or below zero (for alerts). */
 export function lowStockItems(ctx: Ctx): ItemStock[] {
   if (!stockEnabled(ctx)) return [];
-  return itemStocks(ctx, today(ctx)).filter((s) => s.isActive && s.status !== 'ok');
+  return itemStocks(ctx, today(ctx)).filter((s) => s.tracked && s.isActive && s.status !== 'ok');
 }

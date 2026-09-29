@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it } from 'vitest';
 import { createTestApp, ledgerProblems, systemBalance, type TestApp } from './helpers';
+import { MIGRATIONS } from '../src/core/db/migrate';
 
 let t: TestApp;
 afterEach(() => t?.close());
@@ -171,5 +172,211 @@ describe('stock in the accounts (average cost, periodic method)', () => {
     const next = await t.call('reports.profitLoss', { from: '2027-04-01', to: '2027-04-10' });
     expect(next.figures.openingStock).toBe(36000);
     expect(ledgerProblems(t.app)).toEqual([]);
+  });
+});
+
+describe('stock review fixes', () => {
+  const on = (t: TestApp, enabled = true) => t.call('settings.update', { section: 'stock', values: { enabled } });
+
+  it('values stock at a moving average: goods sold out long ago do not set the cost of new stock', async () => {
+    t = await createTestApp({ today: '2026-05-01' });
+    await on(t);
+    const onion = await item(t, 'Onion', 5000, { unit: 'kg' });
+    await t.call('purchases.create', { supplierName: 'Mandi', items: [{ description: 'Onion', itemId: onion.id, qty: 1000, rate: 1000 }], payments: [{ mode: 'cash', amount: 1000000 }] });
+    await t.call('sales.create', { items: [{ itemId: onion.id, itemName: 'Onion', qty: 1000, rate: 1500 }], payments: [{ mode: 'cash', amount: 1500000 }] });
+    t.setToday('2026-09-28');
+    await t.call('purchases.create', { supplierName: 'Mandi', items: [{ description: 'Onion', itemId: onion.id, qty: 100, rate: 6000 }], payments: [{ mode: 'cash', amount: 600000 }] });
+    const s = (await t.call('stock.summary', {})).items[0];
+    expect([s.qty, s.avgCost, s.value]).toEqual([100, 6000, 600000]);
+    const pl = await t.call('reports.profitLoss', { from: '2026-04-01', to: '2026-09-28' });
+    expect(pl.figures.netProfit).toBe(500000);
+    const bs = await t.call('reports.balanceSheet', { asOf: '2026-09-28' });
+    expect(bs.figures.stock).toBe(600000);
+    expect(bs.totals.balanced).toBe(true);
+    // A back-dated purchase re-averages what came after it.
+    t.setToday('2026-09-28');
+    const early = await t.call('purchases.create', { date: '2026-05-02', supplierName: 'Mandi', items: [{ description: 'Onion', itemId: onion.id, qty: 100, rate: 2000 }], payments: [{ mode: 'cash', amount: 200000 }] });
+    // 100 kg at 20 then 100 kg at 60: average 40.
+    expect((await t.call('stock.summary', {})).items[0]).toMatchObject({ qty: 200, avgCost: 4000, value: 800000 });
+    await t.call('purchases.cancel', { id: early.id, reason: 'Entered twice' });
+    expect((await t.call('stock.summary', {})).items[0]).toMatchObject({ qty: 100, avgCost: 6000 });
+  });
+
+  it('editing an old bill keeps its stock effect when "Track stock" was ticked later', async () => {
+    t = await createTestApp({ today: '2026-09-01' });
+    await on(t);
+    const tea = await item(t, 'Tea', 1000, { trackStock: false });
+    const bill = await t.call('sales.create', { items: [{ itemId: tea.id, itemName: 'Tea', qty: 5, rate: 1000 }], payments: [{ mode: 'cash', amount: 5000 }] });
+    t.setToday('2026-09-28');
+    await t.call('items.update', { id: tea.id, name: 'Tea', unit: 'pcs', rate: 1000, trackStock: true });
+    await t.call('stock.adjust', { kind: 'count', reason: 'Start', lines: [{ itemId: tea.id, counted: 20, unitCost: 500 }] });
+    await t.call('sales.update', { id: bill.id, items: [{ itemId: tea.id, itemName: 'Tea', qty: 5, rate: 1000 }], payments: [{ mode: 'cash', amount: 5000 }], remarks: 'fixed' });
+    expect(await qtyOf(t, 'Tea')).toBe(20);
+    // A tracked item added to the old bill does move stock.
+    const cup = await item(t, 'Cup', 2000);
+    await t.call('stock.adjust', { kind: 'count', reason: 'Start', lines: [{ itemId: cup.id, counted: 10, unitCost: 1000 }] });
+    await t.call('sales.update', {
+      id: bill.id,
+      items: [
+        { itemId: tea.id, itemName: 'Tea', qty: 5, rate: 1000 },
+        { itemId: cup.id, itemName: 'Cup', qty: 1, rate: 2000 },
+      ],
+      payments: [{ mode: 'cash', amount: 7000 }],
+    });
+    expect([await qtyOf(t, 'Tea'), await qtyOf(t, 'Cup')]).toEqual([20, 9]);
+  });
+
+  it('an item with stock cannot stop being tracked; with none, its old purchases keep their movements', async () => {
+    t = await createTestApp();
+    await on(t);
+    const a = await item(t, 'A', 1000);
+    const p = await t.call('purchases.create', { supplierName: 'Market', items: [{ description: 'A', itemId: a.id, qty: 10, rate: 500 }], payments: [{ mode: 'cash', amount: 5000 }] });
+    const refused = await t.fails('items.update', { id: a.id, name: 'A', unit: 'pcs', rate: 1000, trackStock: false });
+    expect(refused.message).toMatch(/A has 10 pcs in stock/);
+    await t.call('sales.create', { items: [{ itemId: a.id, itemName: 'A', qty: 10, rate: 1000 }], payments: [{ mode: 'cash', amount: 10000 }] });
+    await t.call('items.update', { id: a.id, name: 'A', unit: 'pcs', rate: 1000, trackStock: false });
+    await t.call('purchases.update', { id: p.id, supplierName: 'Market', items: [{ description: 'A', itemId: a.id, qty: 10, rate: 500 }], payments: [{ mode: 'cash', amount: 5000 }], remarks: 'note' });
+    await t.call('items.update', { id: a.id, name: 'A', unit: 'pcs', rate: 1000, trackStock: true });
+    expect(await qtyOf(t, 'A')).toBe(0);
+    expect(t.app.db.value<number>("SELECT COUNT(*) FROM stock_moves WHERE source_type = 'purchase'", undefined, 0)).toBe(1);
+  });
+
+  it('opening stock of an item no longer tracked can be saved again unchanged', async () => {
+    t = await createTestApp({ today: '2026-06-01' });
+    await on(t);
+    const a = await item(t, 'A', 1000);
+    const b = await item(t, 'B', 1000);
+    await t.call('stock.saveOpening', {
+      lines: [
+        { itemId: a.id, qty: 10, unitCost: 500 },
+        { itemId: b.id, qty: 10, unitCost: 500 },
+      ],
+    });
+    await t.call('sales.create', { items: [{ itemId: b.id, itemName: 'B', qty: 10, rate: 1000 }], payments: [{ mode: 'cash', amount: 10000 }] });
+    await t.call('items.update', { id: b.id, name: 'B', unit: 'pcs', rate: 1000, trackStock: false });
+    const view = await t.call('stock.opening');
+    await t.call('stock.saveOpening', { lines: view.lines.map((l) => ({ itemId: l.itemId, qty: l.qty, unitCost: l.unitCost })) });
+    await t.call('stock.saveOpening', { lines: [{ itemId: a.id, qty: 12, unitCost: 500 }] });
+    expect(systemBalance(t.app, 'STOCK')).toBe(11000);
+    const bs = await t.call('reports.balanceSheet', { asOf: '2026-06-01' });
+    expect(bs.totals.balanced).toBe(true);
+    // Unticking B changed nothing in the value of its history.
+    const pl = await t.call('reports.profitLoss', { from: '2026-04-01', to: '2026-06-01' });
+    expect(pl.figures).toMatchObject({ openingStock: 11000, closingStock: 6000 });
+  });
+
+  it('the list of years shows the profit its Profit & loss and closing show', async () => {
+    t = await createTestApp({ today: '2026-06-01' });
+    await on(t);
+    const rice = await item(t, 'Rice', 6000, { unit: 'kg' });
+    await t.call('purchases.create', { supplierName: 'Market', items: [{ description: 'Rice', itemId: rice.id, qty: 10, rate: 5000 }], payments: [{ mode: 'cash', amount: 50000 }] });
+    t.setToday('2027-05-01');
+    let years = await t.call('yearEnd.list');
+    expect(years.map((y) => [y.name, y.netProfit])).toEqual([
+      ['2027-28', 0],
+      ['2026-27', 0],
+    ]);
+    await t.call('yearEnd.close', { fyStart: '2026-04-01', transferDrawings: false });
+    years = await t.call('yearEnd.list');
+    expect(years.map((y) => [y.name, y.netProfit, y.closingStock])).toEqual([
+      ['2027-28', 0, 50000],
+      ['2026-27', 0, 50000],
+    ]);
+  });
+
+  it('turning stock off takes the stock left out of the books, so later profit is right', async () => {
+    t = await createTestApp({ today: '2026-06-01' });
+    await on(t);
+    const rice = await item(t, 'Rice', 6000, { unit: 'kg' });
+    await t.call('purchases.create', { supplierName: 'Market', items: [{ description: 'Rice', itemId: rice.id, qty: 10, rate: 5000 }], payments: [{ mode: 'cash', amount: 50000 }] });
+    t.setToday('2027-04-10');
+    await t.call('yearEnd.close', { fyStart: '2026-04-01', transferDrawings: false });
+    await on(t, false);
+    const adj = await t.call('stock.adjustments', { from: '2027-04-10', to: '2027-04-10' });
+    expect(adj.map((a) => a.reason)).toEqual(['Stock tracking turned off: the stock left is taken out of the books']);
+    await t.call('sales.create', { items: [{ itemId: rice.id, itemName: 'Rice', qty: 10, rate: 6000 }], payments: [{ mode: 'cash', amount: 60000 }] });
+    const pl = await t.call('reports.profitLoss', { from: '2027-04-01', to: '2027-04-10' });
+    expect(pl.figures).toMatchObject({ openingStock: 50000, closingStock: 0, netProfit: 10000 });
+    const bs = await t.call('reports.balanceSheet', { asOf: '2027-04-10' });
+    expect(bs.figures.stock).toBe(0);
+    expect(bs.totals.balanced).toBe(true);
+    t.setToday('2028-04-02');
+    await t.call('yearEnd.close', { fyStart: '2027-04-01', transferDrawings: false });
+    expect(systemBalance(t.app, 'STOCK')).toBe(0);
+    expect(ledgerProblems(t.app)).toEqual([]);
+  });
+
+  it('cashiers see stock levels but not cost prices', async () => {
+    t = await createTestApp();
+    await on(t);
+    await t.call('settings.update', { section: 'menu', values: { enabled: true } });
+    const soap = await item(t, 'Soap', 5000);
+    await t.call('stock.saveOpening', { lines: [{ itemId: soap.id, qty: 10, unitCost: 612 }] });
+    const rice = await t.call('menu.createIngredient', { name: 'Rice', unit: 'kg' });
+    await t.call('purchases.create', { supplierName: 'Market', items: [{ description: 'Rice', itemId: rice.id, qty: 10, rate: 5000 }], payments: [{ mode: 'cash', amount: 50000 }] });
+    await t.call('menu.save', { name: 'Jeera Rice', rate: 15000, recipe: [{ ingredientId: rice.id, qty: 150, unit: 'g' }] });
+    await t.loginAs('cashier');
+    const s = await t.call('stock.summary', {});
+    expect(s.costHidden).toBe(true);
+    expect(s.items.map((i) => [i.name, i.qty, i.avgCost, i.value])).toEqual([
+      ['Rice', 10, 0, 0],
+      ['Soap', 10, 0, 0],
+    ]);
+    expect(s.report.columns.map((c) => c.key)).not.toContain('value');
+    expect((await t.call('stock.opening')).lines.map((l) => [l.name, l.qty, l.unitCost, l.value])).toEqual([
+      ['Rice', 0, 0, 0],
+      ['Soap', 10, 0, 0],
+    ]);
+    expect((await t.call('menu.list', {}))[0]).toMatchObject({ recipeCost: null, foodCostPct: null, costHidden: true });
+    expect((await t.call('menu.ingredients'))[0].avgCost).toBeNull();
+    expect((await t.fails('menu.costing')).code).toBe('FORBIDDEN');
+  });
+
+  it('stock items must be bought into Purchases, not a fixed asset or running expense', async () => {
+    t = await createTestApp();
+    await on(t);
+    const fridge = await item(t, 'Fridge', 3000000);
+    const fa = t.app.db.get<{ id: number }>("SELECT id FROM accounts WHERE group_code = 'fixed_assets' LIMIT 1")!;
+    const e = await t.fails('purchases.create', { supplierName: 'Market', expenseAccountId: fa.id, items: [{ description: 'Fridge', itemId: fridge.id, qty: 1, rate: 2500000 }], payments: [{ mode: 'cash', amount: 2500000 }] });
+    expect(e.message).toMatch(/Fridge is a stock item, so it must be bought into "Purchases"/);
+    // Without the stock item link it is an ordinary asset purchase.
+    await t.call('purchases.create', { supplierName: 'Market', expenseAccountId: fa.id, items: [{ description: 'Fridge', qty: 1, rate: 2500000 }], payments: [{ mode: 'cash', amount: 2500000 }] });
+    expect(t.app.db.value<number>('SELECT COUNT(*) FROM stock_moves', undefined, 0)).toBe(0);
+  });
+
+  it('journals cannot post to Stock in Hand', async () => {
+    t = await createTestApp();
+    await on(t);
+    const stockId = t.app.db.value<number>("SELECT id FROM accounts WHERE system_key = 'STOCK'")!;
+    const capId = t.app.db.value<number>("SELECT id FROM accounts WHERE system_key = 'CAPITAL'")!;
+    const e = await t.fails('journals.create', { narration: 'Stock brought in', lines: [{ accountId: stockId, debit: 100000 }, { accountId: capId, credit: 100000 }] });
+    expect(e.message).toMatch(/changes with your stock/);
+  });
+
+  it('a stock count can value stock found at a cost', async () => {
+    t = await createTestApp();
+    await on(t);
+    const jar = await item(t, 'Jar', 3000);
+    await t.call('stock.adjust', { kind: 'count', reason: 'First count', lines: [{ itemId: jar.id, counted: 5, unitCost: 1000 }] });
+    expect((await t.call('stock.summary', {})).items[0]).toMatchObject({ qty: 5, value: 5000, costKnown: true });
+  });
+});
+
+describe('migration 6 (running stock average)', () => {
+  it('fills in the running quantity and average cost of movements saved before it', async () => {
+    t = await createTestApp();
+    await t.call('settings.update', { section: 'stock', values: { enabled: true } });
+    const oil = await item(t, 'Oil', 16000, { unit: 'ltr' });
+    await t.call('purchases.create', { supplierName: 'Market', items: [{ description: 'Oil', itemId: oil.id, qty: 10, rate: 12000 }], payments: [{ mode: 'cash', amount: 120000 }] });
+    await t.call('sales.create', { items: [{ itemId: oil.id, itemName: 'Oil', qty: 4, rate: 16000 }], payments: [{ mode: 'cash', amount: 64000 }] });
+    const db = t.app.db;
+    const before = db.all('SELECT id, bal_qty, avg_cost FROM stock_moves ORDER BY id');
+    db.run('UPDATE stock_moves SET bal_qty = NULL, avg_cost = NULL');
+    MIGRATIONS.find((m) => m.version === 6)!.up(db);
+    expect(db.all('SELECT id, bal_qty, avg_cost FROM stock_moves ORDER BY id')).toEqual(before);
+    expect(before.map((r) => [r.bal_qty, r.avg_cost])).toEqual([
+      [10, 12000],
+      [6, 12000],
+    ]);
   });
 });

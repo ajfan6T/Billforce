@@ -68,6 +68,13 @@ export function toLedgerLines(ctx: Ctx, lines: JournalLineInput[], savedAccountI
     if (debit > 0 && credit > 0) throw fail.validation(`Line ${i + 1}: enter either a debit or a credit, not both`, { [`lines.${i}`]: 'Debit or credit, not both' });
     if (!debit && !credit) return;
     const acct = savedAccountIds?.has(l.accountId) ? savedAccount(ctx, l.accountId) : activeAccount(ctx, l.accountId);
+    // Stock in Hand follows the stock itself (the reports value it from the stock movements).
+    if (acct.system_key === 'STOCK' && !savedAccountIds?.has(acct.id)) {
+      throw fail.validation(
+        `"${acct.name}" changes with your stock: enter purchases, stock counts or adjustments, or the opening stock (Stock > Opening stock), not a journal entry.`,
+        { [`lines.${i}.accountId`]: 'Not allowed in a journal' },
+      );
+    }
     out.push({
       account: acct.id,
       debit,

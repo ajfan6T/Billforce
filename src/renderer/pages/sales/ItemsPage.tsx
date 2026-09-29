@@ -165,7 +165,7 @@ export function ItemModal({ open, item, categories, onClose, onSaved }: { open: 
           )}
           {features.stock && !isDish && (
             <>
-              <Field label="Stock" hint={f.trackStock ? 'Bills take it out of stock, purchases bring it in' : 'For services and things not kept on the shelf'}>
+              <Field label="Stock" error={m.fields.trackStock} hint={f.trackStock ? 'Bills take it out of stock, purchases bring it in' : 'For services and things not kept on the shelf'}>
                 <Checkbox checked={f.trackStock} onChange={(v) => setF({ ...f, trackStock: v })} label="Track stock of this item" />
               </Field>
               {f.trackStock ? (

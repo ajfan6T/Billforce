@@ -74,3 +74,12 @@ CREATE TABLE IF NOT EXISTS stock_adjustment_items (
 CREATE INDEX IF NOT EXISTS idx_stock_adj_items ON stock_adjustment_items (adjustment_id);
 CREATE INDEX IF NOT EXISTS idx_purchase_items_item ON purchase_items (item_id);
 `;
+
+/**
+ * Migration 6: the running quantity and moving average cost after each movement, so the
+ * value of stock on any date is one look-up per item (filled in for existing movements).
+ */
+export const STOCK_RUNNING_COLUMNS: Array<[table: string, column: string, definition: string]> = [
+  ['stock_moves', 'bal_qty', 'REAL'],
+  ['stock_moves', 'avg_cost', 'REAL'],
+];

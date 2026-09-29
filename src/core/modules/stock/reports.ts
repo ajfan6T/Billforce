@@ -21,7 +21,8 @@ export interface StockSummaryResult {
 }
 
 export function stockSummary(ctx: Ctx, input: { asOf: string; filter?: StockFilter; q?: string | null; includeInactive?: boolean }): StockSummaryResult {
-  const all = itemStocks(ctx, input.asOf).filter((s) => input.includeInactive || s.isActive || s.qty !== 0);
+  // Items no longer tracked show while they still have stock on the date.
+  const all = itemStocks(ctx, input.asOf).filter((s) => (s.tracked || s.qty !== 0) && (input.includeInactive || s.isActive || s.qty !== 0));
   const text = input.q?.trim().toLowerCase();
   const filter = input.filter ?? 'all';
   const items = all.filter(

@@ -73,7 +73,7 @@ const GROUPS: ReportGroup[] = [
     title: 'Restaurant menu',
     description: 'What your dishes cost to make.',
     cards: [
-      { to: '/reports/menu-costing', title: 'Menu costing', description: 'Recipe cost, margin and food cost % of every dish, from what you paid for the ingredients.', icon: ChefHat, perm: ['items.manage', 'reports.financial'], feature: (f) => f.menu },
+      { to: '/reports/menu-costing', title: 'Menu costing', description: 'Recipe cost, margin and food cost % of every dish, from what you paid for the ingredients.', icon: ChefHat, perm: ['stock.manage', 'purchases.manage', 'suppliers.view', 'reports.financial'], feature: (f) => f.menu },
     ],
   },
   {

@@ -72,7 +72,7 @@ export function StockTab({
           <Alert tone="blue">
             {d.enabled
               ? 'After saving: choose the items to track (or track all of them below), then enter your opening stock or do a stock count.'
-              : 'Stock screens will be hidden. Stock already recorded is kept and comes back if you turn tracking on again. While it is off, purchases are treated as expenses and stock is not valued in the reports.'}
+              : 'Stock screens will be hidden, and from then on purchases are expenses when made. The stock left is taken out of the books today (a stock adjustment named "Stock tracking turned off"), so your profit stops counting stock nobody tracks. If you turn tracking on again, cancel that adjustment or do a stock count.'}
           </Alert>
         )}
       </Card>

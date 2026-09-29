@@ -133,6 +133,13 @@ export function useFeatures(): Features {
   return useAuth().status?.features ?? NO_FEATURES;
 }
 
+/** Who may see cost prices (average cost, stock value, recipe cost); matches COST_PERMISSIONS in core. */
+export const COST_PERMS: Permission[] = ['stock.manage', 'purchases.manage', 'suppliers.view', 'reports.financial'];
+
+export function useCanSeeCosts(): boolean {
+  return useAuth().canAny(COST_PERMS);
+}
+
 /** Render children only if the user has the permission. */
 export function Can({ perm, children, fallback = null }: { perm: Permission | Permission[]; children: ReactNode; fallback?: ReactNode }) {
   const { can, canAny } = useAuth();

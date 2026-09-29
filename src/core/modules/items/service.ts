@@ -220,6 +220,17 @@ export function createItem(ctx: Ctx, input: ItemInput): Item {
 export function updateItem(ctx: Ctx, id: number, input: ItemInput): Item {
   const before = getItem(ctx, id);
   assertUniqueName(ctx, input.name, id);
+  if (input.trackStock === false && before.trackStock && !before.menu) {
+    // Stock that is on the shelf would stay in the books without ever moving again.
+    const left = stockOnHand(ctx, [id]).get(id) ?? 0;
+    if (left !== 0) {
+      throw new AppError(
+        'VALIDATION',
+        `${before.name} has ${formatQty(left)} ${before.unit} in stock. Bring it to 0 with a stock count or adjustment first, then stop tracking it.`,
+        { trackStock: 'Stock is not 0' },
+      );
+    }
+  }
   ctx.db.update('items', id, {
     name: input.name,
     code: input.code || null,

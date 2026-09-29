@@ -126,11 +126,12 @@ export function AdjustmentFormPage() {
         </Card>
         <Card title="Items" padded={false}>
           <div className="card-body stack-sm">
-            <div className="st-grid st-head">
+            <div className={`st-grid st-head${kind === 'count' ? ' st-grid-count' : ''}`}>
               <span>Item</span>
               <span className="r">In the books</span>
               <span className="r">{kind === 'count' ? 'Found' : 'Change (+ / −)'}</span>
-              <span className="r">{kind === 'count' ? 'Difference' : 'Cost per unit'}</span>
+              {kind === 'count' && <span className="r">Difference</span>}
+              <span className="r">Cost per unit</span>
               <span>Note</span>
               <span />
             </div>
@@ -139,7 +140,7 @@ export function AdjustmentFormPage() {
                 const s = l.item ? byId.get(l.item.id) : undefined;
                 const diff = change(l, s);
                 return (
-                  <div className="st-grid" key={l.key}>
+                  <div className={`st-grid${kind === 'count' ? ' st-grid-count' : ''}`} key={l.key}>
                     <Combobox<StockItem>
                       value={l.text}
                       onInputChange={(text) => setLine(l.key, { text, item: null })}
@@ -158,13 +159,18 @@ export function AdjustmentFormPage() {
                     />
                     <span className="st-book">{l.item ? `${formatQty(s?.qty ?? 0)} ${l.item.unit}` : ''}</span>
                     <NumberInput value={l.qty} decimals={3} allowNegative={kind === 'adjust'} onChange={(v) => setLine(l.key, { qty: v })} aria-label={`Line ${i + 1} quantity`} disabled={!l.item} />
-                    {kind === 'count' ? (
+                    {kind === 'count' && (
                       <span className={`r ${diff === null ? '' : diff > 0 ? 'st-change-pos' : diff < 0 ? 'st-change-neg' : 'muted'}`}>
                         {diff === null || !l.item ? '' : diff === 0 ? 'no change' : `${diff > 0 ? '+' : ''}${formatQty(diff)} ${l.item.unit}`}
                       </span>
-                    ) : (
-                      <MoneyInput value={l.unitCost} onChange={(v) => setLine(l.key, { unitCost: v })} placeholder="Average" aria-label={`Line ${i + 1} cost per unit`} disabled={!l.item || !(l.qty && l.qty > 0)} />
                     )}
+                    <MoneyInput
+                      value={l.unitCost}
+                      onChange={(v) => setLine(l.key, { unitCost: v })}
+                      placeholder={s?.costKnown ? 'Average' : 'Enter cost'}
+                      aria-label={`Line ${i + 1} cost per unit`}
+                      disabled={!l.item || !(diff !== null && diff > 0)}
+                    />
                     <TextInput value={l.note} maxLength={200} onChange={(e) => setLine(l.key, { note: e.target.value })} disabled={!l.item} aria-label={`Line ${i + 1} note`} />
                     {l.item ? <IconButton label="Remove line" icon={<Trash2 size={15} />} className="danger" onClick={() => setLines((ls) => ls.filter((x) => x.key !== l.key))} /> : <span />}
                   </div>
@@ -173,7 +179,7 @@ export function AdjustmentFormPage() {
             </div>
             <p className="small muted mb-0">
               {kind === 'count'
-                ? 'The difference between what you found and what the books show is added or taken out on the date of the count.'
+                ? 'The difference between what you found and what the books show is added or taken out on the date of the count. Stock found is valued at the average cost unless you enter a cost (enter it for items never bought, or they are valued at nothing).'
                 : 'Stock added is valued at the average cost unless you enter a cost. Stock taken out lowers the stock value (and so the profit).'}
             </p>
           </div>

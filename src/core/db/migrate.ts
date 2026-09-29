@@ -1,7 +1,8 @@
 import type { Db } from './database';
 import { SCHEMA_V1 } from './schema';
 import { GST_COLUMNS, GST_INDEXES } from './schema/gst';
-import { STOCK_COLUMNS, STOCK_SCHEMA } from './schema/stock';
+import { STOCK_COLUMNS, STOCK_RUNNING_COLUMNS, STOCK_SCHEMA } from './schema/stock';
+import { revalueAllStock } from '../modules/stock/running';
 import { MENU_COLUMNS, MENU_SCHEMA } from './schema/menu';
 
 export interface Migration {
@@ -20,6 +21,14 @@ export const MIGRATIONS: Migration[] = [
   { version: 3, name: 'GST', up: (db) => addColumns(db, GST_COLUMNS, GST_INDEXES) },
   { version: 4, name: 'stock', up: (db) => addColumns(db, STOCK_COLUMNS, STOCK_SCHEMA) },
   { version: 5, name: 'restaurant menu', up: (db) => addColumns(db, MENU_COLUMNS, MENU_SCHEMA) },
+  {
+    version: 6,
+    name: 'stock average cost',
+    up: (db) => {
+      addColumns(db, STOCK_RUNNING_COLUMNS);
+      revalueAllStock(db);
+    },
+  },
 ];
 
 /** Add columns that are not there yet (so a half-applied or repeated migration is harmless), then indexes. */

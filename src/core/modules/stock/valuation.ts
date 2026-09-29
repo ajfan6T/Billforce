@@ -1,17 +1,24 @@
 /**
  * Stock quantities and value, from the stock movements (stock_moves).
  *
- * Value = quantity on hand x weighted average cost, where the average is taken
- * over every costed receipt up to the date (opening stock, purchases, stock added
- * at a cost). Sales, returns and other adjustments move quantity at that average,
- * so they do not change it. A quantity below zero is valued at nothing.
+ * Value = quantity on hand x moving average cost. Each movement keeps the running
+ * quantity (bal_qty) and average cost (avg_cost) of its item after it: goods coming
+ * in at a cost (opening stock, purchases, stock added at a cost) re-average the
+ * cost of what is on hand; everything else (sales, returns, other adjustments)
+ * moves quantity at the current average. Stock sold out long ago does not affect
+ * the cost of what is on the shelf now. A quantity below zero is valued at nothing,
+ * and new stock after that starts again at its own cost.
  *
- * Opening stock (kind 'opening') is the stock on the books start date: it counts
- * as already there at the start of any period, so it is the opening stock of the
- * first year, not part of its result.
+ * Order: the opening stock (kind 'opening', the stock on the books start date)
+ * comes first; it is there at the start of any period, so it is the opening stock
+ * of the first year, not part of its result. Then movements by date and id.
+ * Writers of stock_moves call revalueStock for the items and dates they touched.
  */
 import type { Ctx } from '../../context';
 import { getSection } from '../../settings';
+import { roundStockQty, stateAt, stateBefore } from './running';
+
+export { revalueAllStock, revalueStock, roundStockQty } from './running';
 
 export interface ItemStock {
   itemId: number;
@@ -19,6 +26,8 @@ export interface ItemStock {
   unit: string;
   category: string | null;
   isActive: boolean;
+  /** "Track stock" is on for the item now (older items may have stock history without it). */
+  tracked: boolean;
   qty: number;
   /** Average cost per unit in paise (fractional); 0 when no costed receipt yet. */
   avgCost: number;
@@ -30,12 +39,10 @@ export interface ItemStock {
   status: 'ok' | 'low' | 'out' | 'negative';
 }
 
-/** Stock tracking is switched on (Settings > Stock). */
+/** Stock tracking is switched on (Settings > Stock & menu). */
 export function stockEnabled(ctx: Ctx): boolean {
   return getSection(ctx, 'stock').enabled === true;
 }
-
-export const roundStockQty = (q: number) => Math.round(q * 1000) / 1000;
 
 export function stockStatus(qty: number, reorderLevel: number | null): ItemStock['status'] {
   if (qty < 0) return 'negative';
@@ -44,49 +51,43 @@ export function stockStatus(qty: number, reorderLevel: number | null): ItemStock
   return 'ok';
 }
 
+/* ------------------------------------------------------------------ */
+/* Stock on a date                                                     */
+/* ------------------------------------------------------------------ */
+
 /**
- * Stock of every tracked item as on `date`: at the end of the day ('end'), or at its start
- * ('start': before that day's movements; the opening stock of a period starting that day).
+ * Stock of items as on `date`: at the end of the day ('end'), or at its start ('start': before
+ * that day's movements; the opening stock of a period starting that day).
+ * Items: tracked ones and any with stock history (so stock of an item that is no longer tracked
+ * still counts on the dates it was there); `includeUntracked` = every item; `itemIds` = just those.
  */
 export function itemStocks(ctx: Ctx, date: string, opts: { edge?: 'start' | 'end'; itemIds?: number[]; includeUntracked?: boolean } = {}): ItemStock[] {
   const edge = opts.edge ?? 'end';
-  const dateCond = edge === 'end' ? "(m.kind = 'opening' OR m.date <= :date)" : "(m.kind = 'opening' OR m.date < :date)";
-  const where: string[] = [];
-  if (!opts.includeUntracked) where.push('i.track_stock = 1');
-  if (opts.itemIds) where.push(opts.itemIds.length ? `i.id IN (${opts.itemIds.map((n) => Number(n)).join(',')})` : '0');
-  const rows = ctx.db.all<{
-    id: number;
-    name: string;
-    unit: string;
-    category: string | null;
-    is_active: number;
-    reorder_level: number | null;
-    qty: number;
-    cost_qty: number;
-    cost_value: number;
-  }>(
-    `SELECT i.id, i.name, i.unit, i.category, i.is_active, i.reorder_level,
-            COALESCE(SUM(m.qty), 0) AS qty,
-            COALESCE(SUM(CASE WHEN m.value IS NOT NULL AND m.qty > 0 THEN m.qty END), 0) AS cost_qty,
-            COALESCE(SUM(CASE WHEN m.value IS NOT NULL AND m.qty > 0 THEN m.value END), 0) AS cost_value
-       FROM items i LEFT JOIN stock_moves m ON m.item_id = i.id AND ${dateCond}
-      ${where.length ? 'WHERE ' + where.join(' AND ') : ''}
-      GROUP BY i.id ORDER BY i.name COLLATE NOCASE`,
-    { date },
+  const where = opts.itemIds
+    ? opts.itemIds.length
+      ? `id IN (${opts.itemIds.map((n) => Number(n)).join(',')})`
+      : '0'
+    : opts.includeUntracked
+      ? '1'
+      : 'track_stock = 1 OR EXISTS (SELECT 1 FROM stock_moves m WHERE m.item_id = items.id)';
+  const rows = ctx.db.all<{ id: number; name: string; unit: string; category: string | null; is_active: number; track_stock: number; reorder_level: number | null }>(
+    `SELECT id, name, unit, category, is_active, track_stock, reorder_level FROM items WHERE ${where} ORDER BY name COLLATE NOCASE`,
   );
   return rows.map((r) => {
-    const qty = roundStockQty(r.qty);
-    const avgCost = r.cost_qty > 0 ? r.cost_value / r.cost_qty : 0;
+    const s = edge === 'end' ? stateAt(ctx.db, r.id, date) : stateBefore(ctx.db, r.id, date);
+    const qty = roundStockQty(s.qty);
+    const avgCost = s.avg ?? 0;
     return {
       itemId: r.id,
       name: r.name,
       unit: r.unit,
       category: r.category,
       isActive: !!r.is_active,
+      tracked: !!r.track_stock,
       qty,
       avgCost,
       value: qty > 0 ? Math.round(qty * avgCost) : 0,
-      costKnown: r.cost_qty > 0,
+      costKnown: s.avg !== null,
       reorderLevel: r.reorder_level,
       status: stockStatus(qty, r.reorder_level),
     };
@@ -102,6 +103,8 @@ export function stockValue(ctx: Ctx, date: string, edge: 'start' | 'end' = 'end'
 export function stockOnHand(ctx: Ctx, itemIds: number[], exclude?: { sourceType: string; sourceId: number } | null): Map<number, number> {
   const ids = [...new Set(itemIds)].filter((n) => Number.isInteger(n) && n > 0);
   if (!ids.length) return new Map();
+  // The running quantity after an item's last movement is its stock now.
+  if (!exclude) return new Map(ids.map((id) => [id, roundStockQty(stateAt(ctx.db, id, '9999-12-31').qty)]));
   const skip = exclude ? ' AND NOT (m.source_type = :st AND m.source_id = :sid)' : '';
   const rows = ctx.db.all<{ item_id: number; qty: number }>(
     `SELECT m.item_id, SUM(m.qty) AS qty FROM stock_moves m WHERE m.item_id IN (${ids.join(',')})${skip} GROUP BY m.item_id`,

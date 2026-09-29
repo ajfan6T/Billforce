@@ -37,7 +37,7 @@ import { getSupplierRow } from '../suppliers/service';
 import { gstConfig, placeOfSupply, useGstAccounts } from '../gst/common';
 import { gstinState, hsnProblem, isGstRate, type GstMode } from '../../../shared/gst';
 import { shareDiscount } from '../../../shared/billing';
-import { removeDocumentMoves, writeDocumentMoves } from '../stock/service';
+import { removeDocumentMoves, trackedItems, writeDocumentMoves } from '../stock/service';
 import { stockEnabled } from '../stock/valuation';
 
 export interface PurchaseItemInput {
@@ -670,14 +670,35 @@ function writeLines(ctx: Ctx, id: number, v: NormalizedPurchase): void {
 }
 
 /** Stock: the items of a purchase made while stock tracking was on come into stock at their cost. */
-function writePurchaseStock(ctx: Ctx, id: number, v: NormalizedPurchase): void {
+/** `before`: the items on the purchase before an edit; see writeDocumentMoves. */
+function writePurchaseStock(ctx: Ctx, id: number, v: NormalizedPurchase, before?: number[]): void {
   writeDocumentMoves(
     ctx,
     'purchase',
     id,
     v.date,
     v.items.flatMap((it, i) => (it.itemId ? [{ itemId: it.itemId, qty: it.qty, kind: 'purchase' as const, value: Math.max(0, it.cost), line: i + 1 }] : [])),
+    { before },
   );
+}
+
+/**
+ * Goods that come into stock must be bought into Purchases (or a direct expense): profit counts them
+ * through the closing stock. Bought into a fixed asset or a running expense, they would count twice.
+ */
+function assertStockAccount(ctx: Ctx, v: NormalizedPurchase): void {
+  if (v.account.group_code === 'purchases' || v.account.group_code === 'direct_expenses') return;
+  const tracked = trackedItems(
+    ctx,
+    v.items.map((it) => it.itemId),
+  );
+  const line = v.items.find((it) => it.itemId && tracked.has(it.itemId));
+  if (line) {
+    throw fail.validation(
+      `${line.description} is a stock item, so it must be bought into "Purchases" (or a direct expense), not "${v.account.name}". Choose Purchases, or clear the stock item on that line.`,
+      { expenseAccountId: 'Choose Purchases for stock items' },
+    );
+  }
 }
 
 function columns(v: NormalizedPurchase) {
@@ -716,6 +737,7 @@ export function createPurchase(ctx: Ctx, input: PurchaseInput): SavedPurchase {
   const short = shortfallWarnings(ctx, v);
   const num = nextDocNumber(ctx, 'purchase', v.date);
   const tracked = stockEnabled(ctx);
+  if (tracked) assertStockAccount(ctx, v);
   const id = ctx.db.insert('purchases', {
     purchase_no: num.number,
     seq: num.seq,
@@ -754,8 +776,15 @@ export function updatePurchase(ctx: Ctx, id: number, input: PurchaseInput, reaso
     updated_by: currentUserId(ctx),
     updated_at: now(ctx),
   });
+  if (before.stock_tracked) assertStockAccount(ctx, v);
   writeLines(ctx, id, v);
-  if (before.stock_tracked) writePurchaseStock(ctx, id, v);
+  if (before.stock_tracked)
+    writePurchaseStock(
+      ctx,
+      id,
+      v,
+      beforeDoc.items.flatMap((it) => (it.itemId ? [it.itemId] : [])),
+    );
   if (v.itc && v.gst?.tax) useGstAccounts(ctx);
   replaceEntry(ctx, before.journal_entry_id!, entryFor(id, before.purchase_no, v));
   const saved = getPurchase(ctx, id);

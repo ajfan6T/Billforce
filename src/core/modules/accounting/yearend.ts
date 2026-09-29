@@ -21,7 +21,7 @@ import { addDays, formatDate, fyOf, type FinancialYear } from '../../../shared/d
 import { formatINR } from '../../../shared/money';
 import { createBackup, type BackupInfo } from '../data/backup';
 import { userName } from './common';
-import { closingStock } from '../stock/accounting';
+import { closingStock, yearStock } from '../stock/accounting';
 
 export interface YearInfo {
   name: string;
@@ -81,7 +81,7 @@ export function listYears(ctx: Ctx): YearInfo[] {
   const rows = new Map(ordered.map((s) => [s, fyRow(ctx, s)]));
   const latestClosed = ordered.filter((s) => rows.get(s)?.is_closed).pop() ?? null;
   const figures = new Map(ordered.map((s) => [s, yearFigures(ctx, fyOf(s))]));
-  const stock = new Map(ordered.map((s) => [s, rows.get(s)?.is_closed ? null : closingStock(ctx, fyOf(s))]));
+  const stock = new Map(ordered.map((s) => [s, yearStock(ctx, fyOf(s), rows.get(s)?.is_closed ? (rows.get(s)?.closing_entry_id ?? null) : null)]));
   const out: YearInfo[] = ordered.map((s, i) => {
     const fy = fyOf(s);
     const row = rows.get(s);

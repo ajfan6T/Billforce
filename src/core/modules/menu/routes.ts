@@ -1,6 +1,13 @@
 import { z } from 'zod';
 import { route, zId, zPaise } from '../../api/router';
 import * as menu from './service';
+import { canSeeCosts } from '../stock/costs';
+
+/** Recipe costs only for those who may see cost prices. */
+const dishView = (ctx: Parameters<typeof canSeeCosts>[0], d: menu.Dish): menu.Dish & { costHidden: boolean } =>
+  canSeeCosts(ctx)
+    ? { ...d, costHidden: false }
+    : { ...d, recipe: d.recipe.map((l) => ({ ...l, cost: null })), recipeCost: null, costMissing: [], foodCostPct: null, costHidden: true };
 
 const VIEW = ['billing.create', 'items.manage', 'billing.view', 'stock.manage', 'reports.financial'] as const;
 
@@ -37,14 +44,14 @@ export const menuRoutes = {
   'menu.list': route({
     access: [...VIEW],
     input: z.object({ includeInactive: z.boolean().optional() }).optional(),
-    handler: (ctx, input) => menu.listDishes(ctx, input ?? {}),
+    handler: (ctx, input) => menu.listDishes(ctx, input ?? {}).map((d) => dishView(ctx, d)),
   }),
-  'menu.get': route({ access: [...VIEW], input: z.object({ id: zId }), handler: (ctx, input) => menu.getDish(ctx, input.id) }),
+  'menu.get': route({ access: [...VIEW], input: z.object({ id: zId }), handler: (ctx, input) => dishView(ctx, menu.getDish(ctx, input.id)) }),
   'menu.save': route({
     access: 'items.manage',
     mutation: true,
     input: zDishInput.extend({ id: zId.nullish() }),
-    handler: (ctx, { id, ...input }) => menu.saveDish(ctx, id ?? null, input),
+    handler: (ctx, { id, ...input }) => dishView(ctx, menu.saveDish(ctx, id ?? null, input)),
   }),
   'menu.candidates': route({ access: 'items.manage', handler: (ctx) => menu.menuCandidates(ctx) }),
   'menu.addItems': route({
@@ -53,7 +60,10 @@ export const menuRoutes = {
     input: z.object({ itemIds: z.array(zId).min(1, 'Choose at least one item').max(2000) }),
     handler: (ctx, input) => menu.addItemsToMenu(ctx, input.itemIds),
   }),
-  'menu.ingredients': route({ access: [...VIEW], handler: (ctx) => menu.listIngredients(ctx) }),
+  'menu.ingredients': route({
+    access: [...VIEW],
+    handler: (ctx) => (canSeeCosts(ctx) ? menu.listIngredients(ctx) : menu.listIngredients(ctx).map((i) => ({ ...i, avgCost: null }))),
+  }),
   'menu.createIngredient': route({
     access: 'items.manage',
     mutation: true,
@@ -64,5 +74,5 @@ export const menuRoutes = {
     }),
     handler: (ctx, input) => menu.createIngredient(ctx, input),
   }),
-  'menu.costing': route({ access: ['items.manage', 'reports.financial'], handler: (ctx) => menu.menuCosting(ctx) }),
+  'menu.costing': route({ access: ['stock.manage', 'purchases.manage', 'suppliers.view', 'reports.financial'], handler: (ctx) => menu.menuCosting(ctx) }),
 };

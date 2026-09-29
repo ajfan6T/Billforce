@@ -14,6 +14,7 @@ import type { Ctx } from '../../context';
 import type { ReportColumn, ReportData, ReportRow } from '../../../shared/report';
 import { accountNets, accountsMeta, assertRange, comparePeriod, pct, periodLabel, rangeSubtitle, type AccountMeta } from './common';
 import { periodStock } from '../stock/accounting';
+import { stockEnabled } from '../stock/valuation';
 
 export type CompareKind = 'none' | 'previous_period' | 'previous_year';
 
@@ -191,7 +192,8 @@ export function profitLoss(ctx: Ctx, input: { from: string; to: string; compare?
   line('Net sales', cur.figures.netSales, cf ? cf.netSales : null, 'subtotal');
 
   const costAccounts = accountsIn((a) => a.groupCode === 'purchases' || a.groupCode === 'direct_expenses');
-  const withStock = periodStock(ctx, from, to) !== null;
+  // Stock lines while tracking is on, or while stock from before is still in the figures.
+  const withStock = stockEnabled(ctx) || !!(cur.figures.openingStock || cur.figures.closingStock || cf?.openingStock || cf?.closingStock);
   if (withStock) {
     // Cost of goods sold = opening stock + purchases + direct expenses - closing stock.
     header('Less: Cost of goods sold');

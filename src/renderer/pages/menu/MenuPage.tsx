@@ -3,7 +3,7 @@ import { Link } from 'react-router';
 import { ChefHat, ListPlus, Pencil, Plus, Power, Trash2 } from 'lucide-react';
 import { call, type ApiOutput } from '../../api';
 import { useDebounced, useHotkeys, useMutation, useQuery } from '../../hooks';
-import { useAuth, useFeatures } from '../../auth';
+import { useAuth, useCanSeeCosts, useFeatures } from '../../auth';
 import { useDialogs, useToast } from '../../feedback';
 import { Alert, Badge, Button, EmptyState, ErrorBox, IconButton, Page, PageHeader, Toolbar } from '../../components/ui';
 import { Checkbox, Combobox, Field, FormGrid, MoneyInput, NumberInput, SearchInput, Select, TextInput } from '../../components/forms';
@@ -47,6 +47,7 @@ export function recipeText(d: Dish): string {
 
 function DishModal({ open, dish, categories, onClose, onSaved }: { open: boolean; dish: Dish | null; categories: string[]; onClose: () => void; onSaved: (d: Dish, created: boolean) => void }) {
   const features = useFeatures();
+  const showCost = useCanSeeCosts();
   const withGst = features.gst === 'regular';
   const m = useMutation('menu.save');
   const ingredients = useQuery('menu.ingredients', open ? undefined : null);
@@ -207,7 +208,7 @@ function DishModal({ open, dish, categories, onClose, onSaved }: { open: boolean
             <span className="r">Quantity</span>
             <span>Unit</span>
             <span>Note</span>
-            <span className="r">Cost</span>
+            <span className="r">{showCost ? 'Cost' : ''}</span>
             <span />
           </div>
           <div className="mn-lines">
@@ -367,7 +368,7 @@ function AddItemsModal({ open, onClose, onAdded }: { open: boolean; onClose: () 
 }
 
 export function MenuPage() {
-  const { can, canAny } = useAuth();
+  const { can } = useAuth();
   const features = useFeatures();
   const withGst = features.gst === 'regular';
   const manage = can('items.manage');
@@ -378,7 +379,8 @@ export function MenuPage() {
   const [showInactive, setShowInactive] = useState(false);
   const dq = useDebounced(q, 150);
   const list = useQuery('menu.list', { includeInactive: showInactive });
-  const costing = useQuery('menu.costing', canAny(['items.manage', 'reports.financial']) ? undefined : null);
+  const showCost = useCanSeeCosts();
+  const costing = useQuery('menu.costing', showCost ? undefined : null);
   const [modal, setModal] = useState<{ open: boolean; dish: Dish | null }>({ open: false, dish: null });
   const [adding, setAdding] = useState(false);
   useHotkeys({ 'ctrl+n': () => manage && setModal({ open: true, dish: null }) });
@@ -403,21 +405,7 @@ export function MenuPage() {
     }
   };
 
-  const columns: Array<Column<Dish>> = [
-    {
-      key: 'name',
-      label: 'Dish',
-      value: (d) => d.item.name,
-      render: (d) => (
-        <span className="mn-dish-cell">
-          <span className="sl-cell-main">{d.item.name}</span>
-          <span className="sl-cell-sub">{d.recipe.length ? recipeText(d) : 'No recipe yet'}</span>
-        </span>
-      ),
-    },
-    { key: 'category', label: 'Category', value: (d) => d.item.category ?? '', render: (d) => d.item.category ?? <span className="faint">—</span> },
-    { key: 'rate', label: 'Price', type: 'money', align: 'right', value: (d) => d.item.rate, render: (d) => <span className="money">{`${formatINR(d.item.rate)}/${d.item.unit}`}</span> },
-    ...(withGst ? [{ key: 'gst', label: 'GST', value: (d: Dish) => d.item.gstRate ?? features.gstDefaultRate, render: (d: Dish) => gstRateText(d.item.gstRate, features.gstDefaultRate) } satisfies Column<Dish>] : []),
+  const costColumns: Array<Column<Dish>> = [
     {
       key: 'cost',
       label: 'Recipe cost',
@@ -440,6 +428,24 @@ export function MenuPage() {
       value: (d) => d.foodCostPct ?? -1,
       render: (d) => (d.foodCostPct === null ? <span className="faint">—</span> : <span className={d.foodCostPct > 40 ? 'warn-text' : ''}>{`${d.foodCostPct}%`}</span>),
     },
+  ];
+
+  const columns: Array<Column<Dish>> = [
+    {
+      key: 'name',
+      label: 'Dish',
+      value: (d) => d.item.name,
+      render: (d) => (
+        <span className="mn-dish-cell">
+          <span className="sl-cell-main">{d.item.name}</span>
+          <span className="sl-cell-sub">{d.recipe.length ? recipeText(d) : 'No recipe yet'}</span>
+        </span>
+      ),
+    },
+    { key: 'category', label: 'Category', value: (d) => d.item.category ?? '', render: (d) => d.item.category ?? <span className="faint">—</span> },
+    { key: 'rate', label: 'Price', type: 'money', align: 'right', value: (d) => d.item.rate, render: (d) => <span className="money">{`${formatINR(d.item.rate)}/${d.item.unit}`}</span> },
+    ...(withGst ? [{ key: 'gst', label: 'GST', value: (d: Dish) => d.item.gstRate ?? features.gstDefaultRate, render: (d: Dish) => gstRateText(d.item.gstRate, features.gstDefaultRate) } satisfies Column<Dish>] : []),
+    ...(showCost ? costColumns : []),
     { key: 'uses', label: 'Times billed', type: 'number', value: (d) => d.item.useCount, render: (d) => (d.item.useCount ? d.item.useCount.toLocaleString('en-IN') : <span className="faint">never</span>) },
     { key: 'status', label: 'Status', value: (d) => (d.item.isActive ? 1 : 0), render: (d) => (d.item.isActive ? <Badge tone="green">On the menu</Badge> : <Badge>Off the menu</Badge>) },
     ...(manage
@@ -528,7 +534,7 @@ export function MenuPage() {
           }
         />
       </div>
-      <p className="faint small mt-1">Food cost = recipe cost ÷ price, from the average cost of each ingredient (what you paid for it). Dishes over 40% are marked.</p>
+      {showCost && <p className="faint small mt-1">Food cost = recipe cost ÷ price, from the average cost of each ingredient (what you paid for it). Dishes over 40% are marked.</p>}
       <DishModal
         open={modal.open}
         dish={modal.dish}

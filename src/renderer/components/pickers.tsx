@@ -321,6 +321,7 @@ export function AccountSelect({
   placeholder = 'Choose account…',
   exclude,
   alsoShow,
+  hideSystem,
   allowEmpty,
   disabled,
 }: {
@@ -333,6 +334,8 @@ export function AccountSelect({
   exclude?: number[];
   /** Inactive accounts to list anyway: those a document being edited already uses. */
   alsoShow?: number[];
+  /** System accounts (by key) not offered, unless already used (alsoShow). */
+  hideSystem?: string[];
   allowEmpty?: boolean;
   disabled?: boolean;
 }) {
@@ -342,12 +345,13 @@ export function AccountSelect({
     for (const a of q.data ?? []) {
       if (exclude?.includes(a.id)) continue;
       if (!a.isActive && !alsoShow?.includes(a.id)) continue;
+      if (a.systemKey && hideSystem?.includes(a.systemKey) && !alsoShow?.includes(a.id)) continue;
       const list = m.get(a.groupName) ?? [];
       list.push({ id: a.id, name: a.isActive ? a.name : `${a.name} (inactive)`, code: a.code });
       m.set(a.groupName, list);
     }
     return m;
-  }, [q.data, exclude, alsoShow]);
+  }, [q.data, exclude, alsoShow, hideSystem]);
   return (
     <select
       className="input select"

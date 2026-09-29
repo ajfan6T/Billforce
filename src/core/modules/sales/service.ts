@@ -853,8 +853,21 @@ function billStockMoves(ctx: Ctx, p: PreparedBill): MoveInput[] {
   return [...own, ...recipeMoves(ctx, lines.map((l) => ({ itemId: l.itemId, qty: l.qty, lineNo: l.lineNo, name: l.itemName })))];
 }
 
-function writeBillStock(ctx: Ctx, billId: number, p: PreparedBill): void {
-  writeDocumentMoves(ctx, 'bill', billId, p.date, billStockMoves(ctx, p));
+/** `before`: the items (and dish ingredients) on the bill before an edit; see writeDocumentMoves. */
+function writeBillStock(ctx: Ctx, billId: number, p: PreparedBill, before?: number[]): void {
+  writeDocumentMoves(ctx, 'bill', billId, p.date, billStockMoves(ctx, p), { before });
+}
+
+/** Items a saved bill has, with the ingredients of its dishes. */
+function billStockItems(ctx: Ctx, billId: number): number[] {
+  const lines = ctx.db.all<{ item_id: number | null; qty: number; line_no: number; item_name: string }>('SELECT item_id, qty, line_no, item_name FROM bill_items WHERE bill_id = ?', [billId]);
+  return [
+    ...lines.flatMap((l) => (l.item_id ? [l.item_id] : [])),
+    ...recipeMoves(
+      ctx,
+      lines.map((l) => ({ itemId: l.item_id, qty: l.qty, lineNo: l.line_no, name: l.item_name })),
+    ).map((m) => m.itemId),
+  ];
 }
 
 /** "Only 2 kg of Chicken in stock" for goods (and ingredients) the bill needs beyond what is in stock. */
@@ -1114,11 +1127,12 @@ export function updateBill(ctx: Ctx, id: number, input: BillInput, reason: strin
   const p = prepareBill(ctx, input, bill);
   if (bill.stock_tracked) p.warnings.push(...billStockWarnings(ctx, p, id));
 
+  const stockBefore = bill.stock_tracked ? billStockItems(ctx, id) : [];
   ctx.db.update('bills', id, { ...billColumns(p), revision: bill.revision + 1, updated_by: currentUserId(ctx), updated_at: now(ctx) });
   ctx.db.run('DELETE FROM bill_items WHERE bill_id = ?', [id]);
   ctx.db.run('DELETE FROM bill_payments WHERE bill_id = ?', [id]);
   writeLinesAndPayments(ctx, id, p);
-  if (bill.stock_tracked) writeBillStock(ctx, id, p);
+  if (bill.stock_tracked) writeBillStock(ctx, id, p, stockBefore);
   if (p.gst) useGstAccounts(ctx);
   const entry = buildEntry(p, id, bill.bill_no);
   if (bill.journal_entry_id) replaceEntry(ctx, bill.journal_entry_id, entry);

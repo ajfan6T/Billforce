@@ -19,6 +19,7 @@ import type { AppSettings, BusinessSettings, GstSettings, ReceiptSettings } from
 import { calcBill } from '../../../shared/billing';
 import { gstTable, useGstAccounts } from '../gst/common';
 import { ensureStockAccounts } from '../../seed';
+import { writeOffStockLeft } from '../stock/service';
 import { PAYMENT_MODES, PAYMENT_MODE_LABELS, SEQUENCE_KEYS, SEQUENCE_LABELS, type SequenceKey } from '../../../shared/constants';
 import { amountInWords, formatAmount, formatINR } from '../../../shared/money';
 import { formatDate, formatTime, fyOf } from '../../../shared/dates';
@@ -311,6 +312,7 @@ export function updateSettings(ctx: Ctx, section: string, values: Record<string,
   const after = updateSection(ctx, sec, patch as any) as unknown as Record<string, unknown>;
   if (sec === 'gst' && after.registration !== 'unregistered') useGstAccounts(ctx);
   if (sec === 'stock' && after.enabled) ensureStockAccounts(ctx.db, now(ctx));
+  if (sec === 'stock' && before.enabled && !after.enabled) writeOffStockLeft(ctx);
   const pick = (o: Record<string, unknown>) => Object.fromEntries(changedKeys.map((k) => [k, o[k]]));
   logActivity(ctx, 'settings.update', `Changed ${SECTION_LABELS[sec]} settings: ${changeText(sec, before, after, changedKeys)}`, {
     entityType: 'settings',

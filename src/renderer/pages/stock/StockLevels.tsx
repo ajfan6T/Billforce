@@ -39,6 +39,7 @@ export function StockLevelsPage() {
     setParams(next, { replace: true });
   };
 
+  const costHidden = !!data.data?.costHidden;
   const columns: Array<Column<Row>> = [
     {
       key: 'name',
@@ -52,8 +53,12 @@ export function StockLevelsPage() {
     },
     { key: 'qty', label: 'In stock', align: 'right', render: (r) => <b className={r.qty < 0 ? 'neg' : ''}>{`${formatQty(r.qty)} ${r.unit}`}</b> },
     { key: 'reorderLevel', label: 'Low at', align: 'right', render: (r) => (r.reorderLevel ? `${formatQty(r.reorderLevel)} ${r.unit}` : <span className="faint">—</span>) },
-    { key: 'avgCost', label: 'Avg cost', align: 'right', value: (r) => r.avgCost, render: (r) => (r.costKnown ? formatINR(Math.round(r.avgCost)) : <span className="faint">no cost</span>) },
-    { key: 'value', label: 'Value', type: 'money' },
+    ...(costHidden
+      ? []
+      : [
+          { key: 'avgCost', label: 'Avg cost', align: 'right', value: (r) => r.avgCost, render: (r) => (r.costKnown ? formatINR(Math.round(r.avgCost)) : <span className="faint">no cost</span>) } satisfies Column<Row>,
+          { key: 'value', label: 'Value', type: 'money' } satisfies Column<Row>,
+        ]),
     { key: 'status', label: 'Status', render: (r) => <StockStatusBadge status={r.status} /> },
   ];
 
@@ -61,7 +66,7 @@ export function StockLevelsPage() {
     <Page>
       <PageHeader
         title="Stock levels"
-        subtitle="What is in the shop now, valued at the average purchase cost"
+        subtitle={costHidden ? 'What is in the shop now' : 'What is in the shop now, valued at the average purchase cost'}
         actions={
           <>
             <ExportButtons report={data.data?.report} disabled={!data.data} />
@@ -84,7 +89,7 @@ export function StockLevelsPage() {
       {t && (
         <StatGrid>
           <Stat label="Items tracked" value={t.items.toLocaleString('en-IN')} />
-          <Stat label="Stock value" value={formatINR(t.value)} hint="At average purchase cost" />
+          {!costHidden && <Stat label="Stock value" value={formatINR(t.value)} hint="At average purchase cost" />}
           <Stat label="Low stock" value={t.low.toLocaleString('en-IN')} tone={t.low ? 'amber' : undefined} onClick={() => setFilter('low')} />
           <Stat label="Out of stock" value={(t.out + t.negative).toLocaleString('en-IN')} tone={t.out + t.negative ? 'red' : undefined} onClick={() => setFilter('out')} />
         </StatGrid>
@@ -118,7 +123,7 @@ export function StockLevelsPage() {
           onRowClick={(r) => navigate(`/stock/items/${r.itemId}`)}
           rowClassName={(r) => (r.status === 'ok' ? '' : r.status === 'low' ? 'st-low' : 'st-out')}
           initialSort={{ key: 'name', dir: 'asc' }}
-          footer={data.data?.items.length ? { value: <span className="money">{formatINR(data.data.items.reduce((s, i) => s + i.value, 0))}</span> } : undefined}
+          footer={data.data?.items.length && !costHidden ? { value: <span className="money">{formatINR(data.data.items.reduce((s, i) => s + i.value, 0))}</span> } : undefined}
           empty={
             <EmptyState
               icon={<PackageOpen size={32} />}

@@ -34,6 +34,7 @@ export function OpeningStockPage() {
   if (q.error) return <Page><ErrorBox error={q.error} onRetry={q.reload} /></Page>;
   if (!q.data) return <Loading />;
   const locked = q.data.lockedReason;
+  const showCost = !q.data.costHidden;
   const canEdit = !locked && can('stock.manage') && can('accounts.manage');
   const total = rows.reduce((s, r) => s + (r.qty && r.unitCost ? lineAmount(r.qty, r.unitCost) : 0), 0);
   const missingCost = rows.filter((r) => r.qty && !r.unitCost);
@@ -73,7 +74,7 @@ export function OpeningStockPage() {
         )}
         {missingCost.length > 0 && <Alert tone="amber">Enter the cost price of {missingCost.map((r) => r.name).slice(0, 3).join(', ')}{missingCost.length > 3 ? ` and ${missingCost.length - 3} more` : ''}.</Alert>}
         {m.error && <Alert tone="red">{m.error}</Alert>}
-        <Card padded={false} title={<span>Items · total <b className="money">{formatINR(total)}</b></span>} actions={<SearchInput value={filter} onChange={setFilter} placeholder="Find item…" />}>
+        <Card padded={false} title={showCost ? <span>Items · total <b className="money">{formatINR(total)}</b></span> : 'Items'} actions={<SearchInput value={filter} onChange={setFilter} placeholder="Find item…" />}>
           {!rows.length ? (
             <EmptyState icon={<PackageOpen size={30} />} title="No items are tracked" message='Turn on "Track stock" for your items in Sales > Items & rates.' />
           ) : (
@@ -83,8 +84,8 @@ export function OpeningStockPage() {
                   <tr>
                     <th>Item</th>
                     <th className="num">Quantity</th>
-                    <th className="num">Cost per unit</th>
-                    <th className="num">Value</th>
+                    {showCost && <th className="num">Cost per unit</th>}
+                    {showCost && <th className="num">Value</th>}
                   </tr>
                 </thead>
                 <tbody>
@@ -96,10 +97,12 @@ export function OpeningStockPage() {
                       <td className="num">
                         <NumberInput value={r.qty} onChange={(v) => set(r.itemId, { qty: v })} disabled={!canEdit} aria-label={`Opening quantity of ${r.name}`} />
                       </td>
-                      <td className="num">
-                        <MoneyInput value={r.unitCost} onChange={(v) => set(r.itemId, { unitCost: v })} disabled={!canEdit} aria-label={`Cost per unit of ${r.name}`} />
-                      </td>
-                      <td className="num money">{r.qty && r.unitCost ? formatINR(lineAmount(r.qty, r.unitCost)) : ''}</td>
+                      {showCost && (
+                        <td className="num">
+                          <MoneyInput value={r.unitCost} onChange={(v) => set(r.itemId, { unitCost: v })} disabled={!canEdit} aria-label={`Cost per unit of ${r.name}`} />
+                        </td>
+                      )}
+                      {showCost && <td className="num money">{r.qty && r.unitCost ? formatINR(lineAmount(r.qty, r.unitCost)) : ''}</td>}
                     </tr>
                   ))}
                 </tbody>

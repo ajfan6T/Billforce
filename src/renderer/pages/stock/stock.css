@@ -42,3 +42,6 @@
   max-width: 150px;
   margin-left: auto;
 }
+.st-grid.st-grid-count {
+  grid-template-columns: minmax(180px, 1fr) 110px 120px 110px 120px minmax(110px, 0.8fr) 36px;
+}

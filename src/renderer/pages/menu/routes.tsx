@@ -8,5 +8,5 @@ const VIEW = ['billing.create', 'items.manage', 'billing.view', 'stock.manage', 
 export const menuPages: AppRoute[] = [
   { path: '/menu', element: <MenuPage />, perm: [...VIEW] },
   { path: '/menu/ingredients', element: <IngredientsPage />, perm: [...VIEW] },
-  { path: '/reports/menu-costing', element: <MenuCostingPage />, perm: ['items.manage', 'reports.financial'] },
+  { path: '/reports/menu-costing', element: <MenuCostingPage />, perm: ['stock.manage', 'purchases.manage', 'suppliers.view', 'reports.financial'] },
 ];

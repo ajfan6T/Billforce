@@ -143,19 +143,29 @@ goods carry no GST. GST reports (`modules/gst/reports.ts`) read the documents (`
 registration changes, GST left in the books (earlier tax invoices, composition bills) can still be reported and paid
 (`gstKinds`, `features.gstRegular / gstComposition`).
 
-**Stock** (optional, Settings > Stock; `modules/stock/`): items with "Track stock" move stock. Every document made
-while tracking is on (`stock_tracked`) writes its `stock_moves` through `writeDocumentMoves` (bills −qty, returns +qty,
-purchase lines that name an item +qty at their cost after the discount and without claimed GST, counts /
-adjustments ±qty) and rewrites them when edited; cancelling removes them. Selling below zero is allowed with a
-warning (`shortStockWarnings`). Value = quantity × weighted average cost of costed receipts (opening stock, purchases,
-stock added at a cost) up to the date; below zero is valued at nothing (`stock/valuation.ts`).
+**Stock** (optional, Settings > Stock & menu; `modules/stock/`): items with "Track stock" move stock. Every document
+made while tracking is on (`stock_tracked`) writes its `stock_moves` through `writeDocumentMoves` (bills −qty, returns
++qty, purchase lines that name an item +qty at their cost after the discount and without claimed GST, counts /
+adjustments ±qty) and rewrites them when edited; cancelling removes them. An edited document keeps to the items it
+moved before plus tracked items it did not have (`before`), so ticking "Track stock" later never changes old documents;
+an item with stock cannot be unticked. Selling below zero is allowed with a warning (`shortStockWarnings`).
+Value = quantity × **moving average cost**: each move stores the running quantity and average after it
+(`bal_qty`, `avg_cost`, kept by `revalueStock` in `stock/running.ts` from the changed date on; order = opening stock
+first, then date, id). Costed receipts (opening stock, purchases, stock added or counted at a cost) re-average; other
+moves go at the average; below zero is valued at nothing and new stock restarts at its own cost. The value on a date is
+one look-up per item (`stock/valuation.ts`), whatever the item's tracking flag today.
 The books use the periodic method (`stock/accounting.ts`): purchases stay an expense; P&L cost of goods sold =
 opening stock + purchases + direct expenses − closing stock; the balance sheet shows "Stock in hand" at its value on
 the date and the profit lines carry the change since the ledger balance of **STOCK** ("Stock in Hand", created when
 tracking is turned on); year-end closing posts the change to STOCK (with the profit to CAPITAL), so STOCK holds the
 last closing stock. Opening stock (on the books start date) is an opening balance: Dr STOCK, Cr OPENING_EQUITY
-(`stock.saveOpening`, needs `stock.manage` + `accounts.manage`). Turning tracking off hides the stock screens and
-stops valuing stock; the movements are kept.
+(`stock.saveOpening`, needs `stock.manage` + `accounts.manage`). Journals cannot post to STOCK. Stock items can only
+be bought into Purchases or a direct expense (a fixed asset or running expense would count them twice). Turning
+tracking off hides the stock screens and takes the stock left out with a system adjustment dated that day
+(`writeOffStockLeft`), so profit stops counting it and the next closing clears STOCK; the accounting keeps working
+while any stock history exists (`stockInBooks`). Cost prices (average cost, stock value, opening cost, recipe cost)
+are shown only with `stock.manage`, `purchases.manage`, `suppliers.view` or `reports.financial` (`stock/costs.ts`);
+cashiers see quantities.
 
 **Restaurant menu** (optional, Settings > Stock & menu; `modules/menu/`): a dish is an item with `items.menu = 1` and a
 recipe (`recipe_items`: ingredient, quantity and unit for one plate). Ingredients are items with `sellable = 0`: kept
@@ -214,6 +224,7 @@ Migration 1 is the release schema. Migration 2 brings data files from pre-releas
 columns and rebuilds changed indexes; a no-op on fresh files). Migration 3 adds the GST columns
 (`db/schema/gst.ts`), each with a default meaning "no GST", so older data reads exactly as before. Migration 4 adds
 stock (`db/schema/stock.ts`: item stock settings, purchase line item link, `stock_moves`, stock adjustments). Migration 5
-adds the restaurant menu (`db/schema/menu.ts`: `items.sellable` default 1, `items.menu` default 0, `recipe_items`). Every future
+adds the restaurant menu (`db/schema/menu.ts`: `items.sellable` default 1, `items.menu` default 0, `recipe_items`).
+Migration 6 adds the running quantity and average cost to `stock_moves` and fills them in (`revalueAllStock`). Every future
 change is a new migration — never edit a released one. `seedReferenceData` runs on every start and grants default permissions only for permissions
 a data file has not seen before (`meta.known_permissions`), so the owner's choices survive upgrades and restores.

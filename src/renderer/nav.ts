@@ -117,7 +117,7 @@ export const NAV: NavGroup[] = [
       { label: 'Receivables ageing', to: '/reports/receivables-ageing', perm: ['reports.financial', 'customers.view'] },
       { label: 'Payables ageing', to: '/reports/payables-ageing', perm: ['reports.financial', 'suppliers.view'] },
       { label: 'GST reports', to: '/reports/gst', perm: 'reports.financial', feature: (f) => f.gstRegular || f.gstComposition },
-      { label: 'Menu costing', to: '/reports/menu-costing', perm: ['items.manage', 'reports.financial'], feature: (f) => f.menu },
+      { label: 'Menu costing', to: '/reports/menu-costing', perm: ['stock.manage', 'purchases.manage', 'suppliers.view', 'reports.financial'], feature: (f) => f.menu },
     ],
   },
   {
