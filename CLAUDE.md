@@ -9,8 +9,9 @@ Key rules:
 - Every mutation logs activity (`logActivity`) and documents record revisions (`recordRevision`).
 - Core must not import Electron; the renderer imports only *types* from `src/core`.
 - Optional features are off by default and invisible when off (`useFeatures()` in the UI, `app.status.features`):
-  GST (Settings > GST: unregistered / regular / composition; `gstConfig(ctx)`) and stock tracking (Settings > Stock;
-  `stockEnabled(ctx)`). Each document keeps the mode it was made with (`gst_mode`, `stock_tracked`).
+  GST (Settings > GST: unregistered / regular / composition; `gstConfig(ctx)`), stock tracking (Settings > Stock & menu;
+  `stockEnabled(ctx)`) and the restaurant menu (dishes with recipes; `menuEnabled(ctx)`). Each document keeps the mode
+  it was made with (`gst_mode`, `stock_tracked`).
 - Stock movements are derived data (`stock_moves`, written only through `modules/stock/service.ts`); stock is valued
   at average cost and enters the books by the periodic method (see docs/ARCHITECTURE.md).
 

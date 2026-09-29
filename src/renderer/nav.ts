@@ -48,6 +48,8 @@ export const NAV: NavGroup[] = [
       { label: 'Bills', to: '/sales/bills', perm: ['billing.create', 'billing.view'] },
       { label: 'Returns & credit notes', to: '/sales/returns', perm: ['returns.create', 'returns.adjust'] },
       { label: 'Items & rates', to: '/sales/items', perm: ['items.manage', 'billing.create'] },
+      { label: 'Menu & recipes', to: '/menu', perm: ['items.manage', 'billing.create', 'billing.view', 'stock.manage', 'reports.financial'], feature: (f) => f.menu },
+      { label: 'Ingredients', to: '/menu/ingredients', perm: ['items.manage', 'stock.manage'], feature: (f) => f.menu },
     ],
   },
   {
@@ -115,6 +117,7 @@ export const NAV: NavGroup[] = [
       { label: 'Receivables ageing', to: '/reports/receivables-ageing', perm: ['reports.financial', 'customers.view'] },
       { label: 'Payables ageing', to: '/reports/payables-ageing', perm: ['reports.financial', 'suppliers.view'] },
       { label: 'GST reports', to: '/reports/gst', perm: 'reports.financial', feature: (f) => f.gstRegular || f.gstComposition },
+      { label: 'Menu costing', to: '/reports/menu-costing', perm: ['items.manage', 'reports.financial'], feature: (f) => f.menu },
     ],
   },
   {

@@ -6,6 +6,7 @@ import {
   Boxes,
   CalendarClock,
   ChartColumn,
+  ChefHat,
   Hourglass,
   Landmark,
   NotebookText,
@@ -66,6 +67,13 @@ const GROUPS: ReportGroup[] = [
       { to: '/stock', title: 'Stock summary', description: 'Quantity and value of every item at the average purchase cost.', icon: Boxes, perm: ['stock.manage', 'items.manage', 'purchases.manage', 'reports.financial'], feature: (f) => f.stock },
       { to: '/stock?filter=low', title: 'Low stock', description: 'Items running low or out of stock, to order in time.', icon: Hourglass, perm: ['stock.manage', 'items.manage', 'purchases.manage', 'reports.financial'], feature: (f) => f.stock },
       { to: '/stock/adjustments', title: 'Stock counts & adjustments', description: 'Corrections to stock with their reasons.', icon: ScrollText, perm: ['stock.manage', 'items.manage', 'purchases.manage'], feature: (f) => f.stock },
+    ],
+  },
+  {
+    title: 'Restaurant menu',
+    description: 'What your dishes cost to make.',
+    cards: [
+      { to: '/reports/menu-costing', title: 'Menu costing', description: 'Recipe cost, margin and food cost % of every dish, from what you paid for the ingredients.', icon: ChefHat, perm: ['items.manage', 'reports.financial'], feature: (f) => f.menu },
     ],
   },
   {

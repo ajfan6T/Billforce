@@ -123,13 +123,16 @@ export const GST_SCHEMA = z.object({
 
 export const STOCK_SCHEMA = z.object({ enabled: z.boolean() });
 
-export const EDITABLE_SECTIONS = ['business', 'gst', 'stock', 'receipt', 'billing', 'security', 'backup'] as const;
+export const MENU_SCHEMA = z.object({ enabled: z.boolean() });
+
+export const EDITABLE_SECTIONS = ['business', 'gst', 'stock', 'menu', 'receipt', 'billing', 'security', 'backup'] as const;
 export type EditableSection = (typeof EDITABLE_SECTIONS)[number];
 
 const SCHEMAS = {
   business: BUSINESS_SCHEMA,
   gst: GST_SCHEMA,
   stock: STOCK_SCHEMA,
+  menu: MENU_SCHEMA,
   receipt: RECEIPT_SCHEMA,
   billing: BILLING_SCHEMA,
   security: SECURITY_SCHEMA,
@@ -140,6 +143,7 @@ const SECTION_LABELS: Record<EditableSection, string> = {
   business: 'business',
   gst: 'GST',
   stock: 'stock',
+  menu: 'restaurant menu',
   receipt: 'receipt & printer',
   billing: 'billing',
   security: 'security',
@@ -159,6 +163,7 @@ const FIELD_LABELS: Record<string, string> = {
   'gst.defaultRate': 'usual GST rate',
   'gst.compositionRate': 'composition tax rate',
   'stock.enabled': 'stock tracking',
+  'menu.enabled': 'restaurant menu',
   'receipt.header': 'receipt header',
   'receipt.footer': 'receipt footer',
   'receipt.paperWidth': 'paper width',

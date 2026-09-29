@@ -19,6 +19,7 @@ import { settingsRoutes } from '../modules/settings/routes';
 import { dataRoutes } from '../modules/data/routes';
 import { gstRoutes } from '../modules/gst/routes';
 import { stockRoutes } from '../modules/stock/routes';
+import { menuRoutes } from '../modules/menu/routes';
 import type { RouteInput, RouteOutput } from './router';
 
 export const routes = {
@@ -39,6 +40,7 @@ export const routes = {
   ...dataRoutes,
   ...gstRoutes,
   ...stockRoutes,
+  ...menuRoutes,
 };
 
 export type Routes = typeof routes;

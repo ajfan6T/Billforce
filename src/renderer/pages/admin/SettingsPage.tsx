@@ -21,7 +21,7 @@ type TabKey = 'business' | 'gst' | 'stock' | 'receipt' | 'billing' | 'security' 
 const TABS: Array<{ key: TabKey; label: string }> = [
   { key: 'business', label: 'Business' },
   { key: 'gst', label: 'GST' },
-  { key: 'stock', label: 'Stock' },
+  { key: 'stock', label: 'Stock & menu' },
   { key: 'receipt', label: 'Receipt & printer' },
   { key: 'billing', label: 'Billing' },
   { key: 'security', label: 'Security' },
@@ -311,11 +311,12 @@ export function SettingsPage() {
     setParams({ tab: k }, { replace: true });
   };
 
-  const saved = <K extends keyof AppSettings>(section: K) => (v: AppSettings[K]) => q.data && q.setData({ ...q.data, [section]: v });
+  // Functional update: one tab may save two sections in a row (Stock & menu).
+  const saved = <K extends keyof AppSettings>(section: K) => (v: AppSettings[K]) => q.setData((d) => d && { ...d, [section]: v });
 
   return (
     <Page wide>
-      <PageHeader title="Business settings" subtitle="Your business details, GST, stock, receipts, bill numbers and security" />
+      <PageHeader title="Business settings" subtitle="Your business details, GST, stock, menu, receipts, bill numbers and security" />
       <Tabs tabs={TABS} value={tab} onChange={(k) => void change(k)} />
       {q.error ? (
         <ErrorBox error={q.error} onRetry={q.reload} />
@@ -326,7 +327,7 @@ export function SettingsPage() {
       ) : tab === 'gst' ? (
         <GstTab settings={q.data} onSaved={saved('gst')} onDirty={onDirty} />
       ) : tab === 'stock' ? (
-        <StockTab settings={q.data} onSaved={saved('stock')} onDirty={onDirty} />
+        <StockTab settings={q.data} onSaved={saved('stock')} onMenuSaved={saved('menu')} onDirty={onDirty} />
       ) : tab === 'receipt' ? (
         <ReceiptTab settings={q.data} onSaved={saved('receipt')} onDirty={onDirty} />
       ) : tab === 'billing' ? (

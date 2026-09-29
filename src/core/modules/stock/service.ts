@@ -134,10 +134,10 @@ export function defaultTrackStock(ctx: Ctx, unit: string): boolean {
   return stockEnabled(ctx) && !SERVICE_UNITS.has(unit.toLowerCase());
 }
 
-/** Track stock for every active item that is not a service (Settings > Stock, when turning it on). */
+/** Track stock for every active item that is not a service or a dish (Settings > Stock, when turning it on). */
 export function trackAllItems(ctx: Ctx): { changed: number } {
   assertStockOn(ctx);
-  const rows = ctx.db.all<{ id: number; unit: string }>('SELECT id, unit FROM items WHERE is_active = 1 AND track_stock = 0');
+  const rows = ctx.db.all<{ id: number; unit: string }>('SELECT id, unit FROM items WHERE is_active = 1 AND track_stock = 0 AND menu = 0');
   const ids = rows.filter((r) => !SERVICE_UNITS.has(r.unit.toLowerCase())).map((r) => r.id);
   if (ids.length) ctx.db.run(`UPDATE items SET track_stock = 1, updated_at = ? WHERE id IN (${ids.join(',')})`, [now(ctx)]);
   logActivity(ctx, 'stock.track_all', `Started tracking stock for ${ids.length} item${ids.length === 1 ? '' : 's'}`, { entityType: 'stock', details: { items: ids.length } });

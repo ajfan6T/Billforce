@@ -23,10 +23,14 @@ completely offline, and all data stays on your PC.
   returns, record input tax credit on purchases, and get a GST summary, sales and purchase registers (B2B/B2C) and an
   HSN summary for filing, plus *Pay GST* to set off credit and record the payment. Composition businesses print bills
   of supply and pay tax on turnover. Businesses that are not registered see no GST anywhere.
-- **Stock (optional)**: turn on *Settings → Stock* to track stock. Bills take goods out, purchases and returns bring
+- **Stock (optional)**: turn on *Settings → Stock & menu* to track stock. Bills take goods out, purchases and returns bring
   them in, and stock counts and adjustments correct it. You get stock levels, low-stock alerts, the stock history of
   each item, and stock valued at the average purchase cost in Profit & Loss (opening stock + purchases − closing stock)
   and the Balance Sheet. Selling more than is in stock is allowed with a warning.
+- **Restaurant menu (optional)**: turn on *Menu with recipes* in *Settings → Stock & menu* to add dishes (for example
+  Butter Chicken) with a recipe of exact ingredients and quantities (grams, kg, ml, litres, pieces). Ingredients are
+  bought in purchase bills but never offered on bills. With stock tracking on, selling a dish takes its ingredients out
+  of stock (and warns when one runs short); a menu costing report shows each dish's recipe cost and food cost %.
 - **Settings & data**: business and receipt details, automatic daily backups, manual backup and restore, and import
   from Excel/CSV.
 
@@ -82,6 +86,7 @@ straight away without a dialog. Choose *Ask every time* to get the normal Window
 | **Typed API between UI and core** | The UI calls named routes over IPC. Each route checks the user's permission and validates its input with zod, and every change runs in a single transaction together with its audit log entry. |
 | **Generic report format** | Every report returns one structure that the app can show on screen or export as Excel (with Indian number formats), CSV (UTF-8 with BOM) or PDF. |
 | **Stock is optional, valued at average cost** | Without stock tracking, purchases are expenses when made. With it, Profit & Loss uses opening stock + purchases − closing stock (the periodic method used by most small Indian businesses), and year-end closing carries the closing stock forward. |
+| **Recipes move ingredients, not dishes** | A dish is not kept in stock itself. Selling one writes stock movements for its ingredients (recipe quantity × plates sold, converted g→kg and ml→litre), from the recipe at the time the bill is saved; returned food does not go back into stock. |
 | **GST is a setting, stored on each document** | Every bill and purchase keeps the GST treatment it was made with, so registering (or cancelling registration) never changes old bills. The till and the core share one tax calculator, so the preview is exactly what is saved. |
 
 See `docs/ARCHITECTURE.md` for the full design and the accounting posting rules.

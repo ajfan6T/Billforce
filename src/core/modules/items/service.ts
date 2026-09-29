@@ -19,6 +19,8 @@ export interface ItemRow {
   gst_rate: number | null;
   track_stock: number;
   reorder_level: number | null;
+  sellable: number;
+  menu: number;
   is_active: number;
   use_count: number;
   last_used_at: string | null;
@@ -44,6 +46,10 @@ export interface Item {
   reorderLevel: number | null;
   /** Quantity in stock now (stock tracking on and item tracked), else null. */
   stock: number | null;
+  /** Offered on bills. False = an ingredient (restaurant menu): kept in stock, not sold. */
+  sellable: boolean;
+  /** A dish on the restaurant menu (it may have a recipe). */
+  menu: boolean;
   isActive: boolean;
   useCount: number;
   lastUsedAt: string | null;
@@ -62,6 +68,8 @@ export function toItem(r: ItemRow, stock: number | null = null): Item {
     trackStock: !!r.track_stock,
     reorderLevel: r.reorder_level,
     stock,
+    sellable: r.sellable !== 0,
+    menu: !!r.menu,
     isActive: !!r.is_active,
     useCount: r.use_count,
     lastUsedAt: r.last_used_at,
@@ -111,7 +119,7 @@ export function searchItems(ctx: Ctx, q: string, limit = 12): Item[] {
   if (!text) return recentItems(ctx, limit);
   const rows = ctx.db.all<ItemRow>(
     `SELECT * FROM items
-      WHERE is_active = 1 AND (name LIKE :like OR code = :exact OR code LIKE :prefix)
+      WHERE is_active = 1 AND sellable = 1 AND (name LIKE :like OR code = :exact OR code LIKE :prefix)
       ORDER BY CASE WHEN code = :exact COLLATE NOCASE THEN 0
                     WHEN name LIKE :prefix THEN 1
                     ELSE 2 END,
@@ -127,7 +135,7 @@ export function recentItems(ctx: Ctx, limit = 16): Item[] {
   return withStock(
     ctx,
     ctx.db.all<ItemRow>(
-      `SELECT * FROM items WHERE is_active = 1
+      `SELECT * FROM items WHERE is_active = 1 AND sellable = 1
         ORDER BY (use_count > 0) DESC, last_used_at DESC, use_count DESC, name COLLATE NOCASE LIMIT ?`,
       [limit],
     ),
@@ -152,6 +160,8 @@ export interface ItemInput {
   /** Stock fields: left out = unchanged (new items: tracked when stock tracking is on, except services). */
   trackStock?: boolean;
   reorderLevel?: number | null;
+  /** Offered on bills (restaurant menu: false for ingredients). Left out = unchanged (new items: sold). */
+  sellable?: boolean;
 }
 
 /** The stock columns of an item input (only those given). */
@@ -200,6 +210,7 @@ export function createItem(ctx: Ctx, input: ItemInput): Item {
     ...gstColumns(input),
     track_stock: (input.trackStock ?? defaultTrackStock(ctx, input.unit || 'pcs')) ? 1 : 0,
     ...stockColumns({ reorderLevel: input.reorderLevel }),
+    sellable: input.sellable === false ? 0 : 1,
     created_at: now(ctx),
   });
   logActivity(ctx, 'item.create', `Added item "${input.name}" at ${formatINR(input.rate)}/${input.unit}`, { entityType: 'item', entityId: id });
@@ -216,7 +227,10 @@ export function updateItem(ctx: Ctx, id: number, input: ItemInput): Item {
     rate: input.rate,
     category: input.category || null,
     ...gstColumns(input),
-    ...stockColumns(input),
+    // Dishes are not stocked themselves: selling one takes its ingredients out of stock.
+    ...stockColumns(before.menu ? { ...input, trackStock: false } : input),
+    // Dishes are always sold.
+    ...(input.sellable !== undefined && !before.menu ? { sellable: input.sellable ? 1 : 0 } : {}),
     updated_at: now(ctx),
   });
   const after = getItem(ctx, id);
@@ -225,6 +239,7 @@ export function updateItem(ctx: Ctx, id: number, input: ItemInput): Item {
   if (before.gstRate !== after.gstRate) changes.push(`GST ${before.gstRate === null ? 'default' : formatRate(before.gstRate)} → ${after.gstRate === null ? 'default' : formatRate(after.gstRate)}`);
   if ((before.hsn ?? '') !== (after.hsn ?? '')) changes.push(`HSN ${before.hsn || 'none'} → ${after.hsn || 'none'}`);
   if (before.trackStock !== after.trackStock) changes.push(after.trackStock ? 'stock tracked' : 'stock no longer tracked');
+  if (before.sellable !== after.sellable) changes.push(after.sellable ? 'sold on bills' : 'no longer sold on bills (ingredient)');
   if (before.reorderLevel !== after.reorderLevel) {
     changes.push(`low stock at ${before.reorderLevel === null ? 'none' : formatQty(before.reorderLevel)} → ${after.reorderLevel === null ? 'none' : formatQty(after.reorderLevel)}`);
   }
@@ -268,7 +283,8 @@ export function removeItem(ctx: Ctx, id: number): { deleted: boolean } {
     ctx.db.value<number>('SELECT COUNT(*) FROM credit_note_items WHERE item_id = ?', [id], 0) +
     ctx.db.value<number>('SELECT COUNT(*) FROM purchase_items WHERE item_id = ?', [id], 0) +
     ctx.db.value<number>('SELECT COUNT(*) FROM stock_moves WHERE item_id = ?', [id], 0) +
-    ctx.db.value<number>('SELECT COUNT(*) FROM stock_adjustment_items WHERE item_id = ?', [id], 0);
+    ctx.db.value<number>('SELECT COUNT(*) FROM stock_adjustment_items WHERE item_id = ?', [id], 0) +
+    ctx.db.value<number>('SELECT COUNT(*) FROM recipe_items WHERE ingredient_id = ?', [id], 0);
   if (used) {
     setItemActive(ctx, id, false);
     return { deleted: false };

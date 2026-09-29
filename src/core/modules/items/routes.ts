@@ -24,6 +24,8 @@ const zItemInput = z.object({
   /** Stock fields: left out = unchanged. */
   trackStock: z.boolean().optional(),
   reorderLevel: z.number().min(0).max(1_000_000_000).nullable().optional(),
+  /** Restaurant menu: false = an ingredient (not offered on bills). Left out = unchanged. */
+  sellable: z.boolean().optional(),
 });
 
 const VIEW = ['billing.create', 'items.manage', 'billing.view'] as const;

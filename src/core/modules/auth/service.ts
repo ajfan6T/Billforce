@@ -274,9 +274,11 @@ export interface EnabledFeatures {
   gstComposition: boolean;
   /** Stock tracking is on. */
   stock: boolean;
+  /** Restaurant menu (dishes with recipes) is on. */
+  menu: boolean;
 }
 
-const NO_FEATURES: EnabledFeatures = { gst: 'none', gstDefaultRate: 18, gstInclusive: true, gstRegular: false, gstComposition: false, stock: false };
+const NO_FEATURES: EnabledFeatures = { gst: 'none', gstDefaultRate: 18, gstInclusive: true, gstRegular: false, gstComposition: false, stock: false, menu: false };
 
 export function enabledFeatures(ctx: Ctx): EnabledFeatures {
   const g = gstConfig(ctx);
@@ -288,5 +290,6 @@ export function enabledFeatures(ctx: Ctx): EnabledFeatures {
     gstRegular: kinds.regular,
     gstComposition: kinds.composition,
     stock: getSection(ctx, 'stock').enabled === true,
+    menu: getSection(ctx, 'menu').enabled === true,
   };
 }

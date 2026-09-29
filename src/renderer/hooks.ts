@@ -9,7 +9,7 @@ export interface QueryState<T> {
   error: string | null;
   /** Re-run the query. */
   reload: () => Promise<void>;
-  setData: (d: T) => void;
+  setData: (d: T | ((prev: T | undefined) => T | undefined)) => void;
 }
 
 /**

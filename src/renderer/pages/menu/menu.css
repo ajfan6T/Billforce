@@ -1,0 +1,54 @@
+.mn-recipe {
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  background: var(--surface-2, transparent);
+}
+.mn-recipe-head {
+  display: flex;
+  align-items: baseline;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+.mn-grid {
+  display: grid;
+  grid-template-columns: minmax(180px, 1.4fr) 100px 90px minmax(100px, 1fr) 80px 36px;
+  gap: 8px;
+  align-items: center;
+}
+.mn-grid.mn-grid-head {
+  font-size: 12px;
+  font-weight: 650;
+  color: var(--text-2);
+  text-transform: uppercase;
+  letter-spacing: 0.02em;
+}
+.mn-grid .r {
+  text-align: right;
+}
+.mn-lines {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.mn-recipe-total {
+  text-align: right;
+}
+.mn-pick-list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  max-height: 340px;
+  overflow: auto;
+  padding: 4px 2px;
+}
+.mn-dish-cell {
+  display: block;
+  max-width: 420px;
+}
+td > span.mn-dish-cell > .sl-cell-sub {
+  white-space: normal;
+}

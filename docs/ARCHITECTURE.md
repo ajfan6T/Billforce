@@ -2,8 +2,8 @@
 
 Billforce is an offline Windows desktop ERP for small Indian businesses: billing,
 customers, suppliers & purchases, double-entry accounts, reports, employees,
-users & security, settings, backups and import, with optional **GST** (regular or composition) and optional
-**stock / inventory** tracking.
+users & security, settings, backups and import, with optional **GST** (regular or composition), optional
+**stock / inventory** tracking and an optional **restaurant menu** (dishes with recipes).
 
 ## Stack
 
@@ -95,7 +95,7 @@ tests/               vitest; helpers.ts gives createTestApp(), ledgerProblems(),
   full or pulled-out pen drive never keeps a cut-short file; it throws `SaveFileError` with plain words.
   Module CSS goes in `pages/<module>/<module>.css` imported by its pages.
   Tone: plain English a shop owner understands ("Payment received", "Amount due", "Cancel bill").
-* **Optional features** (GST, stock): off by default and invisible when off. Core: `gstConfig(ctx)`
+* **Optional features** (GST, stock, restaurant menu): off by default and invisible when off. Core: `gstConfig(ctx)`
   (`modules/gst/common.ts`) gives the mode of new documents; `app.status.features` tells the UI, which hides menu
   items (`feature` in `nav.ts`), report cards and form fields with `useFeatures()`. A document stores the mode it was
   made with (`gst_mode`), so turning a feature on or off never changes old documents, and edits keep the saved mode.
@@ -157,6 +157,16 @@ last closing stock. Opening stock (on the books start date) is an opening balanc
 (`stock.saveOpening`, needs `stock.manage` + `accounts.manage`). Turning tracking off hides the stock screens and
 stops valuing stock; the movements are kept.
 
+**Restaurant menu** (optional, Settings > Stock & menu; `modules/menu/`): a dish is an item with `items.menu = 1` and a
+recipe (`recipe_items`: ingredient, quantity and unit for one plate). Ingredients are items with `sellable = 0`: kept
+in stock, bought in purchase bills, never offered by `items.search` / `items.recent`. Dishes are never stock-tracked
+themselves (`updateItem` and `trackAllItems` keep `track_stock = 0`). While the menu and stock tracking are on, a bill's
+stock moves (`billStockMoves` in sales) add one `sale` move per ingredient per dish line: −(qty sold × recipe qty
+converted with `convertQty`, g→kg, ml→ltr), noted "Butter Chicken x 2"; short-stock warnings include them. Moves
+use the recipe when the bill is saved or edited; cancelling removes them; returns of dishes move nothing. Recipe
+costs use the ingredients' average cost (`menu.costing`). Turning the menu off hides its screens; dishes stay
+ordinary items and their bills stop moving ingredients.
+
 Reports read only non-void entries (`is_void = 0`). P&L style reports exclude `voucher_type = 'closing'`.
 Balance sheet as on D: balance-sheet accounts use all entries ≤ D except closing entries of D's own FY;
 "Profit & loss (current year)" = income − expenses from FY start to D excluding closing; unclosed earlier years show as
@@ -177,6 +187,7 @@ Balance sheet as on D: balance-sheet accounts use all entries ≤ D except closi
 | `sales.create` | `{ date?, customerId?, customerName?, customerPhone?, items: [{ itemId?, itemName, unit?, qty, rate, discount?, discountPct?, gstRate?, hsn? }], billDiscount?, billDiscountPct?, payments: [{ mode: 'cash'|'upi'|'bank', amount, accountId?, reference? }], remarks? }` — credit part = total − Σpayments; `gstRate`/`hsn` only for one-time lines (catalogue items use the item's rate) | `{ id, billNo, total, gst: { mode, taxable, cgst, sgst, igst, ... }, ... }` |
 | `gst.summary` / `gst.salesRegister` / `gst.hsnSummary` / `gst.purchaseRegister` / `gst.compositionSummary` | `{ from, to }` | `ReportData` |
 | `gst.due` / `gst.pay` | `{ upTo, from? }` / `+ { date?, mode, accountId?, reference? }` | set-off and cash per head / the voucher (`EntryDetail`) |
+| `menu.list` / `menu.save` / `menu.ingredients` / `menu.createIngredient` / `menu.addItems` / `menu.costing` | see `modules/menu/routes.ts` (`menu.save`: `{ id?, name, rate, unit?, category?, recipe: [{ ingredientId, qty, unit, note? }] }`) | `Dish` (`item`, `recipe`, `recipeCost`, `foodCostPct`) / `Ingredient[]` / `ReportData` |
 | `reports.trialBalance` | `{ from?, to }` | `ReportData` |
 
 Core helpers other modules may call: `touchItemUsage`, `searchCustomers`, `quickCreateCustomer`, `searchSuppliers`,
@@ -202,6 +213,7 @@ Core helpers other modules may call: `touchItemUsage`, `searchCustomers`, `quick
 Migration 1 is the release schema. Migration 2 brings data files from pre-release builds up to it (adds late
 columns and rebuilds changed indexes; a no-op on fresh files). Migration 3 adds the GST columns
 (`db/schema/gst.ts`), each with a default meaning "no GST", so older data reads exactly as before. Migration 4 adds
-stock (`db/schema/stock.ts`: item stock settings, purchase line item link, `stock_moves`, stock adjustments). Every future
+stock (`db/schema/stock.ts`: item stock settings, purchase line item link, `stock_moves`, stock adjustments). Migration 5
+adds the restaurant menu (`db/schema/menu.ts`: `items.sellable` default 1, `items.menu` default 0, `recipe_items`). Every future
 change is a new migration — never edit a released one. `seedReferenceData` runs on every start and grants default permissions only for permissions
 a data file has not seen before (`meta.known_permissions`), so the owner's choices survive upgrades and restores.

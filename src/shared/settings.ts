@@ -87,10 +87,16 @@ export interface StockSettings {
   enabled: boolean;
 }
 
+export interface MenuSettings {
+  /** Restaurant menu: dishes with recipes; with stock on, selling a dish takes its ingredients out of stock. */
+  enabled: boolean;
+}
+
 export interface AppSettings {
   business: BusinessSettings;
   gst: GstSettings;
   stock: StockSettings;
+  menu: MenuSettings;
   receipt: ReceiptSettings;
   billing: BillingSettings;
   accounts: AccountSettings;
@@ -105,6 +111,7 @@ export function defaultSettings(today: string): AppSettings {
     business: { name: '', address: '', phone: '', email: '', upiId: '', upiName: '' },
     gst: { registration: 'unregistered', gstin: '', ratesIncludeGst: true, defaultRate: 18, compositionRate: 1 },
     stock: { enabled: false },
+    menu: { enabled: false },
     receipt: {
       header: '',
       footer: 'Thank you! Visit again.',

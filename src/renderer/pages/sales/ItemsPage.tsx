@@ -28,9 +28,11 @@ interface ItemForm {
   gstRate: number | null;
   trackStock: boolean;
   reorderLevel: number | null;
+  /** Offered on bills (restaurant menu: ingredients are not). */
+  sellable: boolean;
 }
 
-const EMPTY: ItemForm = { name: '', code: '', unit: 'pcs', rate: null, category: '', hsn: '', gstRate: null, trackStock: true, reorderLevel: null };
+const EMPTY: ItemForm = { name: '', code: '', unit: 'pcs', rate: null, category: '', hsn: '', gstRate: null, trackStock: true, reorderLevel: null, sellable: true };
 const SERVICE_UNITS = ['service', 'hour'];
 
 /** "18%", or "18% (usual)" for items without their own rate. */
@@ -38,7 +40,7 @@ export function gstRateText(rate: number | null, usual: number): string {
   return rate === null ? `${formatRate(usual)} (usual)` : formatRate(rate);
 }
 
-function ItemModal({ open, item, categories, onClose, onSaved }: { open: boolean; item: Item | null; categories: string[]; onClose: () => void; onSaved: (i: Item, created: boolean) => void }) {
+export function ItemModal({ open, item, categories, onClose, onSaved }: { open: boolean; item: Item | null; categories: string[]; onClose: () => void; onSaved: (i: Item, created: boolean) => void }) {
   const [f, setF] = useState<ItemForm>(EMPTY);
   const features = useFeatures();
   const withGst = features.gst === 'regular';
@@ -61,11 +63,15 @@ function ItemModal({ open, item, categories, onClose, onSaved }: { open: boolean
             gstRate: item.gstRate,
             trackStock: item.trackStock,
             reorderLevel: item.reorderLevel,
+            sellable: item.sellable,
           }
         : EMPTY,
     );
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [open, item]);
+  const isDish = !!item?.menu;
+  // Restaurant menu: ingredients are kept in stock but not sold.
+  const showSellable = !isDish && (features.menu || item?.sellable === false);
   const hsnError = withGst ? hsnProblem(f.hsn) : null;
   const problem = !f.name.trim()
     ? 'Enter the item name'
@@ -84,7 +90,8 @@ function ItemModal({ open, item, categories, onClose, onSaved }: { open: boolean
       category: f.category.trim() || null,
       // GST / stock fields are sent only when those features are on (otherwise they stay as they are).
       ...(withGst ? { hsn: f.hsn.trim() || null, gstRate: f.gstRate } : {}),
-      ...(features.stock ? { trackStock: f.trackStock, reorderLevel: f.trackStock ? f.reorderLevel : null } : {}),
+      ...(features.stock && !isDish ? { trackStock: f.trackStock, reorderLevel: f.trackStock ? f.reorderLevel : null } : {}),
+      ...(showSellable ? { sellable: f.sellable } : {}),
     };
     try {
       const saved = item ? await update.run({ id: item.id, ...input }) : await create.run(input);
@@ -144,7 +151,19 @@ function ItemModal({ open, item, categories, onClose, onSaved }: { open: boolean
               ))}
             </datalist>
           </Field>
-          {features.stock && (
+          {showSellable && (
+            <Field label="On bills" className="span-2" hint={f.sellable ? 'Offered on the billing screen' : 'An ingredient: kept in stock and used in recipes, not sold'}>
+              <Checkbox checked={f.sellable} onChange={(v) => setF({ ...f, sellable: v })} label="Sold on bills" />
+            </Field>
+          )}
+          {isDish && (
+            <div className="span-2">
+              <Alert tone="neutral">
+                {item!.name} is a dish on the menu. {features.stock ? 'Its ingredients are taken out of stock when it is sold; ' : ''}change its recipe in <b>Menu &amp; recipes</b>.
+              </Alert>
+            </div>
+          )}
+          {features.stock && !isDish && (
             <>
               <Field label="Stock" hint={f.trackStock ? 'Bills take it out of stock, purchases bring it in' : 'For services and things not kept on the shelf'}>
                 <Checkbox checked={f.trackStock} onChange={(v) => setF({ ...f, trackStock: v })} label="Track stock of this item" />
@@ -311,13 +330,33 @@ export function ItemsPage() {
       label: 'Item',
       render: (it) => (
         <span>
-          <span className="sl-cell-main">{it.name}</span>
+          <span className="sl-cell-main">
+            {it.name}
+            {features.menu && it.menu && (
+              <>
+                {' '}
+                <Badge tone="purple">Dish</Badge>
+              </>
+            )}
+            {!it.sellable && (
+              <>
+                {' '}
+                <Badge tone="amber">Ingredient</Badge>
+              </>
+            )}
+          </span>
           {it.code && <span className="sl-cell-sub">Code {it.code}</span>}
         </span>
       ),
     },
     { key: 'unit', label: 'Unit' },
-    { key: 'rate', label: 'Rate', type: 'money', align: 'right', render: (it) => <RateCell item={it} editable={manage && it.isActive} onSaved={() => void list.reload()} /> },
+    {
+      key: 'rate',
+      label: 'Rate',
+      type: 'money',
+      align: 'right',
+      render: (it) => (it.sellable ? <RateCell item={it} editable={manage && it.isActive} onSaved={() => void list.reload()} /> : <span className="faint">not sold</span>),
+    },
     { key: 'category', label: 'Category', render: (it) => it.category ?? <span className="faint">—</span> },
     ...(features.stock
       ? [
