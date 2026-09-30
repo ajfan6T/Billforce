@@ -111,3 +111,12 @@ be tested in an ordinary browser (Playwright). It is not part of the shipped app
 The GitHub Actions workflow (`.github/workflows/build.yml`) runs the tests on Linux and Windows, builds the
 installer, and smoke-tests the packaged `Billforce.exe` (`--smoke-test`). It uploads the installers as artifacts and
 publishes them to a GitHub Release for `v*` tags.
+
+### Publishing a release
+
+1. Bump `version` in `package.json` (`npm version 1.2.0 --no-git-tag-version`) and write the notes for shop owners
+   in `release-notes/v1.2.0.md` (plain words: what is new, how to update).
+2. Merge into `main`.
+3. Push the tag `v1.2.0`, or on GitHub open *Actions → Build → Run workflow*, choose `main` and enter `v1.2.0` as the
+   release tag. After the tests, the Windows build and the smoke test pass, the workflow checks the tag matches the
+   version, creates the tag and publishes the release with the notes, the installer and the portable exe.
