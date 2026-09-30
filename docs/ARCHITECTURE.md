@@ -93,7 +93,10 @@ tests/               vitest; helpers.ts gives createTestApp(), ledgerProblems(),
   `files.open` / `files.showInFolder` only accept what Billforce saved (via `platform.saveFile`), the data folder and backups.
   Platforms write saved files with `writeFileSafely` (core/platform.ts: "<name>.partial", fsync, size check, rename), so a
   full or pulled-out pen drive never keeps a cut-short file; it throws `SaveFileError` with plain words.
-  Module CSS goes in `pages/<module>/<module>.css` imported by its pages.
+  Module CSS goes in `pages/<module>/<module>.css` imported by its pages. The look ("Fresh": teal on soft white,
+  rounded cards, light sidebar) lives in the CSS variables at the top of `styles/app.css`; module CSS uses those
+  variables instead of its own colours. `--primary` (buttons, links) keeps white text readable (WCAG AA);
+  `--accent` is the brighter teal for charts and icons.
   Tone: plain English a shop owner understands ("Payment received", "Amount due", "Cancel bill").
 * **Optional features** (GST, stock, restaurant menu): off by default and invisible when off. Core: `gstConfig(ctx)`
   (`modules/gst/common.ts`) gives the mode of new documents; `app.status.features` tells the UI, which hides menu

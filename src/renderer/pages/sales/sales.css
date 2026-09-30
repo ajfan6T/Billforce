@@ -34,7 +34,7 @@
   font-weight: 650;
   color: var(--primary-text);
   background: var(--primary-soft);
-  border: 1px solid #c9d9fb;
+  border: 1px solid #b9e7de;
   padding: 2px 9px;
   border-radius: 999px;
   font-variant-numeric: tabular-nums;
@@ -300,7 +300,7 @@
 .sl-qty-btn:hover {
   background: var(--primary-soft);
   color: var(--primary);
-  border-color: #c9d9fb;
+  border-color: #b9e7de;
 }
 .sl-lines-table .sl-ln-unit {
   width: 48px;

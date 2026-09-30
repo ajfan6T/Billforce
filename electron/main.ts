@@ -97,7 +97,7 @@ function createWindow(): void {
     minHeight: 640,
     show: false,
     title: 'Billforce',
-    backgroundColor: '#f4f6fa',
+    backgroundColor: '#f2f7f6',
     autoHideMenuBar: true,
     icon: path.join(__dirname, '../../build/icon.png'),
     webPreferences: {

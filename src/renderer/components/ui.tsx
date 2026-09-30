@@ -179,8 +179,8 @@ export function Stat({ label, value, hint, tone, icon, onClick }: { label: React
   return (
     <div className={`stat${tone ? ` stat-${tone}` : ''}${onClick ? ' clickable' : ''}`} onClick={onClick} role={onClick ? 'button' : undefined}>
       <div className="stat-top">
-        <span className="stat-label">{label}</span>
         {icon && <span className="stat-icon">{icon}</span>}
+        <span className="stat-label">{label}</span>
       </div>
       <div className="stat-value">{value}</div>
       {hint && <div className="stat-hint">{hint}</div>}

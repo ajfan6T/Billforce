@@ -1,6 +1,6 @@
 import { AsOnPicker } from '../../components/report';
 import { Button } from '../../components/ui';
-import { ChartHeader, ORDINAL_BLUES, ShareBar } from '../../components/charts';
+import { ChartHeader, ORDINAL_RAMP, ShareBar } from '../../components/charts';
 import { useQuery } from '../../hooks';
 import { formatINR } from '../../../shared/money';
 import { fyOf, todayISO } from '../../../shared/dates';
@@ -51,7 +51,7 @@ function AgeingPage({ kind }: { kind: 'receivables' | 'payables' }) {
           <ShareBar
             legendColumns={4}
             loading={q.loading}
-            items={BUCKETS.map((b, i) => ({ key: b.key, label: b.label, value: totals.buckets[b.key], color: ORDINAL_BLUES[i] }))}
+            items={BUCKETS.map((b, i) => ({ key: b.key, label: b.label, value: totals.buckets[b.key], color: ORDINAL_RAMP[i] }))}
           />
         </div>
       )}

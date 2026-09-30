@@ -7,13 +7,13 @@ import { chromium } from '@playwright/test';
 const SVG = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256">
   <defs>
     <linearGradient id="g" x1="0" y1="0" x2="1" y2="1">
-      <stop offset="0" stop-color="#3b82f6"/><stop offset="1" stop-color="#1e3a8a"/>
+      <stop offset="0" stop-color="#16b8a1"/><stop offset="1" stop-color="#0b6e61"/>
     </linearGradient>
   </defs>
   <rect x="8" y="8" width="240" height="240" rx="56" fill="url(#g)"/>
   <path d="M58 58 q0 -14 14 -14 h112 q14 0 14 14 V204 l-17.5 14 -17.5 -14 -17.5 14 -17.5 -14 -17.5 14 -17.5 -14 -17.5 14 -17.5 -14 Z" fill="#ffffff"/>
-  <rect x="84" y="62" width="88" height="9" rx="4.5" fill="#bfdbfe"/>
-  <text x="128" y="178" text-anchor="middle" font-family="Segoe UI, Arial, sans-serif" font-weight="800" font-size="112" fill="#1d4ed8">₹</text>
+  <rect x="84" y="62" width="88" height="9" rx="4.5" fill="#bfeee4"/>
+  <text x="128" y="178" text-anchor="middle" font-family="Segoe UI, Arial, sans-serif" font-weight="800" font-size="112" fill="#0b8574">₹</text>
 </svg>`;
 
 const out = path.resolve('build');

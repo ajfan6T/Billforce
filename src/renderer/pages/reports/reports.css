@@ -127,7 +127,7 @@
 .rp-home-card:hover,
 .rp-home-card:focus-visible {
   text-decoration: none;
-  border-color: #b8c8ea;
+  border-color: #a8ddd3;
   box-shadow: var(--shadow);
   outline: none;
 }

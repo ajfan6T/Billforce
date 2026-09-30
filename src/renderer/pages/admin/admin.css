@@ -401,11 +401,11 @@
   transition: border-color 0.15s, box-shadow 0.15s;
 }
 .import-type:hover:not(:disabled) {
-  border-color: #b8c8ea;
+  border-color: #a8ddd3;
 }
 .import-type.active {
   border-color: var(--primary);
-  box-shadow: 0 0 0 3px rgba(29, 78, 216, 0.15);
+  box-shadow: 0 0 0 3px rgba(15, 157, 138, 0.15);
 }
 .import-type:disabled {
   opacity: 0.55;

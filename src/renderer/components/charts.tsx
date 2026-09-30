@@ -31,11 +31,12 @@ export const MODE_COLORS: Record<'cash' | 'upi' | 'bank' | 'credit', string> = {
   credit: SERIES_COLORS[3],
 };
 /** Ordinal ramp (one hue, light -> dark) for ordered buckets such as ageing. */
-export const ORDINAL_BLUES = ['#86b6ef', '#3987e5', '#1c5cab', '#0d366b'] as const;
-const ACCENT = SERIES_COLORS[0];
-const ACCENT_HOVER = '#1c5cab';
-const GRID = '#e2e8f0';
-const BASELINE = '#cbd5e1';
+export const ORDINAL_RAMP = ['#8fdccd', '#34b5a0', '#0b8574', '#07504a'] as const;
+/** Single-series charts use the app's teal accent. */
+const ACCENT = '#0f9d8a';
+const ACCENT_HOVER = '#0b6e61';
+const GRID = '#e1ece9';
+const BASELINE = '#c9ddd8';
 
 /* ------------------------------ Formatting ------------------------------ */
 

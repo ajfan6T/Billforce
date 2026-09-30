@@ -97,7 +97,7 @@
   cursor: pointer;
 }
 .ac-tree .ac-acct:hover td {
-  background: #f5f8ff;
+  background: #f1faf8;
 }
 .ac-tree .ac-acct.inactive td {
   color: var(--text-3);
@@ -422,7 +422,7 @@
   color: inherit;
 }
 .ac-book-account:hover {
-  border-color: #b8c8ea;
+  border-color: #a8ddd3;
 }
 .ac-book-account.active {
   border-color: var(--primary);

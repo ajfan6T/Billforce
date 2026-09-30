@@ -48,7 +48,9 @@ function Sidebar() {
     if (g.to) {
       return (
         <NavLink key={g.key} to={g.to} end className={({ isActive }) => `nav-top${isActive ? ' active' : ''}`} onClick={onLinkClick(g.to)}>
-          <Icon size={18} />
+          <span className="nav-ic">
+            <Icon size={17} />
+          </span>
           <span>{g.label}</span>
         </NavLink>
       );
@@ -57,7 +59,9 @@ function Sidebar() {
     return (
       <div key={g.key} className={`nav-group${activeGroup === g.key ? ' has-active' : ''}`}>
         <button type="button" className="nav-top" aria-expanded={isOpen} onClick={() => setOpen((o) => ({ ...o, [g.key]: !isOpen }))}>
-          <Icon size={18} />
+          <span className="nav-ic">
+            <Icon size={17} />
+          </span>
           <span>{g.label}</span>
           <ChevronDown size={15} className={`chev${isOpen ? ' open' : ''}`} />
         </button>

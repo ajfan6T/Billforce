@@ -181,7 +181,8 @@
   color: var(--text);
 }
 
-@media (max-width: 1180px) {
+/* Laptop screens (1280-1400 px wide): narrower totals column and tighter item lines. */
+@media (max-width: 1400px) {
   .purchase-form {
     grid-template-columns: minmax(0, 1fr) 300px;
   }
@@ -190,6 +191,10 @@
   }
   .line-grid.with-gst .lg-row {
     grid-template-columns: 24px minmax(110px, 1fr) 68px 64px 96px 88px 92px 30px;
+  }
+  .doc-totals .tb-input .input-adorn,
+  .tb-input .input-adorn.input-adorn {
+    flex-basis: 120px;
   }
 }
 .tb-input .input-adorn {

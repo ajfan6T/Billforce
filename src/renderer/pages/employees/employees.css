@@ -327,7 +327,7 @@ tr.emp-inactive td {
   padding: 2px 1px;
 }
 .att-grid td.att-cell.today {
-  background: #f5f8ff;
+  background: #f1faf8;
 }
 .att-btn {
   display: flex;
