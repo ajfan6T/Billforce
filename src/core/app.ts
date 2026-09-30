@@ -1,7 +1,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { Db } from './db/database';
-import { migrate } from './db/migrate';
+import { LATEST_SCHEMA_VERSION, migrate, schemaVersion } from './db/migrate';
 import { seedReferenceData } from './seed';
 import type { AppHooks, AppInfo, Ctx, Session } from './context';
 import { withSafeguards, type Platform } from './platform';
@@ -56,6 +56,7 @@ export class BillforceApp {
   static openDatabase(dbPath: string, at: Date): Db {
     const db = new Db(dbPath);
     try {
+      keepCopyBeforeUpdate(db, dbPath);
       migrate(db);
       seedReferenceData(db, toTimestamp(at));
     } catch (e) {
@@ -146,4 +147,18 @@ export class BillforceApp {
   close(): void {
     this.db.close();
   }
+}
+
+/**
+ * Before an update changes an older data file, keep a copy of it next to the file
+ * (billforce-before-update-v<data version>.db), so the shop can always go back.
+ */
+export function keepCopyBeforeUpdate(db: Db, dbPath: string): string | null {
+  if (dbPath === ':memory:') return null;
+  const version = schemaVersion(db);
+  if (version === 0 || version >= LATEST_SCHEMA_VERSION) return null;
+  const copy = path.join(path.dirname(dbPath), `billforce-before-update-v${version}.db`);
+  if (fs.existsSync(copy)) return copy;
+  db.exec(`VACUUM INTO '${copy.replace(/'/g, "''")}'`);
+  return copy;
 }

@@ -721,6 +721,38 @@ describe('upgrading older data files', () => {
   });
 });
 
+describe('updating from Billforce 1.0', () => {
+  it('keeps a copy of the old data file, then reads old items as before (no GST, stock or menu)', async () => {
+    const { Db } = await import('../src/core/db/database');
+    const { MIGRATIONS, LATEST_SCHEMA_VERSION } = await import('../src/core/db/migrate');
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'bf-update-'));
+    const file = path.join(dir, 'billforce.db');
+    // A data file of 1.0 (schema version 2) with one item.
+    const old = new Db(file);
+    for (const m of MIGRATIONS.filter((x) => x.version <= 2)) {
+      old.tx(() => {
+        m.up(old);
+        old.exec(`PRAGMA user_version = ${m.version}`);
+      });
+    }
+    old.insert('items', { name: 'Soap', unit: 'pcs', rate: 4000, created_at: '2026-01-01 10:00:00' });
+    old.close();
+    const app = new BillforceApp({ dataDir: dir, platform: new TestPlatform(dir), version: 'test', clock: () => new Date('2026-09-28T10:00:00') });
+    expect(app.db.value<number>('PRAGMA user_version')).toBe(LATEST_SCHEMA_VERSION);
+    expect(app.db.get('SELECT name, rate, gst_rate, hsn, track_stock, sellable, menu FROM items')).toEqual({ name: 'Soap', rate: 4000, gst_rate: null, hsn: null, track_stock: 0, sellable: 1, menu: 0 });
+    app.close();
+    const copy = new Db(path.join(dir, 'billforce-before-update-v2.db'));
+    expect(copy.value<number>('PRAGMA user_version')).toBe(2);
+    expect(copy.value<string>('SELECT name FROM items')).toBe('Soap');
+    copy.close();
+    // Opening the updated file again makes no new copy.
+    const again = new BillforceApp({ dataDir: dir, platform: new TestPlatform(dir), version: 'test' });
+    again.close();
+    expect(fs.readdirSync(dir).filter((f) => f.startsWith('billforce-before-update'))).toEqual(['billforce-before-update-v2.db']);
+    fs.rmSync(dir, { recursive: true, force: true });
+  });
+});
+
 describe('saving a file where the user chose (pen drive)', () => {
   it('writes through "<name>.partial" and renames, so the saved file is complete', async () => {
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'bf-save-'));
