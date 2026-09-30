@@ -290,6 +290,9 @@ function DishModal({ open, dish, categories, onClose, onSaved }: { open: boolean
   );
 }
 
+/** Dishes are not stocked themselves, so an item with stock left cannot go on the menu. */
+const hasStock = (i: { stock: number | null }) => i.stock !== null && i.stock !== 0;
+
 /** Put items the business already sells on the menu. */
 function AddItemsModal({ open, onClose, onAdded }: { open: boolean; onClose: () => void; onAdded: (n: number) => void }) {
   const q = useQuery('menu.candidates', open ? undefined : null);
@@ -303,7 +306,8 @@ function AddItemsModal({ open, onClose, onAdded }: { open: boolean; onClose: () 
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [open]);
   const list = q.data ?? [];
-  const all = list.length > 0 && chosen.size === list.length;
+  const choosable = list.filter((i) => !hasStock(i));
+  const all = choosable.length > 0 && chosen.size === choosable.length;
   return (
     <Modal
       open={open}
@@ -339,12 +343,13 @@ function AddItemsModal({ open, onClose, onAdded }: { open: boolean; onClose: () 
         {q.data && !list.length && <Alert tone="neutral">All your items are already on the menu or used as ingredients.</Alert>}
         {list.length > 0 && (
           <>
-            <Checkbox checked={all} onChange={(v) => setChosen(v ? new Set(list.map((i) => i.id)) : new Set())} label={<b>Choose all ({list.length})</b>} />
+            <Checkbox checked={all} onChange={(v) => setChosen(v ? new Set(choosable.map((i) => i.id)) : new Set())} label={<b>Choose all ({choosable.length})</b>} />
             <div className="mn-pick-list">
               {list.map((i) => (
                 <Checkbox
                   key={i.id}
                   checked={chosen.has(i.id)}
+                  disabled={hasStock(i)}
                   onChange={(v) => {
                     const next = new Set(chosen);
                     if (v) next.add(i.id);
@@ -354,6 +359,7 @@ function AddItemsModal({ open, onClose, onAdded }: { open: boolean; onClose: () 
                   label={
                     <span>
                       {i.name} <span className="muted small">{`${formatINR(i.rate)}/${i.unit}${i.category ? ` · ${i.category}` : ''}`}</span>
+                      {hasStock(i) && <span className="warn-text small">{` · ${formatQty(i.stock!)} ${i.unit} in stock: count it to 0 first`}</span>}
                     </span>
                   }
                 />

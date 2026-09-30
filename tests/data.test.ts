@@ -100,7 +100,7 @@ describe('manual backups', () => {
   it('saves a fresh copy wherever the user chooses', async () => {
     const t = await createTestApp();
     const res = await t.call('backup.saveAs');
-    expect(res.path).toBe('/tmp/billforce-test-docs/Sharma-General-Store_manual_20260928_100000.bfbackup');
+    expect(res.path).toBe(`${t.platform.documentsDir()}/Sharma-General-Store_manual_20260928_100000.bfbackup`);
     const saved = t.platform.saved.at(-1)!;
     const raw = zlib.gunzipSync(Buffer.from(saved.data as Uint8Array));
     expect(raw.subarray(0, 15).toString('latin1')).toBe('SQLite format 3');

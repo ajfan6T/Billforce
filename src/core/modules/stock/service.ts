@@ -71,6 +71,9 @@ export function writeDocumentMoves(
   const old = oldMoves(ctx, sourceType, sourceId);
   const moved = new Set(old.map((o) => o.item_id));
   const before = new Set(opts.before ?? []);
+  // The rewritten movements take the ids of the old ones, so an edited document keeps its place among
+  // the day's movements (the moving average depends on the order).
+  const freeIds = moveIds(ctx, sourceType, sourceId);
   deleteMoves(ctx, sourceType, sourceId);
   const tracked = trackedItems(
     ctx,
@@ -80,7 +83,9 @@ export function writeDocumentMoves(
   const touched = new Set(moved);
   for (const m of moves) {
     if (!m.qty || !(opts.allItems || moved.has(m.itemId) || (tracked.has(m.itemId) && !before.has(m.itemId)))) continue;
+    const reuse = freeIds.shift();
     ctx.db.insert('stock_moves', {
+      ...(reuse !== undefined ? { id: reuse } : {}),
       item_id: m.itemId,
       date,
       qty: roundStockQty(m.qty),
@@ -96,12 +101,30 @@ export function writeDocumentMoves(
   }
   const from = [date, ...old.map((o) => o.date)].sort()[0];
   revalueStock(ctx.db, touched, from);
+  keepStockOutWhileOff(ctx, sourceType);
+}
+
+/**
+ * While stock tracking is off nothing may stay in stock (see writeOffStockLeft). Editing or cancelling
+ * a document from before can bring goods back: take them out again, dated today.
+ */
+function keepStockOutWhileOff(ctx: Ctx, sourceType: MoveSource): void {
+  if (sourceType === 'adjustment' || sourceType === 'opening' || stockEnabled(ctx)) return;
+  writeOffStockLeft(ctx, 'Stock tracking is off: stock brought back by a changed or cancelled document is taken out again');
 }
 
 function oldMoves(ctx: Ctx, sourceType: MoveSource, sourceId: number | null): Array<{ item_id: number; date: string }> {
   return sourceId === null
     ? ctx.db.all('SELECT item_id, MIN(date) AS date FROM stock_moves WHERE source_type = ? AND source_id IS NULL GROUP BY item_id', [sourceType])
     : ctx.db.all('SELECT item_id, MIN(date) AS date FROM stock_moves WHERE source_type = ? AND source_id = ? GROUP BY item_id', [sourceType, sourceId]);
+}
+
+function moveIds(ctx: Ctx, sourceType: MoveSource, sourceId: number | null): number[] {
+  return (
+    sourceId === null
+      ? ctx.db.all<{ id: number }>('SELECT id FROM stock_moves WHERE source_type = ? AND source_id IS NULL ORDER BY id', [sourceType])
+      : ctx.db.all<{ id: number }>('SELECT id FROM stock_moves WHERE source_type = ? AND source_id = ? ORDER BY id', [sourceType, sourceId])
+  ).map((r) => r.id);
 }
 
 function deleteMoves(ctx: Ctx, sourceType: MoveSource, sourceId: number | null): void {
@@ -118,6 +141,7 @@ export function removeDocumentMoves(ctx: Ctx, sourceType: MoveSource, sourceId: 
     old.map((o) => o.item_id),
     old.map((o) => o.date).sort()[0],
   );
+  keepStockOutWhileOff(ctx, sourceType);
 }
 
 /**
@@ -486,6 +510,8 @@ export function createAdjustment(ctx: Ctx, input: AdjustmentInput, opts: { syste
 
 export function cancelAdjustment(ctx: Ctx, id: number, reason: string): AdjustmentDetail {
   assertCan(ctx, 'stock.manage', 'You are not allowed to change stock. Ask the owner for permission.');
+  // Cancelling would bring stock back into the books while nobody tracks it.
+  assertStockOn(ctx);
   const r = adjustmentRow(ctx, id);
   if (r.status === 'cancelled') throw fail.validation(`${r.adj_no} is already cancelled.`);
   const why = reason.trim();
@@ -539,14 +565,14 @@ export function listAdjustments(ctx: Ctx, q: { from: string; to: string }): Adju
  * profit stops counting stock nobody tracks and the next year-end closing clears Stock in Hand.
  * It is an ordinary adjustment: cancel it after turning tracking on again to bring the stock back.
  */
-export function writeOffStockLeft(ctx: Ctx): AdjustmentDetail | null {
+export function writeOffStockLeft(ctx: Ctx, reason = 'Stock tracking turned off: the stock left is taken out of the books'): AdjustmentDetail | null {
   const left = itemStocks(ctx, today(ctx)).filter((s) => s.qty !== 0);
   if (!left.length) return null;
   return createAdjustment(
     ctx,
     {
       kind: 'adjust',
-      reason: 'Stock tracking turned off: the stock left is taken out of the books',
+      reason,
       lines: left.map((s) => ({ itemId: s.itemId, qty: -s.qty })),
     },
     { system: true },

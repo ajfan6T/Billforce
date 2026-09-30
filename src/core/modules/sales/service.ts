@@ -846,16 +846,46 @@ function writeLinesAndPayments(ctx: Ctx, billId: number, p: PreparedBill): void 
 }
 
 /** Stock: the items of a bill made while stock tracking was on leave the stock on the bill date. */
-/** Goods a bill takes out of stock: the items sold, and the ingredients of dishes (restaurant menu on). */
-function billStockMoves(ctx: Ctx, p: PreparedBill): MoveInput[] {
-  const lines = p.lines.map((l, i) => ({ ...l, lineNo: i + 1 }));
-  const own = lines.filter((l) => l.itemId).map((l) => ({ itemId: l.itemId!, qty: -l.qty, kind: 'sale' as const, line: l.lineNo }));
-  return [...own, ...recipeMoves(ctx, lines.map((l) => ({ itemId: l.itemId, qty: l.qty, lineNo: l.lineNo, name: l.itemName })))];
+const lineRefs = (p: PreparedBill) => p.lines.map((l, i) => ({ itemId: l.itemId, qty: l.qty, lineNo: i + 1, name: l.itemName }));
+
+/**
+ * Goods a bill takes out of stock: the items sold, and the ingredients of dishes (restaurant menu on).
+ * `recipe`: the ingredient movements to use instead of reading the recipes now (edits, see editedRecipeMoves).
+ */
+function billStockMoves(ctx: Ctx, p: PreparedBill, recipe?: MoveInput[]): MoveInput[] {
+  const own = lineRefs(p).flatMap((l) => (l.itemId ? [{ itemId: l.itemId, qty: -l.qty, kind: 'sale' as const, line: l.lineNo }] : []));
+  return [...own, ...(recipe ?? recipeMoves(ctx, lineRefs(p)))];
+}
+
+/**
+ * Ingredient movements of an edited bill: kept as recorded while its dishes and their quantities are the
+ * same (fixing the customer or the payment never re-reads a recipe changed since), otherwise from today's
+ * recipes. A bill that took ingredients out keeps doing so after the menu is turned off.
+ * Recorded ingredient movements are the bill's movements with a note ("Butter Chicken x 2").
+ */
+function editedRecipeMoves(ctx: Ctx, billId: number, p: PreparedBill): MoveInput[] {
+  const recorded = ctx.db.all<{ item_id: number; qty: number; source_line: number | null; note: string }>(
+    "SELECT item_id, qty, source_line, note FROM stock_moves WHERE source_type = 'bill' AND source_id = ? AND note IS NOT NULL ORDER BY id",
+    [billId],
+  );
+  const oldLines = ctx.db.all<{ item_id: number | null; qty: number }>('SELECT item_id, qty FROM bill_items WHERE bill_id = ? ORDER BY line_no', [billId]);
+  const ids = [...new Set([...oldLines.map((l) => l.item_id), ...p.lines.map((l) => l.itemId)].filter((x): x is number => !!x))];
+  const dishes = new Set(ids.length ? ctx.db.all<{ id: number }>(`SELECT id FROM items WHERE menu = 1 AND id IN (${ids.join(',')})`).map((r) => r.id) : []);
+  const signature = (ls: Array<{ itemId: number | null; qty: number }>) =>
+    ls
+      .filter((l) => l.itemId && dishes.has(l.itemId))
+      .map((l) => `${l.itemId}:${l.qty}`)
+      .sort()
+      .join('|');
+  if (recorded.length && signature(oldLines.map((l) => ({ itemId: l.item_id, qty: l.qty }))) === signature(p.lines)) {
+    return recorded.map((r) => ({ itemId: r.item_id, qty: r.qty, kind: 'sale' as const, line: r.source_line, note: r.note }));
+  }
+  return recipeMoves(ctx, lineRefs(p), { force: recorded.length > 0 });
 }
 
 /** `before`: the items (and dish ingredients) on the bill before an edit; see writeDocumentMoves. */
-function writeBillStock(ctx: Ctx, billId: number, p: PreparedBill, before?: number[]): void {
-  writeDocumentMoves(ctx, 'bill', billId, p.date, billStockMoves(ctx, p), { before });
+function writeBillStock(ctx: Ctx, billId: number, p: PreparedBill, opts: { before?: number[]; recipe?: MoveInput[] } = {}): void {
+  writeDocumentMoves(ctx, 'bill', billId, p.date, billStockMoves(ctx, p, opts.recipe), { before: opts.before });
 }
 
 /** Items a saved bill has, with the ingredients of its dishes. */
@@ -871,8 +901,8 @@ function billStockItems(ctx: Ctx, billId: number): number[] {
 }
 
 /** "Only 2 kg of Chicken in stock" for goods (and ingredients) the bill needs beyond what is in stock. */
-function billStockWarnings(ctx: Ctx, p: PreparedBill, billId: number | null): string[] {
-  const out = billStockMoves(ctx, p).map((m) => ({ itemId: m.itemId, qty: -m.qty }));
+function billStockWarnings(ctx: Ctx, p: PreparedBill, billId: number | null, recipe?: MoveInput[]): string[] {
+  const out = billStockMoves(ctx, p, recipe).map((m) => ({ itemId: m.itemId, qty: -m.qty }));
   return shortStockWarnings(ctx, out, billId ? { sourceType: 'bill', sourceId: billId } : null);
 }
 
@@ -1125,14 +1155,15 @@ export function updateBill(ctx: Ctx, id: number, input: BillInput, reason: strin
   assertNoActiveReturns(ctx, bill, 'edit');
   const before = billSnapshot(getBill(ctx, id));
   const p = prepareBill(ctx, input, bill);
-  if (bill.stock_tracked) p.warnings.push(...billStockWarnings(ctx, p, id));
+  const recipe = bill.stock_tracked ? editedRecipeMoves(ctx, id, p) : [];
+  if (bill.stock_tracked) p.warnings.push(...billStockWarnings(ctx, p, id, recipe));
 
   const stockBefore = bill.stock_tracked ? billStockItems(ctx, id) : [];
   ctx.db.update('bills', id, { ...billColumns(p), revision: bill.revision + 1, updated_by: currentUserId(ctx), updated_at: now(ctx) });
   ctx.db.run('DELETE FROM bill_items WHERE bill_id = ?', [id]);
   ctx.db.run('DELETE FROM bill_payments WHERE bill_id = ?', [id]);
   writeLinesAndPayments(ctx, id, p);
-  if (bill.stock_tracked) writeBillStock(ctx, id, p, stockBefore);
+  if (bill.stock_tracked) writeBillStock(ctx, id, p, { before: stockBefore, recipe });
   if (p.gst) useGstAccounts(ctx);
   const entry = buildEntry(p, id, bill.bill_no);
   if (bill.journal_entry_id) replaceEntry(ctx, bill.journal_entry_id, entry);

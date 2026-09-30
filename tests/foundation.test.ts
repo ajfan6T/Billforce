@@ -408,7 +408,7 @@ describe('exports are safe and Indian-formatted', () => {
 describe('files.open only opens what Billforce saved', () => {
   it('refuses any other path, for every role', async () => {
     const t = await createTestApp();
-    for (const p of ['/etc/passwd', 'C:\\Windows\\System32\\calc.exe', '\\\\evil-server\\share\\run.bat', 'relative/file.csv', '/tmp/billforce-test-docs/other.xlsx']) {
+    for (const p of ['/etc/passwd', 'C:\\Windows\\System32\\calc.exe', '\\\\evil-server\\share\\run.bat', 'relative/file.csv', `${t.platform.documentsDir()}/other.xlsx`]) {
       expect((await t.fails('files.open', { path: p })).code).toBe('FORBIDDEN');
       expect((await t.fails('files.showInFolder', { path: p })).code).toBe('FORBIDDEN');
     }

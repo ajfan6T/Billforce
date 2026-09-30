@@ -19,7 +19,7 @@ import { convertQty } from '../../../shared/units';
 import { formatQty } from '../../../shared/money';
 import type { ReportData, ReportRow } from '../../../shared/report';
 import { createItem, getItem, updateItem, type Item } from '../items/service';
-import { itemStocks, roundStockQty, stockEnabled } from '../stock/valuation';
+import { itemStocks, roundStockQty, stockEnabled, stockOnHand } from '../stock/valuation';
 import type { MoveInput } from '../stock/service';
 
 export function menuEnabled(ctx: Ctx): boolean {
@@ -88,8 +88,9 @@ function toDishes(ctx: Ctx, items: Item[]): Dish[] {
     const recipe = rows
       .filter((r) => r.dish_id === item.id)
       .map((r) => {
-        const inUnit = convertQty(r.qty, r.unit, r.item_unit) ?? r.qty;
-        const avg = costs.get(r.ingredient_id) ?? null;
+        const converted = convertQty(r.qty, r.unit, r.item_unit);
+        const inUnit = converted ?? r.qty;
+        const avg = converted === null ? null : (costs.get(r.ingredient_id) ?? null);
         return {
           lineNo: r.line_no,
           ingredientId: r.ingredient_id,
@@ -163,7 +164,15 @@ export function saveDish(ctx: Ctx, id: number | null, input: DishInput): Dish {
       throw fail.validation(`Enter the quantity of ${ing.name} (up to 3 decimals).`, { [`recipe.${i}.qty`]: 'Enter the quantity' });
     }
     const unit = l.unit.trim().toLowerCase();
-    if (convertQty(1, unit, ing.unit) === null) {
+    const inStockUnit = convertQty(l.qty, unit, ing.unit);
+    if (inStockUnit !== null && Math.abs(roundStockQty(inStockUnit) - inStockUnit) > 1e-9) {
+      // Stock is counted to 3 decimals of its unit (1 g of a kg item): smaller amounts would never come off.
+      throw fail.validation(
+        `${formatQty(l.qty)} ${unit} of ${ing.name} is less than Billforce can count for an ingredient kept in ${ing.unit} (up to 3 decimals). Keep ${ing.name} in a smaller unit (for example g or ml), or round the amount.`,
+        { [`recipe.${i}.qty`]: 'Too small for the unit' },
+      );
+    }
+    if (inStockUnit === null) {
       throw fail.validation(`${ing.name} is kept in ${ing.unit}; write its quantity in ${ing.unit}${ing.unit === 'kg' ? ' or g' : ing.unit === 'g' ? ' or kg' : ing.unit === 'ltr' ? ' or ml' : ing.unit === 'ml' ? ' or ltr' : ''}.`, {
         [`recipe.${i}.unit`]: `Use ${ing.unit}`,
       });
@@ -211,13 +220,24 @@ export function addItemsToMenu(ctx: Ctx, itemIds: number[]): { added: number } {
   assertMenuOn(ctx);
   const ids = [...new Set(itemIds.map(Number))];
   if (!ids.length) return { added: 0 };
-  const rows = ctx.db.all<{ id: number; name: string; menu: number; used: number }>(
-    `SELECT i.id, i.name, i.menu, EXISTS (SELECT 1 FROM recipe_items r WHERE r.ingredient_id = i.id) AS used
+  const rows = ctx.db.all<{ id: number; name: string; unit: string; menu: number; sellable: number; used: number }>(
+    `SELECT i.id, i.name, i.unit, i.menu, i.sellable, EXISTS (SELECT 1 FROM recipe_items r WHERE r.ingredient_id = i.id) AS used
        FROM items i WHERE i.id IN (${ids.join(',')})`,
   );
   if (rows.length !== ids.length) throw fail.notFound('Item');
-  const used = rows.find((r) => r.used);
-  if (used) throw fail.validation(`${used.name} is an ingredient in a recipe, so it cannot be a dish.`);
+  const used = rows.find((r) => r.used || !r.sellable);
+  if (used) throw fail.validation(`${used.name} is an ingredient, so it cannot be a dish.`);
+  // A dish is not stocked itself: stock left on it would stay in the books for ever.
+  const onHand = stockOnHand(
+    ctx,
+    rows.filter((r) => !r.menu).map((r) => r.id),
+  );
+  const stocked = rows.find((r) => (onHand.get(r.id) ?? 0) !== 0);
+  if (stocked) {
+    throw fail.validation(
+      `${stocked.name} has ${formatQty(onHand.get(stocked.id)!)} ${stocked.unit} in stock. Bring it to 0 with a stock count first, then put it on the menu.`,
+    );
+  }
   const add = rows.filter((r) => !r.menu);
   if (!add.length) return { added: 0 };
   ctx.db.run(`UPDATE items SET menu = 1, sellable = 1, track_stock = 0, updated_at = ? WHERE id IN (${add.map((r) => r.id).join(',')})`, [now(ctx)]);
@@ -280,11 +300,12 @@ export function createIngredient(ctx: Ctx, input: IngredientInput): Ingredient {
 /* ------------------------------ Selling dishes ------------------------------ */
 
 /**
- * Ingredients used by bill lines that sell dishes (menu on). Each dish line gives one movement per
- * ingredient: - qty sold x recipe quantity, in the ingredient's unit.
+ * Ingredients used by bill lines that sell dishes (menu on, or `force` for a bill that already took
+ * ingredients out). Each dish line gives one movement per ingredient: - qty sold x recipe quantity, in the
+ * ingredient's unit, with a note naming the dish (which marks it as an ingredient movement).
  */
-export function recipeMoves(ctx: Ctx, lines: Array<{ itemId: number | null; qty: number; lineNo: number; name: string }>): MoveInput[] {
-  if (!menuEnabled(ctx)) return [];
+export function recipeMoves(ctx: Ctx, lines: Array<{ itemId: number | null; qty: number; lineNo: number; name: string }>, opts: { force?: boolean } = {}): MoveInput[] {
+  if (!opts.force && !menuEnabled(ctx)) return [];
   const dishIds = [...new Set(lines.map((l) => l.itemId).filter((x): x is number => !!x))];
   const rows = recipeRows(ctx, dishIds);
   if (!rows.length) return [];

@@ -2,7 +2,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
-import { createTestApp, ledgerProblems, OWNER } from './helpers';
+import { createTestApp, ledgerProblems, OWNER, testDir } from './helpers';
 import { BillforceApp } from '../src/core/app';
 import { TestPlatform } from '../src/core/platform';
 import { ALREADY_SET_UP_MESSAGE } from '../src/core/modules/data/backup';
@@ -189,8 +189,9 @@ describe('first run on a new computer: restore instead of setting up', () => {
 
   it('is not available for an in-memory database', async () => {
     const { file } = await oldComputerBackup();
-    const platform = new TestPlatform('/tmp/billforce-test-docs');
-    const app = new BillforceApp({ dataDir: '/tmp/billforce-test', dbPath: ':memory:', platform, version: 'test' });
+    const root = testDir();
+    const platform = new TestPlatform(path.join(root, 'docs'));
+    const app = new BillforceApp({ dataDir: path.join(root, 'data'), dbPath: ':memory:', platform, version: 'test' });
     openApps.push(app);
     platform.nextPickFile = file;
     expect((await app.invoke('setup.pickBackup')).ok).toBe(true);

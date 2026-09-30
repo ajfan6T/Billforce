@@ -1,3 +1,7 @@
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
+import { randomUUID } from 'node:crypto';
 import { BillforceApp } from '../src/core/app';
 import { TestPlatform } from '../src/core/platform';
 import type { ApiInput, ApiOutput, RouteName } from '../src/core/api/routes';
@@ -7,6 +11,11 @@ import { toTimestamp } from '../src/shared/dates';
 import type { Role } from '../src/shared/constants';
 
 export const OWNER = { username: 'owner', password: 'owner-pass' };
+
+/** A folder path of its own for one test app (not created until used). */
+export function testDir(): string {
+  return path.join(os.tmpdir(), `bf-test-${randomUUID()}`);
+}
 
 export class ApiCallError extends Error {
   constructor(
@@ -40,8 +49,11 @@ export interface TestApp {
  */
 export async function createTestApp(opts: { today?: string; booksStart?: string; openingCash?: number } = {}): Promise<TestApp> {
   let current = new Date(`${opts.today ?? '2026-09-28'}T10:00:00`);
-  const platform = new TestPlatform('/tmp/billforce-test-docs');
-  const app = new BillforceApp({ dataDir: '/tmp/billforce-test', dbPath: ':memory:', platform, version: 'test', clock: () => new Date(current) });
+  // Each app gets its own folders (created only when something is saved there): test files run in
+  // parallel with the same fixed clock, so shared folders would mix up their backups and exports.
+  const root = testDir();
+  const platform = new TestPlatform(path.join(root, 'docs'));
+  const app = new BillforceApp({ dataDir: path.join(root, 'data'), dbPath: ':memory:', platform, version: 'test', clock: () => new Date(current) });
 
   const t: TestApp = {
     app,
@@ -77,7 +89,10 @@ export async function createTestApp(opts: { today?: string; booksStart?: string;
     async loginOwner() {
       await t.call('auth.login', OWNER);
     },
-    close: () => app.close(),
+    close: () => {
+      app.close();
+      fs.rmSync(root, { recursive: true, force: true });
+    },
   };
 
   await t.call('setup.complete', {

@@ -183,3 +183,55 @@ describe('dishes and recipes', () => {
     expect((await t.call('menu.list')).map((x) => x.item.name)).toEqual(['Dal Makhani']);
   });
 });
+
+describe('menu: second review fixes', () => {
+  it('an item with stock, or an ingredient, cannot be put on the menu', async () => {
+    t = await createTestApp();
+    await turnOn(t);
+    const samosa = await t.call('items.create', { name: 'Samosa', unit: 'pcs', rate: 2000 });
+    await t.call('stock.adjust', { kind: 'count', reason: 'Start', lines: [{ itemId: samosa.id, counted: 10, unitCost: 1000 }] });
+    expect((await t.fails('menu.addItems', { itemIds: [samosa.id] })).message).toMatch(/Samosa has 10 pcs in stock/);
+    const paneer = await t.call('menu.createIngredient', { name: 'Paneer', unit: 'kg' });
+    expect((await t.fails('menu.addItems', { itemIds: [paneer.id] })).message).toMatch(/Paneer is an ingredient/);
+  });
+
+  it('editing an old bill keeps the ingredients it took out (menu turned off, or recipe changed since)', async () => {
+    t = await createTestApp();
+    await turnOn(t);
+    const { chicken, dish } = await kitchen(t);
+    const bill = await t.call('sales.create', { items: [{ itemId: dish.item.id, itemName: 'Butter Chicken', qty: 2, rate: 32000 }], payments: [{ mode: 'cash', amount: 64000 }] });
+    expect(await qtyOf(t, 'Chicken')).toBe(4.5);
+    // The recipe changes: the old bill, edited for its remarks only, keeps what it used.
+    await t.call('menu.save', { id: dish.item.id, name: 'Butter Chicken', rate: 32000, recipe: [{ ingredientId: chicken.id, qty: 300, unit: 'g' }] });
+    const edit = { id: bill.id, items: [{ itemId: dish.item.id, itemName: 'Butter Chicken', qty: 2, rate: 32000 }], payments: [{ mode: 'cash' as const, amount: 64000 }], remarks: 'Table 4' };
+    await t.call('sales.update', edit);
+    expect([await qtyOf(t, 'Chicken'), await qtyOf(t, 'Butter'), await qtyOf(t, 'Cream')]).toEqual([4.5, 0.96, 1.9]);
+    // The menu is turned off: still the same.
+    await t.call('settings.update', { section: 'menu', values: { enabled: false } });
+    await t.call('sales.update', { ...edit, remarks: 'Table 5' });
+    expect(await qtyOf(t, 'Chicken')).toBe(4.5);
+    // Changing the dishes uses the recipe now (300 g x 3), even with the menu off.
+    await t.call('sales.update', { ...edit, items: [{ itemId: dish.item.id, itemName: 'Butter Chicken', qty: 3, rate: 32000 }], payments: [{ mode: 'cash', amount: 96000 }] });
+    expect([await qtyOf(t, 'Chicken'), await qtyOf(t, 'Butter')]).toEqual([4.1, 1]);
+  });
+
+  it('an ingredient cannot change to a unit its recipes cannot be written in', async () => {
+    t = await createTestApp();
+    await turnOn(t, { stock: false });
+    const rice = await t.call('menu.createIngredient', { name: 'Rice', unit: 'kg' });
+    await t.call('menu.save', { name: 'Jeera Rice', rate: 15000, recipe: [{ ingredientId: rice.id, qty: 150, unit: 'g' }] });
+    expect((await t.fails('items.update', { id: rice.id, name: 'Rice', unit: 'pcs', rate: 0 })).message).toMatch(/in the recipe of Jeera Rice in g/);
+    // g still works for a recipe in g.
+    expect((await t.call('items.update', { id: rice.id, name: 'Rice', unit: 'g', rate: 0 })).unit).toBe('g');
+  });
+
+  it('refuses recipe amounts smaller than the stock can count', async () => {
+    t = await createTestApp();
+    await turnOn(t);
+    const saffron = await t.call('menu.createIngredient', { name: 'Saffron', unit: 'kg' });
+    const e = await t.fails('menu.save', { name: 'Kesar Pulao', rate: 30000, recipe: [{ ingredientId: saffron.id, qty: 0.4, unit: 'g' }] });
+    expect(e.message).toMatch(/Keep Saffron in a smaller unit/);
+    // 2 g of a kg item is fine (0.002 kg).
+    expect((await t.call('menu.save', { name: 'Kesar Pulao', rate: 30000, recipe: [{ ingredientId: saffron.id, qty: 2, unit: 'g' }] })).recipe[0].qtyInStockUnit).toBe(0.002);
+  });
+});

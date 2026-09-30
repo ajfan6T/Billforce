@@ -218,7 +218,7 @@ describe('receipt preview & test print', () => {
   it('describes the installation', async () => {
     const t = await createTestApp();
     const a = await t.call('settings.about');
-    expect(a).toMatchObject({ version: 'test', dataDir: '/tmp/billforce-test', dbPath: ':memory:', platform: 'test', booksStartDate: '2026-04-01' });
-    expect(a.backupFolder).toBe(path.join('/tmp/billforce-test-docs', 'Billforce Backups'));
+    expect(a).toMatchObject({ version: 'test', dataDir: t.app.info.dataDir, dbPath: ':memory:', platform: 'test', booksStartDate: '2026-04-01' });
+    expect(a.backupFolder).toBe(path.join(t.platform.documentsDir(), 'Billforce Backups'));
   });
 });

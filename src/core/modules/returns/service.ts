@@ -869,14 +869,18 @@ export function createCreditNote(ctx: Ctx, input: CreateCreditNoteInput): Credit
     });
   });
 
-  // Stock: goods returned go back into stock on the return date.
+  // Stock: goods returned go back into stock on the return date. A return against a bill brings back only
+  // what that bill took out (not items of a bill from before stock tracking, nor the food of a dish).
   if (stockEnabled(ctx) && items.length) {
+    const takenOut = billId
+      ? new Set(ctx.db.all<{ item_id: number }>("SELECT DISTINCT item_id FROM stock_moves WHERE source_type = 'bill' AND source_id = ?", [billId]).map((r) => r.item_id))
+      : null;
     writeDocumentMoves(
       ctx,
       'credit_note',
       id,
       date,
-      items.filter((it) => it.itemId).map((it, i) => ({ itemId: it.itemId!, qty: it.qty, kind: 'sale_return' as const, line: i + 1 })),
+      items.flatMap((it, i) => (it.itemId && (!takenOut || takenOut.has(it.itemId)) ? [{ itemId: it.itemId, qty: it.qty, kind: 'sale_return' as const, line: i + 1 }] : [])),
     );
   }
 

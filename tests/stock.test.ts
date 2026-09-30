@@ -380,3 +380,62 @@ describe('migration 6 (running stock average)', () => {
     ]);
   });
 });
+
+describe('second review fixes', () => {
+  const on = (t: TestApp, enabled = true) => t.call('settings.update', { section: 'stock', values: { enabled } });
+  const buy = (t: TestApp, id: number, name: string, qty: number, rate: number) =>
+    t.call('purchases.create', { supplierName: 'M', items: [{ description: name, itemId: id, qty, rate }], payments: [{ mode: 'cash', amount: Math.round(qty * rate) }] });
+  const sell = (t: TestApp, id: number, name: string, qty: number, rate: number) =>
+    t.call('sales.create', { items: [{ itemId: id, itemName: name, qty, rate }], payments: [{ mode: 'cash', amount: Math.round(qty * rate) }] });
+  const valueOf = async (t: TestApp, name: string) => (await t.call('stock.summary', {})).items.find((i) => i.name === name)?.value;
+
+  it('editing a bill or purchase keeps its place in the day, so the stock value does not change', async () => {
+    t = await createTestApp();
+    await on(t);
+    const a = await item(t, 'A', 30000);
+    const p1 = await buy(t, a.id, 'A', 10, 10000);
+    const bill = await sell(t, a.id, 'A', 5, 30000);
+    await buy(t, a.id, 'A', 10, 20000);
+    const v = await valueOf(t, 'A');
+    await t.call('sales.update', { id: bill.id, items: [{ itemId: a.id, itemName: 'A', qty: 5, rate: 30000 }], payments: [{ mode: 'cash', amount: 150000 }], remarks: 'typo fix' });
+    expect(await valueOf(t, 'A')).toBe(v);
+    await t.call('purchases.update', { id: p1.id, supplierName: 'M', items: [{ description: 'A', itemId: a.id, qty: 10, rate: 10000 }], payments: [{ mode: 'cash', amount: 100000 }], remarks: 'note' });
+    expect(await valueOf(t, 'A')).toBe(v);
+  });
+
+  it('a return against a bill brings back only what that bill took out of stock', async () => {
+    t = await createTestApp();
+    const cup = await item(t, 'Cup', 5000);
+    const bill = await sell(t, cup.id, 'Cup', 2, 5000);
+    await on(t);
+    await t.call('items.update', { id: cup.id, name: 'Cup', unit: 'pcs', rate: 5000, trackStock: true });
+    const line = (await t.call('sales.get', { id: bill.id })).items[0];
+    await t.call('returns.create', { kind: 'return', billId: bill.id, items: [{ billItemId: line.id, qty: 2 }], refundMode: 'cash' });
+    expect(await qtyOf(t, 'Cup')).toBe(0);
+  });
+
+  it('while tracking is off, cancelling or editing an old bill does not put stock back in the books', async () => {
+    t = await createTestApp();
+    await on(t);
+    const a = await item(t, 'A', 10000);
+    await buy(t, a.id, 'A', 10, 5000);
+    const bill = await sell(t, a.id, 'A', 4, 10000);
+    await on(t, false);
+    await t.call('sales.cancel', { id: bill.id, reason: 'Wrong bill' });
+    expect(t.app.db.value<number>('SELECT COALESCE(SUM(qty), 0) FROM stock_moves WHERE item_id = ?', [a.id], 0)).toBe(0);
+    const bs = await t.call('reports.balanceSheet', { asOf: '2026-09-28' });
+    expect(bs.figures.stock).toBe(0);
+    expect(bs.totals.balanced).toBe(true);
+    // The write-off itself cannot be cancelled while tracking is off.
+    const offAdj = (await t.call('stock.adjustments', { from: '2026-09-01', to: '2026-09-30' }))[0];
+    expect((await t.fails('stock.cancelAdjustment', { id: offAdj.id, reason: 'x' })).message).toMatch(/Stock tracking is off/);
+  });
+
+  it("an item's unit cannot change once it has stock history", async () => {
+    t = await createTestApp();
+    await on(t);
+    const rice = await item(t, 'Rice', 6000, { unit: 'kg' });
+    await buy(t, rice.id, 'Rice', 10, 5000);
+    expect((await t.fails('items.update', { id: rice.id, name: 'Rice', unit: 'g', rate: 6000 })).message).toMatch(/stock history in kg/);
+  });
+});

@@ -151,7 +151,9 @@ made while tracking is on (`stock_tracked`) writes its `stock_moves` through `wr
 +qty, purchase lines that name an item +qty at their cost after the discount and without claimed GST, counts /
 adjustments ±qty) and rewrites them when edited; cancelling removes them. An edited document keeps to the items it
 moved before plus tracked items it did not have (`before`), so ticking "Track stock" later never changes old documents;
-an item with stock cannot be unticked. Selling below zero is allowed with a warning (`shortStockWarnings`).
+an item with stock cannot be unticked, and an item with stock history cannot change its unit. Rewritten moves reuse
+the old move ids, so an edited document keeps its place in the day. A return against a bill brings back only items
+that bill took out. Selling below zero is allowed with a warning (`shortStockWarnings`).
 Value = quantity × **moving average cost**: each move stores the running quantity and average after it
 (`bal_qty`, `avg_cost`, kept by `revalueStock` in `stock/running.ts` from the changed date on; order = opening stock
 first, then date, id). Costed receipts (opening stock, purchases, stock added or counted at a cost) re-average; other
@@ -165,7 +167,9 @@ last closing stock. Opening stock (on the books start date) is an opening balanc
 (`stock.saveOpening`, needs `stock.manage` + `accounts.manage`). Journals cannot post to STOCK. Stock items can only
 be bought into Purchases or a direct expense (a fixed asset or running expense would count them twice). Turning
 tracking off hides the stock screens and takes the stock left out with a system adjustment dated that day
-(`writeOffStockLeft`), so profit stops counting it and the next closing clears STOCK; the accounting keeps working
+(`writeOffStockLeft`; again, dated today, whenever editing or cancelling an older document brings stock back while
+tracking is off; adjustments cannot be cancelled while it is off), so profit stops counting it and the next closing
+clears STOCK; the accounting keeps working
 while any stock history exists (`stockInBooks`). Cost prices (average cost, stock value, opening cost, recipe cost)
 are shown only with `stock.manage`, `purchases.manage`, `suppliers.view` or `reports.financial` (`stock/costs.ts`);
 cashiers see quantities.
@@ -175,8 +179,12 @@ recipe (`recipe_items`: ingredient, quantity and unit for one plate). Ingredient
 in stock, bought in purchase bills, never offered by `items.search` / `items.recent`. Dishes are never stock-tracked
 themselves (`updateItem` and `trackAllItems` keep `track_stock = 0`). While the menu and stock tracking are on, a bill's
 stock moves (`billStockMoves` in sales) add one `sale` move per ingredient per dish line: −(qty sold × recipe qty
-converted with `convertQty`, g→kg, ml→ltr), noted "Butter Chicken x 2"; short-stock warnings include them. Moves
-use the recipe when the bill is saved or edited; cancelling removes them; returns of dishes move nothing. Recipe
+converted with `convertQty`, g→kg, ml→ltr), noted "Butter Chicken x 2" (the note marks an ingredient move);
+short-stock warnings include them. An edited bill keeps its recorded ingredient moves while its dishes and
+quantities are unchanged, else uses today's recipes (also with the menu off, once it took ingredients out);
+cancelling removes them; returns of dishes move nothing. Recipe amounts must be countable in the ingredient's unit
+(3 decimals); an ingredient's unit cannot change to one its recipes cannot convert to; items with stock or
+ingredients cannot be put on the menu. Recipe
 costs use the ingredients' average cost (`menu.costing`). Turning the menu off hides its screens; dishes stay
 ordinary items and their bills stop moving ingredients.
 

@@ -5,6 +5,7 @@ import { logActivity } from '../../audit';
 import { formatINR } from '../../../shared/money';
 import { formatQty } from '../../../shared/money';
 import { formatRate, hsnProblem, isGstRate } from '../../../shared/gst';
+import { convertQty } from '../../../shared/units';
 import { stockEnabled, stockOnHand } from '../stock/valuation';
 import { defaultTrackStock } from '../stock/service';
 
@@ -220,6 +221,24 @@ export function createItem(ctx: Ctx, input: ItemInput): Item {
 export function updateItem(ctx: Ctx, id: number, input: ItemInput): Item {
   const before = getItem(ctx, id);
   assertUniqueName(ctx, input.name, id);
+  const unit = input.unit || 'pcs';
+  if (unit !== before.unit) {
+    // Stock quantities are kept in the item's unit: a new unit would misread all of them.
+    if (ctx.db.value<number>('SELECT EXISTS (SELECT 1 FROM stock_moves WHERE item_id = ?)', [id], 0)) {
+      throw new AppError('VALIDATION', `${before.name} has stock history in ${before.unit}, so its unit cannot change. Add a new item with the other unit instead.`, {
+        unit: 'Has stock history',
+      });
+    }
+    // Recipes give this ingredient in their own unit (g for kg ...): the new unit must still convert.
+    const bad = ctx.db
+      .all<{ dish: string; unit: string }>('SELECT d.name AS dish, r.unit FROM recipe_items r JOIN items d ON d.id = r.dish_id WHERE r.ingredient_id = ? ORDER BY d.name', [id])
+      .find((r) => convertQty(1, r.unit, unit) === null);
+    if (bad) {
+      throw new AppError('VALIDATION', `${before.name} is in the recipe of ${bad.dish} in ${bad.unit}, which cannot be written in ${unit}. Change that recipe first.`, {
+        unit: 'Used in recipes',
+      });
+    }
+  }
   if (input.trackStock === false && before.trackStock && !before.menu) {
     // Stock that is on the shelf would stay in the books without ever moving again.
     const left = stockOnHand(ctx, [id]).get(id) ?? 0;
